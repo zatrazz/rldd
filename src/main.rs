@@ -62,10 +62,10 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
     };
 
     match kind {
-        object::FileKind::Elf32 => return parse_header_elf32(elf, data),
-        object::FileKind::Elf64 => return parse_header_elf64(elf, data),
-		_ => return Err("Invalid ELF file")
-    };
+        object::FileKind::Elf32 => parse_header_elf32(elf, data),
+        object::FileKind::Elf64 => parse_header_elf64(elf, data),
+        _ => Err("Invalid ELF file"),
+    }
 }
 
 fn parse_header_elf32<Elf: FileHeader<Endian = Endianness>>(
