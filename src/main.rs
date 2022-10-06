@@ -110,13 +110,10 @@ fn parse_elf_program_headers<Elf: FileHeader>(
     segments: &[Elf::ProgramHeader],
 ) -> Result<DtNeededVec, &'static str>
 {
-    for segment in segments {
-        match segment.p_type(endian) {
-            PT_DYNAMIC => return parse_elf_segment_dynamic(endian, data, elf, segments, segment),
-            _ => {}
-        }
+    match segments.iter().find(|&&seg| seg.p_type(endian) == PT_DYNAMIC) {
+        Some(seg) => parse_elf_segment_dynamic(endian, data, elf, segments, seg),
+        None => Err("No dynamic segments found")
     }
-    Err("No dynamic segments found")
 }
 
 fn parse_elf_segment_dynamic<Elf: FileHeader>(
