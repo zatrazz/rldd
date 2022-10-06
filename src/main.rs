@@ -26,12 +26,10 @@ fn parse_object(
     };
 
     match kind {
-        object::FileKind::Elf32 => return parse_elf32(data),
-        object::FileKind::Elf64 => return parse_elf64(data),
-		_ => {}
-    };
-
-    Err("Invalid object")
+        object::FileKind::Elf32 => parse_elf32(data),
+        object::FileKind::Elf64 => parse_elf64(data),
+        _ => Err("Invalid object"),
+    }
 }
 
 fn parse_elf32(
@@ -62,10 +60,10 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
     };
 
     match kind {
-        object::FileKind::Elf32 => return parse_header_elf32(elf, data),
-        object::FileKind::Elf64 => return parse_header_elf64(elf, data),
-		_ => return Err("Invalid ELF file")
-    };
+        object::FileKind::Elf32 => parse_header_elf32(elf, data),
+        object::FileKind::Elf64 => parse_header_elf64(elf, data),
+        _ => Err("Invalid ELF file"),
+    }
 }
 
 fn parse_header_elf32<Elf: FileHeader<Endian = Endianness>>(
@@ -92,14 +90,14 @@ fn parse_header_elf64<Elf: FileHeader<Endian = Endianness>>(
     elf: &Elf,
     data: &[u8]) -> Result<DtNeededVec, &'static str>
 {
-    if let Some(endian) = elf.endian().handle_err() {
-        if let Some(segments) = elf.program_headers(endian, data).handle_err() {
-            return parse_elf_program_headers(endian, data, elf, segments);
-        } else {
-            return Err("invalid segment");
-        }
-    } else {
-        return Err("invalid endianess");
+    let endian = match elf.endian() {
+        Ok(val) => val,
+        Err(_) => return Err("invalid endianess"),
+    };
+
+    match elf.program_headers(endian, data) {
+        Ok(segments) => parse_elf_program_headers(endian, data, elf, segments),
+        Err(_) => Err("invalid segment"),
     }
 }
 
@@ -110,13 +108,10 @@ fn parse_elf_program_headers<Elf: FileHeader>(
     segments: &[Elf::ProgramHeader],
 ) -> Result<DtNeededVec, &'static str>
 {
-    for segment in segments {
-        match segment.p_type(endian) {
-            PT_DYNAMIC => return parse_elf_segment_dynamic(endian, data, elf, segments, segment),
-            _ => {}
-        }
+    match segments.iter().find(|&&seg| seg.p_type(endian) == PT_DYNAMIC) {
+        Some(seg) => parse_elf_segment_dynamic(endian, data, elf, segments, seg),
+        None => Err("No dynamic segments found")
     }
-    Err("No dynamic segments found")
 }
 
 fn parse_elf_segment_dynamic<Elf: FileHeader>(
@@ -127,17 +122,19 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
     segment: &Elf::ProgramHeader,
 ) -> Result<DtNeededVec, &'static str>
 {
-    if let Some(Some(dynamic)) = segment.dynamic(endian, data).handle_err() {
+    if let Ok(Some(dynamic)) = segment.dynamic(endian, data) {
         let mut strtab = 0;
         let mut strsz = 0;
-        for d in dynamic {
+
+        dynamic.iter().for_each(|d| {
             let tag = d.d_tag(endian).into();
             if tag == DT_STRTAB.into() {
                 strtab = d.d_val(endian).into();
             } else if tag == DT_STRSZ.into() {
                 strsz = d.d_val(endian).into();
             }
-        }
+        });
+
         let mut dynstr = StringTable::default();
         // TODO: print error if DT_STRTAB/DT_STRSZ are invalid
         for s in segments {
@@ -161,23 +158,21 @@ fn parse_elf_dynamic<Elf: FileHeader>(
 {
     let mut dtneeded = DtNeededVec::new();
     for d in dynamic {
-        let tag = d.d_tag(endian).into();
-        if let Some(_tag) = d.tag32(endian) {
-            if d.is_string(endian) {
-                let s = d.string(endian, dynstr);
-                let s = s.handle_err();
-                if let Some(s) = s {
-                    if let Ok(s) = str::from_utf8(s) {
-                        let dtneed = DtNeeded {
-                            name: s.to_string()
-                        };
-                        dtneeded.push(dtneed);
-                    }
+        if d.d_tag(endian).into() == DT_NULL.into() {
+            break;
+        }
+
+        if d.tag32(endian).is_none() || !d.is_string(endian) {
+            continue;
+        }
+
+        match d.string(endian, dynstr) {
+            Err(_) => continue,
+            Ok(s) => {
+                if let Ok(s) = str::from_utf8(s) {
+                    dtneeded.push(DtNeeded { name: s.to_string() });
                 }
             }
-        }
-        if tag == DT_NULL.into() {
-            break;
         }
     }
     Ok(dtneeded)
