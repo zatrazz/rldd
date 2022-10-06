@@ -92,14 +92,14 @@ fn parse_header_elf64<Elf: FileHeader<Endian = Endianness>>(
     elf: &Elf,
     data: &[u8]) -> Result<DtNeededVec, &'static str>
 {
-    if let Some(endian) = elf.endian().handle_err() {
-        if let Some(segments) = elf.program_headers(endian, data).handle_err() {
-            return parse_elf_program_headers(endian, data, elf, segments);
-        } else {
-            return Err("invalid segment");
-        }
-    } else {
-        return Err("invalid endianess");
+    let endian = match elf.endian() {
+        Ok(val) => val,
+        Err(_) => return Err("invalid endianess"),
+    };
+
+    match elf.program_headers(endian, data) {
+        Ok(segments) => parse_elf_program_headers(endian, data, elf, segments),
+        Err(_) => Err("invalid segment"),
     }
 }
 
