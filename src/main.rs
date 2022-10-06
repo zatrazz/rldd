@@ -158,23 +158,21 @@ fn parse_elf_dynamic<Elf: FileHeader>(
 {
     let mut dtneeded = DtNeededVec::new();
     for d in dynamic {
-        let tag = d.d_tag(endian).into();
-        if let Some(_tag) = d.tag32(endian) {
-            if d.is_string(endian) {
-                let s = d.string(endian, dynstr);
-                let s = s.handle_err();
-                if let Some(s) = s {
-                    if let Ok(s) = str::from_utf8(s) {
-                        let dtneed = DtNeeded {
-                            name: s.to_string()
-                        };
-                        dtneeded.push(dtneed);
-                    }
+        if d.d_tag(endian).into() == DT_NULL.into() {
+            break;
+        }
+
+        if d.tag32(endian).is_none() || !d.is_string(endian) {
+            continue;
+        }
+
+        match d.string(endian, dynstr) {
+            Err(_) => continue,
+            Ok(s) => {
+                if let Ok(s) = str::from_utf8(s) {
+                    dtneeded.push(DtNeeded { name: s.to_string() });
                 }
             }
-        }
-        if tag == DT_NULL.into() {
-            break;
         }
     }
     Ok(dtneeded)
