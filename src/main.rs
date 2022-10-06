@@ -124,17 +124,19 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
     segment: &Elf::ProgramHeader,
 ) -> Result<DtNeededVec, &'static str>
 {
-    if let Some(Some(dynamic)) = segment.dynamic(endian, data).handle_err() {
+    if let Ok(Some(dynamic)) = segment.dynamic(endian, data) {
         let mut strtab = 0;
         let mut strsz = 0;
-        for d in dynamic {
+
+        dynamic.iter().for_each(|d| {
             let tag = d.d_tag(endian).into();
             if tag == DT_STRTAB.into() {
                 strtab = d.d_val(endian).into();
             } else if tag == DT_STRSZ.into() {
                 strsz = d.d_val(endian).into();
             }
-        }
+        });
+
         let mut dynstr = StringTable::default();
         // TODO: print error if DT_STRTAB/DT_STRSZ are invalid
         for s in segments {
