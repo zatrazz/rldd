@@ -26,12 +26,10 @@ fn parse_object(
     };
 
     match kind {
-        object::FileKind::Elf32 => return parse_elf32(data),
-        object::FileKind::Elf64 => return parse_elf64(data),
-		_ => {}
-    };
-
-    Err("Invalid object")
+        object::FileKind::Elf32 => parse_elf32(data),
+        object::FileKind::Elf64 => parse_elf64(data),
+        _ => Err("Invalid object"),
+    }
 }
 
 fn parse_elf32(
