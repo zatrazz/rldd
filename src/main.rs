@@ -1,9 +1,11 @@
-use std::{fmt, str, env, fs, process};
+use std::{env, fmt, fs, process, str};
 
-use object::Endianness;
 use object::elf::*;
 use object::read::elf::*;
 use object::read::StringTable;
+use object::Endianness;
+
+mod ld_conf;
 
 struct DtNeeded {
     name: String,
@@ -16,13 +18,10 @@ impl fmt::Display for DtNeeded {
 
 type DtNeededVec = Vec<DtNeeded>;
 
-fn parse_object(
-    data: &[u8]
-    ) -> Result<DtNeededVec, &'static str>
-{
+fn parse_object(data: &[u8]) -> Result<DtNeededVec, &'static str> {
     let kind = match object::FileKind::parse(data) {
-		Ok(file) => file,
-        Err(_err) => return Err("Failed to parse file")
+        Ok(file) => file,
+        Err(_err) => return Err("Failed to parse file"),
     };
 
     match kind {
@@ -32,17 +31,11 @@ fn parse_object(
     }
 }
 
-fn parse_elf32(
-    _data: &[u8]
-    ) -> Result<DtNeededVec, &'static str>
-{
+fn parse_elf32(_data: &[u8]) -> Result<DtNeededVec, &'static str> {
     Err("Not implemented")
 }
 
-fn parse_elf64(
-    data: &[u8]
-    ) -> Result<DtNeededVec, &'static str>
-{
+fn parse_elf64(data: &[u8]) -> Result<DtNeededVec, &'static str> {
     if let Some(elf) = FileHeader64::<Endianness>::parse(data).handle_err() {
         return parse_elf(elf, data);
     }
@@ -51,12 +44,11 @@ fn parse_elf64(
 
 fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
     elf: &Elf,
-    data: &[u8]
-    ) -> Result<DtNeededVec, &'static str>
-{
+    data: &[u8],
+) -> Result<DtNeededVec, &'static str> {
     let kind = match object::FileKind::parse(data) {
-		Ok(file) => file,
-        _ => return Err("Failed to parse file")
+        Ok(file) => file,
+        _ => return Err("Failed to parse file"),
     };
 
     match kind {
@@ -68,8 +60,8 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
 
 fn parse_header_elf32<Elf: FileHeader<Endian = Endianness>>(
     _elf: &Elf,
-    _data: &[u8]) -> Result<DtNeededVec, &'static str>
-{
+    _data: &[u8],
+) -> Result<DtNeededVec, &'static str> {
     Err("Not implemented")
 }
 
@@ -88,8 +80,8 @@ impl<T, E: fmt::Display> HandleErr<T> for Result<T, E> {
 
 fn parse_header_elf64<Elf: FileHeader<Endian = Endianness>>(
     elf: &Elf,
-    data: &[u8]) -> Result<DtNeededVec, &'static str>
-{
+    data: &[u8],
+) -> Result<DtNeededVec, &'static str> {
     let endian = match elf.endian() {
         Ok(val) => val,
         Err(_) => return Err("invalid endianess"),
@@ -106,11 +98,13 @@ fn parse_elf_program_headers<Elf: FileHeader>(
     data: &[u8],
     elf: &Elf,
     segments: &[Elf::ProgramHeader],
-) -> Result<DtNeededVec, &'static str>
-{
-    match segments.iter().find(|&&seg| seg.p_type(endian) == PT_DYNAMIC) {
+) -> Result<DtNeededVec, &'static str> {
+    match segments
+        .iter()
+        .find(|&&seg| seg.p_type(endian) == PT_DYNAMIC)
+    {
         Some(seg) => parse_elf_segment_dynamic(endian, data, elf, segments, seg),
-        None => Err("No dynamic segments found")
+        None => Err("No dynamic segments found"),
     }
 }
 
@@ -120,8 +114,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
     elf: &Elf,
     segments: &[Elf::ProgramHeader],
     segment: &Elf::ProgramHeader,
-) -> Result<DtNeededVec, &'static str>
-{
+) -> Result<DtNeededVec, &'static str> {
     if let Ok(Some(dynamic)) = segment.dynamic(endian, data) {
         let mut strtab = 0;
         let mut strsz = 0;
@@ -154,8 +147,7 @@ fn parse_elf_dynamic<Elf: FileHeader>(
     _elf: &Elf,
     dynamic: &[Elf::Dyn],
     dynstr: StringTable,
-) -> Result<DtNeededVec, &'static str>
-{
+) -> Result<DtNeededVec, &'static str> {
     let mut dtneeded = DtNeededVec::new();
     for d in dynamic {
         if d.d_tag(endian).into() == DT_NULL.into() {
@@ -170,7 +162,9 @@ fn parse_elf_dynamic<Elf: FileHeader>(
             Err(_) => continue,
             Ok(s) => {
                 if let Ok(s) = str::from_utf8(s) {
-                    dtneeded.push(DtNeeded { name: s.to_string() });
+                    dtneeded.push(DtNeeded {
+                        name: s.to_string(),
+                    });
                 }
             }
         }
@@ -195,19 +189,14 @@ fn main() {
         }
     };
 
-	let file = match unsafe { memmap2::Mmap::map(&file) } {
+    let file = match unsafe { memmap2::Mmap::map(&file) } {
         Ok(mmap) => mmap,
         Err(err) => {
             eprintln!("Failed to map file '{}': {}", filename, err,);
             process::exit(1);
         }
-	};
+    };
 
-    /*
-    let stdout = io::stdout();
-    let stderr = io::stderr();
-    print_object(&mut stdout.lock(), &mut stderr.lock(), &*file);
-    */
     let dtneeded = parse_object(&*file);
     if dtneeded.is_ok() {
         for entry in dtneeded.unwrap() {
