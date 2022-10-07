@@ -3,8 +3,10 @@ name = "rldd"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 object = "0.29.0"
 memmap2 = "0.5.7"
+glob = "0.3.0"
+
+[dev-dependencies]
+tempfile = "3.3.0"
