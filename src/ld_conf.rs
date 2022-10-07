@@ -4,19 +4,14 @@ use std::io::{self, BufRead};
 use std::path::Path;
 
 pub fn parse_ld_so_conf(filename: &Path) -> Result<Vec<String>, &'static str> {
-    let lines = match read_lines(filename) {
+    let mut lines = match read_lines(filename) {
         Ok(lines) => lines,
         Err(_e) => return Err("Could not open the filename"),
     };
 
     let mut r = <Vec<String>>::new();
 
-    for line in lines {
-        let entry = match line {
-            Ok(entry) => entry,
-            _ => break,
-        };
-
+    while let Some(Ok(entry)) = lines.next() {
         // Remove leading whitespace.
         let entry = entry.trim_start();
         // Remove trailing comments.
