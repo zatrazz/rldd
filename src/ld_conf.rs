@@ -34,7 +34,8 @@ pub fn parse_ld_so_conf<P: AsRef<Path>>(filename: &P) -> Result<Vec<String>, &'s
                 },
                 None => return Err("Invalid ld.so.conf"),
             };
-        } else {
+        // hwcap directives is ignored.
+        } else if !entry.starts_with("hwcap") {
             r.push(entry.to_string());
         }
     }
@@ -117,6 +118,7 @@ mod tests {
         let filepath = tmpdir.path().join("ld.so.conf");
         let mut file = File::create(&filepath)?;
         write!(file, "include invalid\n")?;
+        write!(file, "hwcap ignored\n")?;
 
         // Invalid paths are ignored.
         match parse_ld_so_conf(&filepath) {
