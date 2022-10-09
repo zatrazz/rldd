@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{self, BufRead};
 use std::path::Path;
 
-pub fn parse_ld_so_conf(filename: &Path) -> Result<Vec<String>, &'static str> {
+pub fn parse_ld_so_conf<P: AsRef<Path>>(filename: &P) -> Result<Vec<String>, &'static str> {
     let mut lines = match read_lines(filename) {
         Ok(lines) => lines,
         Err(_e) => return Err("Could not open the filename"),
