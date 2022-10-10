@@ -36,7 +36,9 @@ pub fn parse_ld_so_conf<P: AsRef<Path>>(filename: &P) -> Result<Vec<String>, &'s
             };
         // hwcap directives is ignored.
         } else if !entry.starts_with("hwcap") {
-            r.push(entry.to_string());
+            if Path::new(entry).is_dir() {
+                r.push(entry.to_string());
+            }
         }
     }
 
@@ -107,14 +109,20 @@ mod tests {
         let tmpdir = TempDir::new()?;
         let filepath = tmpdir.path().join("ld.so.conf");
         let mut file = File::create(&filepath)?;
-        write!(file, "/usr/lib\n")?;
-        write!(file, "/usr/lib64\n")?;
+
+        let libdir1 = tmpdir.path().join("lib1");
+        fs::create_dir(&libdir1)?;
+        let libdir2 = tmpdir.path().join("lib2");
+        fs::create_dir(&libdir2)?;
+
+        write!(file, "{}\n", libdir1.display())?;
+        write!(file, "{}\n", libdir2.display())?;
 
         match parse_ld_so_conf(&filepath) {
             Ok(entries) => {
                 assert_eq!(entries.len(), 2);
-                assert_eq!(entries[0], "/usr/lib");
-                assert_eq!(entries[1], "/usr/lib64");
+                assert_eq!(entries[0], libdir1.to_str().unwrap());
+                assert_eq!(entries[1], libdir2.to_str().unwrap());
                 Ok(())
             }
             Err(e) => Err(Error::new(ErrorKind::Other, e)),
@@ -126,6 +134,7 @@ mod tests {
         let tmpdir = TempDir::new()?;
         let filepath = tmpdir.path().join("ld.so.conf");
         let mut file = File::create(&filepath)?;
+
         write!(file, "include invalid\n")?;
         write!(file, "hwcap ignored\n")?;
 
@@ -155,19 +164,29 @@ mod tests {
         let subfile2 = subdir2.join("include2");
         let mut file2 = File::create(&subfile2)?;
 
+        let libdir1 = tmpdir.path().join("lib1");
+        fs::create_dir(&libdir1)?;
+        let libdir2 = tmpdir.path().join("lib2");
+        fs::create_dir(&libdir2)?;
+
+        let libdir3 = tmpdir.path().join("lib3");
+        fs::create_dir(&libdir3)?;
+        let libdir4 = tmpdir.path().join("lib4");
+        fs::create_dir(&libdir4)?;
+
         write!(file, "include {}/subdir*/*\n", tmpdir.path().display())?;
-        write!(file, "/usr/lib\n")?;
-        write!(file, "/usr/lib64\n")?;
-        write!(file1, "/usr/local/lib\n")?;
-        write!(file2, "/usr/local/lib64\n")?;
+        write!(file, "{}\n", libdir1.display())?;
+        write!(file, "{}\n", libdir2.display())?;
+        write!(file1, "{}\n", libdir3.display())?;
+        write!(file2, "{}\n", libdir4.display())?;
 
         match parse_ld_so_conf(&filepath) {
             Ok(entries) => {
                 assert_eq!(entries.len(), 4);
-                assert_eq!(entries[0], "/usr/local/lib");
-                assert_eq!(entries[1], "/usr/local/lib64");
-                assert_eq!(entries[2], "/usr/lib");
-                assert_eq!(entries[3], "/usr/lib64");
+                assert_eq!(entries[0], libdir3.to_str().unwrap());
+                assert_eq!(entries[1], libdir4.to_str().unwrap());
+                assert_eq!(entries[2], libdir1.to_str().unwrap());
+                assert_eq!(entries[3], libdir2.to_str().unwrap());
                 Ok(())
             }
             Err(e) => Err(Error::new(ErrorKind::Other, e)),
@@ -190,16 +209,21 @@ mod tests {
         let subsubfilepath = subsubdir.join("include");
         let mut subsubfile = File::create(&subsubfilepath)?;
 
+        let libdir1 = tmpdir.path().join("lib1");
+        fs::create_dir(&libdir1)?;
+        let libdir2 = tmpdir.path().join("lib2");
+        fs::create_dir(&libdir2)?;
+
         write!(file, "include subdir/*\n")?;
         write!(subfile, "include subsubdir/*\n")?;
-        write!(subfile, "/usr/lib")?;
-        write!(subsubfile, "/usr/lib64")?;
+        write!(subfile, "{}", libdir1.display())?;
+        write!(subsubfile, "{}", libdir2.display())?;
 
         match parse_ld_so_conf(&filepath) {
             Ok(entries) => {
                 assert_eq!(entries.len(), 2);
-                assert_eq!(entries[0], "/usr/lib64");
-                assert_eq!(entries[1], "/usr/lib");
+                assert_eq!(entries[0], libdir2.to_str().unwrap());
+                assert_eq!(entries[1], libdir1.to_str().unwrap());
                 Ok(())
             }
             Err(e) => Err(Error::new(ErrorKind::Other, e)),
