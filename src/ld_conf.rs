@@ -28,7 +28,7 @@ pub fn parse_ld_so_conf<P: AsRef<Path>>(filename: &P) -> Result<Vec<String>, &'s
         if entry.starts_with("include") {
             let mut fields = entry.split_whitespace();
             match fields.nth(1) {
-                Some(e) => match parse_ld_so_conf_glob(e) {
+                Some(e) => match parse_ld_so_conf_glob(&filename.as_ref().parent(), e) {
                     Ok(mut v) => r.append(&mut v),
                     Err(e) => return Err(e),
                 },
@@ -51,10 +51,19 @@ where
     Ok(io::BufReader::new(file).lines())
 }
 
-fn parse_ld_so_conf_glob(filename: &str) -> Result<Vec<String>, &'static str> {
+fn parse_ld_so_conf_glob(root: &Option<&Path>, pattern: &str) -> Result<Vec<String>, &'static str> {
     let mut r = <Vec<String>>::new();
 
-    for entry in glob(filename).expect("Failed to read glob pattern") {
+    let filename = if !Path::new(pattern).is_absolute() && root.is_some() {
+        match Path::new(root.unwrap()).join(pattern).to_str() {
+            Some(filename) => filename.to_string(),
+            None => return Err("Invalid include entry"),
+        }
+    } else {
+        pattern.to_string()
+    };
+
+    for entry in glob(filename.as_str()).expect("Failed to read glob pattern") {
         match entry {
             Ok(path) => {
                 match parse_ld_so_conf(&path) {
@@ -79,7 +88,7 @@ mod tests {
 
     fn handle_err(e: Result<Vec<String>, &'static str>) -> Result<(), std::io::Error> {
         match e {
-            Ok(v) => Ok(()),
+            Ok(_v) => Ok(()),
             Err(e) => Err(Error::new(ErrorKind::Other, e)),
         }
     }
@@ -88,7 +97,7 @@ mod tests {
     fn parse_ld_conf_empty() -> Result<(), std::io::Error> {
         let tmpdir = TempDir::new()?;
         let filepath = tmpdir.path().join("ld.so.conf");
-        let mut file = File::create(&filepath)?;
+        File::create(&filepath)?;
 
         handle_err(parse_ld_so_conf(&filepath))
     }
@@ -159,6 +168,38 @@ mod tests {
                 assert_eq!(entries[1], "/usr/local/lib64");
                 assert_eq!(entries[2], "/usr/lib");
                 assert_eq!(entries[3], "/usr/lib64");
+                Ok(())
+            }
+            Err(e) => Err(Error::new(ErrorKind::Other, e)),
+        }
+    }
+
+    #[test]
+    fn parse_ld_conf_include_relative() -> Result<(), std::io::Error> {
+        let tmpdir = TempDir::new()?;
+        let filepath = tmpdir.path().join("ld.so.conf");
+        let mut file = File::create(&filepath)?;
+
+        let subdir = tmpdir.path().join("subdir");
+        fs::create_dir(&subdir)?;
+        let subfilepath = subdir.join("include");
+        let mut subfile = File::create(&subfilepath)?;
+
+        let subsubdir = tmpdir.path().join("subdir").join("subsubdir");
+        fs::create_dir(&subsubdir)?;
+        let subsubfilepath = subsubdir.join("include");
+        let mut subsubfile = File::create(&subsubfilepath)?;
+
+        write!(file, "include subdir/*\n")?;
+        write!(subfile, "include subsubdir/*\n")?;
+        write!(subfile, "/usr/lib")?;
+        write!(subsubfile, "/usr/lib64")?;
+
+        match parse_ld_so_conf(&filepath) {
+            Ok(entries) => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0], "/usr/lib64");
+                assert_eq!(entries[1], "/usr/lib");
                 Ok(())
             }
             Err(e) => Err(Error::new(ErrorKind::Other, e)),
