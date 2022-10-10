@@ -1,15 +1,54 @@
 use glob::glob;
 use std::fs::File;
 use std::io::{self, BufRead};
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::{fmt, fs};
 
-pub fn parse_ld_so_conf<P: AsRef<Path>>(filename: &P) -> Result<Vec<String>, &'static str> {
+#[derive(Debug, PartialEq)]
+pub struct SearchPath {
+    path: String,
+    dev: u64,
+    ino: u64,
+}
+impl fmt::Display for SearchPath {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{} ({},{})", self.path, self.dev, self.ino)
+    }
+}
+impl PartialEq<&str> for SearchPath {
+    fn eq(&self, other: &&str) -> bool {
+        self.path.as_str() == *other
+    }
+}
+
+// List of unique existent search path in the filesystem.
+type SearchPathVec = Vec<SearchPath>;
+
+fn add_searchpath(v: &mut SearchPathVec, entry: &str) {
+    match get_search_path(entry) {
+        Some(searchpath) => {
+            if !v.contains(&searchpath) {
+                v.push(searchpath);
+            }
+        },
+        None => {}
+    }
+}
+
+fn merge_searchpaths(v: &mut SearchPathVec, n: &mut SearchPathVec)
+{
+    n.retain(|i| !v.contains(i));
+    v.append(n)
+}
+
+pub fn parse_ld_so_conf<P: AsRef<Path>>(filename: &P) -> Result<SearchPathVec, &'static str> {
     let mut lines = match read_lines(filename) {
         Ok(lines) => lines,
         Err(_e) => return Err("Could not open the filename"),
     };
 
-    let mut r = <Vec<String>>::new();
+    let mut r = SearchPathVec::new();
 
     while let Some(Ok(entry)) = lines.next() {
         // Remove leading whitespace.
@@ -29,16 +68,14 @@ pub fn parse_ld_so_conf<P: AsRef<Path>>(filename: &P) -> Result<Vec<String>, &'s
             let mut fields = entry.split_whitespace();
             match fields.nth(1) {
                 Some(e) => match parse_ld_so_conf_glob(&filename.as_ref().parent(), e) {
-                    Ok(mut v) => r.append(&mut v),
+                    Ok(mut v) => merge_searchpaths(&mut r, &mut v),
                     Err(e) => return Err(e),
                 },
                 None => return Err("Invalid ld.so.conf"),
             };
         // hwcap directives is ignored.
         } else if !entry.starts_with("hwcap") {
-            if Path::new(entry).is_dir() {
-                r.push(entry.to_string());
-            }
+            add_searchpath(&mut r, entry);
         }
     }
 
@@ -53,8 +90,21 @@ where
     Ok(io::BufReader::new(file).lines())
 }
 
-fn parse_ld_so_conf_glob(root: &Option<&Path>, pattern: &str) -> Result<Vec<String>, &'static str> {
-    let mut r = <Vec<String>>::new();
+fn get_search_path(entry: &str) -> Option<SearchPath> {
+    let path = Path::new(entry);
+    let meta = fs::metadata(path).ok()?;
+    Some(SearchPath {
+        path: entry.to_string(),
+        dev: meta.dev(),
+        ino: meta.ino(),
+    })
+}
+
+fn parse_ld_so_conf_glob(
+    root: &Option<&Path>,
+    pattern: &str,
+) -> Result<SearchPathVec, &'static str> {
+    let mut r = SearchPathVec::new();
 
     let filename = if !Path::new(pattern).is_absolute() && root.is_some() {
         match Path::new(root.unwrap()).join(pattern).to_str() {
@@ -69,7 +119,7 @@ fn parse_ld_so_conf_glob(root: &Option<&Path>, pattern: &str) -> Result<Vec<Stri
         match entry {
             Ok(path) => {
                 match parse_ld_so_conf(&path) {
-                    Ok(mut v) => r.append(&mut v),
+                    Ok(mut v) => merge_searchpaths(&mut r, &mut v),
                     Err(_e) => return Err("Invalid path in ld.so.conf include file"),
                 };
             }
@@ -80,6 +130,7 @@ fn parse_ld_so_conf_glob(root: &Option<&Path>, pattern: &str) -> Result<Vec<Stri
     Ok(r)
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,7 +139,7 @@ mod tests {
     use std::io::{Error, ErrorKind, Write};
     use tempfile::TempDir;
 
-    fn handle_err(e: Result<Vec<String>, &'static str>) -> Result<(), std::io::Error> {
+    fn handle_err(e: Result<SearchPathVec, &'static str>) -> Result<(), std::io::Error> {
         match e {
             Ok(_v) => Ok(()),
             Err(e) => Err(Error::new(ErrorKind::Other, e)),
@@ -224,6 +275,35 @@ mod tests {
                 assert_eq!(entries.len(), 2);
                 assert_eq!(entries[0], libdir2.to_str().unwrap());
                 assert_eq!(entries[1], libdir1.to_str().unwrap());
+                Ok(())
+            }
+            Err(e) => Err(Error::new(ErrorKind::Other, e)),
+        }
+    }
+
+    #[test]
+    fn parse_ld_conf_include_duplicated() -> Result<(), std::io::Error> {
+        let tmpdir = TempDir::new()?;
+        let filepath = tmpdir.path().join("ld.so.conf");
+        let mut file = File::create(&filepath)?;
+
+        let subdir = tmpdir.path().join("subdir");
+        fs::create_dir(&subdir)?;
+        let subfilepath = subdir.join("include");
+        let mut subfile = File::create(&subfilepath)?;
+
+        let libdir1 = tmpdir.path().join("lib1");
+        fs::create_dir(&libdir1)?;
+
+        write!(file, "include subdir/*\n")?;
+        write!(file, "{}\n", libdir1.display())?;
+        write!(file, "{}\n", libdir1.display())?;
+        write!(subfile, "{}\n", libdir1.display())?;
+
+        match parse_ld_so_conf(&filepath) {
+            Ok(entries) => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0], libdir1.to_str().unwrap());
                 Ok(())
             }
             Err(e) => Err(Error::new(ErrorKind::Other, e)),
