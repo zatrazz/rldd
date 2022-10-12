@@ -57,14 +57,13 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
     elf: &Elf,
     data: &[u8],
 ) -> Result<DtNeededVec, &'static str> {
-    let kind = match object::FileKind::parse(data) {
-        Ok(file) => file,
-        _ => return Err("Failed to parse file"),
+    let endian = match elf.endian() {
+        Ok(val) => val,
+        Err(_) => return Err("invalid endianess"),
     };
 
-    match kind {
-        object::FileKind::Elf32
-        | object::FileKind::Elf64 => parse_header_elf(elf, data),
+    match elf.e_type(endian) {
+        ET_EXEC | ET_DYN => parse_header_elf(endian, elf, data),
         _ => Err("Invalid ELF file"),
     }
 }
@@ -83,14 +82,10 @@ impl<T, E: fmt::Display> HandleErr<T> for Result<T, E> {
 }
 
 fn parse_header_elf<Elf: FileHeader<Endian = Endianness>>(
+    endian: Elf::Endian,
     elf: &Elf,
     data: &[u8],
 ) -> Result<DtNeededVec, &'static str> {
-    let endian = match elf.endian() {
-        Ok(val) => val,
-        Err(_) => return Err("invalid endianess"),
-    };
-
     match elf.program_headers(endian, data) {
         Ok(segments) => parse_elf_program_headers(endian, data, elf, segments),
         Err(_) => Err("invalid segment"),
