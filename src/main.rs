@@ -39,8 +39,11 @@ fn parse_object(data: &[u8]) -> Result<DtNeededVec, &'static str> {
     }
 }
 
-fn parse_elf32(_data: &[u8]) -> Result<DtNeededVec, &'static str> {
-    Err("Not implemented")
+fn parse_elf32(data: &[u8]) -> Result<DtNeededVec, &'static str> {
+    if let Some(elf) = FileHeader32::<Endianness>::parse(data).handle_err() {
+        return parse_elf(elf, data);
+    }
+    Err("Invalid ELF32 object")
 }
 
 fn parse_elf64(data: &[u8]) -> Result<DtNeededVec, &'static str> {
@@ -60,17 +63,10 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
     };
 
     match kind {
-        object::FileKind::Elf32 => parse_header_elf32(elf, data),
-        object::FileKind::Elf64 => parse_header_elf64(elf, data),
+        object::FileKind::Elf32
+        | object::FileKind::Elf64 => parse_header_elf(elf, data),
         _ => Err("Invalid ELF file"),
     }
-}
-
-fn parse_header_elf32<Elf: FileHeader<Endian = Endianness>>(
-    _elf: &Elf,
-    _data: &[u8],
-) -> Result<DtNeededVec, &'static str> {
-    Err("Not implemented")
 }
 
 trait HandleErr<T> {
@@ -86,7 +82,7 @@ impl<T, E: fmt::Display> HandleErr<T> for Result<T, E> {
     }
 }
 
-fn parse_header_elf64<Elf: FileHeader<Endian = Endianness>>(
+fn parse_header_elf<Elf: FileHeader<Endian = Endianness>>(
     elf: &Elf,
     data: &[u8],
 ) -> Result<DtNeededVec, &'static str> {
