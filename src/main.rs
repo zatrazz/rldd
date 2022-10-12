@@ -216,8 +216,8 @@ fn main() {
         }
     };
 
-    let object = match read::File::parse(&*file) {
-        Ok(object) => object,
+    let arch = match read::File::parse(&*file) {
+        Ok(object) => object.architecture(),
         Err(err) => {
             eprintln!("Failed to read file '{}': {}", filename, err,);
             process::exit(1);
@@ -225,7 +225,7 @@ fn main() {
     };
 
     let ld_so_conf =
-        match ld_conf::parse_ld_so_conf(object.architecture(), &Path::new("/etc/ld.so.conf")) {
+        match ld_conf::parse_ld_so_conf(arch, &Path::new("/etc/ld.so.conf")) {
             Ok(ld_so_conf) => ld_so_conf,
             Err(err) => {
                 eprintln!("Failed to read loader cache config: {}", err,);
