@@ -19,10 +19,7 @@ pub fn parse_ld_so_conf<P: AsRef<Path>>(
     let r = parse_ld_so_conf_file(filename);
     match r {
         Ok(mut r) => {
-            match get_slibdir(arch) {
-                Some(p) => r.push(p),
-                _ => {}
-            }
+            add_systemlib(arch, &mut r);
             Ok(r)
         }
         Err(e) => return Err(e),
@@ -105,30 +102,6 @@ fn parse_ld_so_conf_glob(
     }
 
     Ok(r)
-}
-
-fn get_slibdir(arch: object::Architecture) -> Option<SearchPath> {
-    let path = match arch {
-        Architecture::X86_64
-        | Architecture::Aarch64
-        | Architecture::LoongArch64
-        | Architecture::Mips64
-        | Architecture::PowerPc64
-        | Architecture::S390x
-        | Architecture::Sparc64 => "/lib64",
-        Architecture::Arm | Architecture::I386 | Architecture::Mips | Architecture::PowerPc => {
-            "/lib"
-        }
-        Architecture::Riscv64 => "/lib64/lp64d",
-        Architecture::Riscv32 => "/lib32/ilp32d",
-        Architecture::X86_64_X32 => "/libx32",
-        _ => return None,
-    };
-    Some(SearchPath {
-        path: path.to_string(),
-        dev: 0,
-        ino: 0,
-    })
 }
 
 #[cfg(test)]
