@@ -1,7 +1,7 @@
 use object::Architecture;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::{fmt, fs};
+use std::{fmt, fs, env};
 
 #[derive(Debug, PartialEq)]
 pub struct SearchPath {
@@ -74,4 +74,19 @@ pub fn add_systemlib<P: AsMut<SearchPathVec>>(arch: object::Architecture, v: &mu
         Some(slibdir) => v.as_mut().push(slibdir),
         _ => {}
     }
+}
+
+pub fn get_ld_library_path() -> SearchPathVec {
+    let mut r = SearchPathVec::new();
+
+    let ld_library_path = match env::var("LD_LIBRARY_PATH") {
+        Ok(path) => path,
+        Err(_) => "".to_string(),
+    };
+
+    for path in ld_library_path.split(":") {
+        add_searchpath(&mut r, path);
+    }
+
+    r
 }

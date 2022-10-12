@@ -10,8 +10,8 @@ mod ld_conf;
 mod search_path;
 
 struct Config {
+    ld_library_path: search_path::SearchPathVec,
     ld_so_conf: search_path::SearchPathVec,
-    ld_library_path: Vec<String>,
     file: memmap2::Mmap,
 }
 
@@ -180,21 +180,6 @@ fn parse_elf_dynamic<Elf: FileHeader>(
     Ok(dtneeded)
 }
 
-fn parse_ld_library_path() -> Vec<String> {
-    let mut r = Vec::new();
-
-    let ld_library_path = match env::var("LD_LIBRARY_PATH") {
-        Ok(path) => path,
-        Err(_) => "".to_string(),
-    };
-
-    for path in ld_library_path.split(":") {
-        r.push(path.to_string());
-    }
-
-    r
-}
-
 fn print_dependencies(config: &Config) {
     let dtneeded = parse_object(&*config.file);
     if dtneeded.is_ok() {
@@ -247,11 +232,10 @@ fn main() {
                 process::exit(1);
             }
         };
-    let ld_library_path = parse_ld_library_path();
 
     let config = Config {
+        ld_library_path: search_path::get_ld_library_path(),
         ld_so_conf: ld_so_conf,
-        ld_library_path: ld_library_path,
         file: file,
     };
 
