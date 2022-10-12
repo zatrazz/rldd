@@ -1,11 +1,19 @@
+use std::path::Path;
 use std::{env, fmt, fs, process, str};
 
 use object::elf::*;
 use object::read::elf::*;
 use object::read::StringTable;
-use object::Endianness;
+use object::{read, Endianness, Object};
 
 mod ld_conf;
+mod search_path;
+
+struct Config {
+    ld_so_conf: search_path::SearchPathVec,
+    ld_library_path: Vec<String>,
+    file: memmap2::Mmap,
+}
 
 struct DtNeeded {
     name: String,
@@ -172,6 +180,32 @@ fn parse_elf_dynamic<Elf: FileHeader>(
     Ok(dtneeded)
 }
 
+fn parse_ld_library_path() -> Vec<String> {
+    let mut r = Vec::new();
+
+    let ld_library_path = match env::var("LD_LIBRARY_PATH") {
+        Ok(path) => path,
+        Err(_) => "".to_string(),
+    };
+
+    for path in ld_library_path.split(":") {
+        r.push(path.to_string());
+    }
+
+    r
+}
+
+fn print_dependencies(config: &Config) {
+    let dtneeded = parse_object(&*config.file);
+    if dtneeded.is_ok() {
+        for entry in dtneeded.unwrap() {
+            println!("{}", entry);
+        }
+    } else {
+        println!("Problem opening the file: {:?}", dtneeded.err());
+    }
+}
+
 fn main() {
     let mut args = env::args();
     let cmd = args.next().unwrap();
@@ -197,12 +231,29 @@ fn main() {
         }
     };
 
-    let dtneeded = parse_object(&*file);
-    if dtneeded.is_ok() {
-        for entry in dtneeded.unwrap() {
-            println!("{}", entry);
+    let object = match read::File::parse(&*file) {
+        Ok(object) => object,
+        Err(err) => {
+            eprintln!("Failed to read file '{}': {}", filename, err,);
+            process::exit(1);
         }
-    } else {
-        println!("Problem opening the file: {:?}", dtneeded.err());
-    }
+    };
+
+    let ld_so_conf =
+        match ld_conf::parse_ld_so_conf(object.architecture(), &Path::new("/etc/ld.so.conf")) {
+            Ok(ld_so_conf) => ld_so_conf,
+            Err(err) => {
+                eprintln!("Failed to read loader cache config: {}", err,);
+                process::exit(1);
+            }
+        };
+    let ld_library_path = parse_ld_library_path();
+
+    let config = Config {
+        ld_so_conf: ld_so_conf,
+        ld_library_path: ld_library_path,
+        file: file,
+    };
+
+    print_dependencies(&config)
 }

@@ -2,40 +2,10 @@ use glob::glob;
 use object::Architecture;
 use std::fs::File;
 use std::io::{self, BufRead};
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::{fmt, fs};
+//use std::{fmt, fs};
 
-#[derive(Debug, PartialEq)]
-pub struct SearchPath {
-    path: String,
-    dev: u64,
-    ino: u64,
-}
-impl fmt::Display for SearchPath {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{} ({},{})", self.path, self.dev, self.ino)
-    }
-}
-impl PartialEq<&str> for SearchPath {
-    fn eq(&self, other: &&str) -> bool {
-        self.path.as_str() == *other
-    }
-}
-
-// List of unique existent search path in the filesystem.
-type SearchPathVec = Vec<SearchPath>;
-
-fn add_searchpath(v: &mut SearchPathVec, entry: &str) {
-    match get_search_path(entry) {
-        Some(searchpath) => {
-            if !v.contains(&searchpath) {
-                v.push(searchpath);
-            }
-        }
-        None => {}
-    }
-}
+use crate::search_path::*;
 
 fn merge_searchpaths(v: &mut SearchPathVec, n: &mut SearchPathVec) {
     n.retain(|i| !v.contains(i));
@@ -107,16 +77,6 @@ where
     Ok(io::BufReader::new(file).lines())
 }
 
-fn get_search_path(entry: &str) -> Option<SearchPath> {
-    let path = Path::new(entry);
-    let meta = fs::metadata(path).ok()?;
-    Some(SearchPath {
-        path: entry.to_string(),
-        dev: meta.dev(),
-        ino: meta.ino(),
-    })
-}
-
 fn parse_ld_so_conf_glob(
     root: &Option<&Path>,
     pattern: &str,
@@ -156,10 +116,9 @@ fn get_slibdir(arch: object::Architecture) -> Option<SearchPath> {
         | Architecture::PowerPc64
         | Architecture::S390x
         | Architecture::Sparc64 => "/lib64",
-        Architecture::Arm
-        | Architecture::I386
-        | Architecture::Mips
-        | Architecture::PowerPc => "/lib",
+        Architecture::Arm | Architecture::I386 | Architecture::Mips | Architecture::PowerPc => {
+            "/lib"
+        }
         Architecture::Riscv64 => "/lib64/lp64d",
         Architecture::Riscv32 => "/lib32/ilp32d",
         Architecture::X86_64_X32 => "/libx32",
