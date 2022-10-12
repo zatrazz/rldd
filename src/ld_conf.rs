@@ -43,6 +43,8 @@ fn parse_ld_so_conf_file<P: AsRef<Path>>(filename: &P) -> Result<SearchPathVec, 
             None => entry.len(),
         };
         let entry = &entry[0..comment];
+        // Remove trailing whitespaces.
+        let entry = entry.trim_end();
         // Skip empty lines.
         if entry.is_empty() {
             continue;
@@ -294,6 +296,36 @@ mod tests {
         write!(file, "{}\n", libdir1.display())?;
         write!(file, "{}\n", libdir1.display())?;
         write!(subfile, "{}\n", libdir1.display())?;
+
+        match parse_ld_so_conf(Architecture::X86_64, &filepath) {
+            Ok(entries) => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0], libdir1.to_str().unwrap());
+                assert_eq!(entries[1], slibdir(arch)?.as_str());
+                Ok(())
+            }
+            Err(e) => Err(Error::new(ErrorKind::Other, e)),
+        }
+    }
+
+    #[test]
+    fn parse_ld_conf_comments() -> Result<(), std::io::Error> {
+        let arch = Architecture::X86_64;
+
+        let tmpdir = TempDir::new()?;
+        let filepath = tmpdir.path().join("ld.so.conf");
+        let mut file = File::create(&filepath)?;
+
+        let subdir = tmpdir.path().join("subdir");
+        fs::create_dir(&subdir)?;
+
+        let libdir1 = tmpdir.path().join("lib1");
+        fs::create_dir(&libdir1)?;
+
+        write!(file, "# comment number 1\n")?;
+        write!(file, "   # comment number 2\n")?;
+        write!(file, "include subdir/*  # comment number 3\n")?;
+        write!(file, "{}  # comment number 4\n", libdir1.display())?;
 
         match parse_ld_so_conf(Architecture::X86_64, &filepath) {
             Ok(entries) => {
