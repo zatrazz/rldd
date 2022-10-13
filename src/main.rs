@@ -212,7 +212,7 @@ fn print_dependencies(config: &Config) {
             println!("{}", entry);
         }
     } else {
-        println!("Problem opening the file: {:?}", dtneeded.err());
+        println!("Problem opening the file");
     }
 }
 
