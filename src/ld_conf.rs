@@ -111,6 +111,7 @@ mod tests {
     use std::fs::File;
     use std::io::{Error, ErrorKind, Write};
     use tempfile::TempDir;
+    use object::Architecture;
 
     fn handle_err(e: Result<SearchPathVec, &'static str>) -> Result<(), std::io::Error> {
         match e {
