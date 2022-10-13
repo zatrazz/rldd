@@ -15,16 +15,7 @@ struct Config {
     file: memmap2::Mmap,
 }
 
-struct DtNeeded {
-    name: String,
-}
-impl fmt::Display for DtNeeded {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.name)
-    }
-}
-
-type DtNeededVec = Vec<DtNeeded>;
+type DtNeededVec = Vec<String>;
 
 fn parse_object(data: &[u8]) -> Result<DtNeededVec, &'static str> {
     let kind = match object::FileKind::parse(data) {
@@ -136,12 +127,12 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
             }
         }
 
-        return parse_elf_dynamic(endian, elf, dynamic, dynstr);
+        return parse_elf_dtneeded(endian, elf, dynamic, dynstr);
     }
     Err("Failure to parse dynamic segment")
 }
 
-fn parse_elf_dynamic<Elf: FileHeader>(
+fn parse_elf_dtneeded<Elf: FileHeader>(
     endian: Elf::Endian,
     _elf: &Elf,
     dynamic: &[Elf::Dyn],
@@ -153,7 +144,8 @@ fn parse_elf_dynamic<Elf: FileHeader>(
             break;
         }
 
-        if d.tag32(endian).is_none() || !d.is_string(endian) {
+        if d.tag32(endian).is_none() || !d.is_string(endian)
+            || d.d_tag(endian).into() != DT_NEEDED.into() {
             continue;
         }
 
@@ -161,9 +153,7 @@ fn parse_elf_dynamic<Elf: FileHeader>(
             Err(_) => continue,
             Ok(s) => {
                 if let Ok(s) = str::from_utf8(s) {
-                    dtneeded.push(DtNeeded {
-                        name: s.to_string(),
-                    });
+                    dtneeded.push(s.to_string());
                 }
             }
         }
