@@ -12,6 +12,7 @@ mod search_path;
 struct Config {
     ld_library_path: search_path::SearchPathVec,
     ld_so_conf: search_path::SearchPathVec,
+    system_dirs: search_path::SearchPathVec,
     file: memmap2::Mmap,
 }
 
@@ -241,16 +242,8 @@ fn main() {
         }
     };
 
-    let arch = match read::File::parse(&*file) {
-        Ok(object) => object.architecture(),
-        Err(err) => {
-            eprintln!("Failed to read file '{}': {}", filename, err,);
-            process::exit(1);
-        }
-    };
-
     let ld_so_conf =
-        match ld_conf::parse_ld_so_conf(arch, &Path::new("/etc/ld.so.conf")) {
+        match ld_conf::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")) {
             Ok(ld_so_conf) => ld_so_conf,
             Err(err) => {
                 eprintln!("Failed to read loader cache config: {}", err,);
@@ -258,9 +251,27 @@ fn main() {
             }
         };
 
+    let system_dirs = match read::File::parse(&*file) {
+        Ok(object) => {
+            let arch = object.architecture();
+            match search_path::get_system_dirs(arch) {
+                Some(r) => r,
+                None => {
+                    eprintln!("Invalid ELF architcture: {:?}", arch);
+                    process::exit(1);
+                }
+            }
+        },
+        Err(err) => {
+            eprintln!("Failed to read file '{}': {}", filename, err,);
+            process::exit(1);
+        }
+    };
+
     let config = Config {
         ld_library_path: search_path::get_ld_library_path(),
         ld_so_conf: ld_so_conf,
+        system_dirs: system_dirs,
         file: file,
     };
 

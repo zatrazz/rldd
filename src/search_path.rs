@@ -44,7 +44,9 @@ pub fn add_searchpath<P: AsMut<SearchPathVec>>(v: &mut P, entry: &str) {
     }
 }
 
-pub fn get_slibdir(arch: object::Architecture) -> Option<SearchPath> {
+pub fn get_system_dirs(arch: object::Architecture) -> Option<SearchPathVec> {
+    let mut r = SearchPathVec::new();
+
     let path = match arch {
         Architecture::X86_64
         | Architecture::Aarch64
@@ -62,18 +64,22 @@ pub fn get_slibdir(arch: object::Architecture) -> Option<SearchPath> {
         Architecture::X86_64_X32 => "/libx32",
         _ => return None,
     };
-    Some(SearchPath {
+
+    r.push(SearchPath {
         path: path.to_string(),
         dev: 0,
         ino: 0,
-    })
-}
+    });
+    // The '/usr' part is configurable on glibc configure, however there is no
+    // direct way to obtain it on runtime.
+    // TODO: Add an option to override it.
+    r.push(SearchPath {
+        path: format!("/usr/{}", path.to_string()),
+        dev: 0,
+        ino: 0
+    });
 
-pub fn add_systemlib<P: AsMut<SearchPathVec>>(arch: object::Architecture, v: &mut P) {
-    match get_slibdir(arch) {
-        Some(slibdir) => v.as_mut().push(slibdir),
-        _ => {}
-    }
+    Some(r)
 }
 
 pub fn get_ld_library_path() -> SearchPathVec {

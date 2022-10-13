@@ -10,21 +10,7 @@ fn merge_searchpaths(v: &mut SearchPathVec, n: &mut SearchPathVec) {
     v.append(n)
 }
 
-pub fn parse_ld_so_conf<P: AsRef<Path>>(
-    arch: object::Architecture,
-    filename: &P,
-) -> Result<SearchPathVec, &'static str> {
-    let r = parse_ld_so_conf_file(filename);
-    match r {
-        Ok(mut r) => {
-            add_systemlib(arch, &mut r);
-            Ok(r)
-        }
-        Err(e) => return Err(e),
-    }
-}
-
-fn parse_ld_so_conf_file<P: AsRef<Path>>(filename: &P) -> Result<SearchPathVec, &'static str> {
+pub fn parse_ld_so_conf<P: AsRef<Path>>(filename: &P) -> Result<SearchPathVec, &'static str> {
     let mut lines = match read_lines(filename) {
         Ok(lines) => lines,
         Err(_e) => return Err("Could not open the filename"),
@@ -92,7 +78,7 @@ fn parse_ld_so_conf_glob(
     for entry in glob(filename.as_str()).expect("Failed to read glob pattern") {
         match entry {
             Ok(path) => {
-                match parse_ld_so_conf_file(&path) {
+                match parse_ld_so_conf(&path) {
                     Ok(mut v) => merge_searchpaths(&mut r, &mut v),
                     Err(_e) => return Err("Invalid path in ld.so.conf include file"),
                 };
@@ -111,7 +97,6 @@ mod tests {
     use std::fs::File;
     use std::io::{Error, ErrorKind, Write};
     use tempfile::TempDir;
-    use object::Architecture;
 
     fn handle_err(e: Result<SearchPathVec, &'static str>) -> Result<(), std::io::Error> {
         match e {
@@ -120,27 +105,17 @@ mod tests {
         }
     }
 
-    fn slibdir(arch: object::Architecture) -> Result<String, std::io::Error> {
-        let v = match get_slibdir(arch) {
-            Some(v) => v,
-            None => return Err(Error::new(ErrorKind::Other, "")),
-        };
-        Ok(v.path)
-    }
-
     #[test]
     fn parse_ld_conf_empty() -> Result<(), std::io::Error> {
         let tmpdir = TempDir::new()?;
         let filepath = tmpdir.path().join("ld.so.conf");
         File::create(&filepath)?;
 
-        handle_err(parse_ld_so_conf(Architecture::X86_64, &filepath))
+        handle_err(parse_ld_so_conf(&filepath))
     }
 
     #[test]
     fn parse_ld_conf_single() -> Result<(), std::io::Error> {
-        let arch = Architecture::X86_64;
-
         let tmpdir = TempDir::new()?;
         let filepath = tmpdir.path().join("ld.so.conf");
         let mut file = File::create(&filepath)?;
@@ -153,12 +128,11 @@ mod tests {
         write!(file, "{}\n", libdir1.display())?;
         write!(file, "{}\n", libdir2.display())?;
 
-        match parse_ld_so_conf(Architecture::X86_64, &filepath) {
+        match parse_ld_so_conf(&filepath) {
             Ok(entries) => {
-                assert_eq!(entries.len(), 3);
+                assert_eq!(entries.len(), 2);
                 assert_eq!(entries[0], libdir1.to_str().unwrap());
                 assert_eq!(entries[1], libdir2.to_str().unwrap());
-                assert_eq!(entries[2], slibdir(arch)?.as_str());
                 Ok(())
             }
             Err(e) => Err(Error::new(ErrorKind::Other, e)),
@@ -167,8 +141,6 @@ mod tests {
 
     #[test]
     fn parse_ld_conf_invalid_include() -> Result<(), std::io::Error> {
-        let arch = Architecture::X86_64;
-
         let tmpdir = TempDir::new()?;
         let filepath = tmpdir.path().join("ld.so.conf");
         let mut file = File::create(&filepath)?;
@@ -177,10 +149,9 @@ mod tests {
         write!(file, "hwcap ignored\n")?;
 
         // Invalid paths are ignored.
-        match parse_ld_so_conf(arch, &filepath) {
+        match parse_ld_so_conf(&filepath) {
             Ok(entries) => {
-                assert_eq!(entries.len(), 1);
-                assert_eq!(entries[0], slibdir(arch)?.as_str());
+                assert_eq!(entries.len(), 0);
                 Ok(())
             }
             Err(e) => Err(Error::new(ErrorKind::Other, e)),
@@ -189,8 +160,6 @@ mod tests {
 
     #[test]
     fn parse_ld_conf_include() -> Result<(), std::io::Error> {
-        let arch = Architecture::X86_64;
-
         let tmpdir = TempDir::new()?;
         let filepath = tmpdir.path().join("ld.so.conf");
         let mut file = File::create(&filepath)?;
@@ -221,14 +190,13 @@ mod tests {
         write!(file1, "{}\n", libdir3.display())?;
         write!(file2, "{}\n", libdir4.display())?;
 
-        match parse_ld_so_conf(Architecture::X86_64, &filepath) {
+        match parse_ld_so_conf(&filepath) {
             Ok(entries) => {
-                assert_eq!(entries.len(), 5);
+                assert_eq!(entries.len(), 4);
                 assert_eq!(entries[0], libdir3.to_str().unwrap());
                 assert_eq!(entries[1], libdir4.to_str().unwrap());
                 assert_eq!(entries[2], libdir1.to_str().unwrap());
                 assert_eq!(entries[3], libdir2.to_str().unwrap());
-                assert_eq!(entries[4], slibdir(arch)?.as_str());
                 Ok(())
             }
             Err(e) => Err(Error::new(ErrorKind::Other, e)),
@@ -237,8 +205,6 @@ mod tests {
 
     #[test]
     fn parse_ld_conf_include_relative() -> Result<(), std::io::Error> {
-        let arch = Architecture::X86_64;
-
         let tmpdir = TempDir::new()?;
         let filepath = tmpdir.path().join("ld.so.conf");
         let mut file = File::create(&filepath)?;
@@ -263,12 +229,11 @@ mod tests {
         write!(subfile, "{}", libdir1.display())?;
         write!(subsubfile, "{}", libdir2.display())?;
 
-        match parse_ld_so_conf(Architecture::X86_64, &filepath) {
+        match parse_ld_so_conf(&filepath) {
             Ok(entries) => {
-                assert_eq!(entries.len(), 3);
+                assert_eq!(entries.len(), 2);
                 assert_eq!(entries[0], libdir2.to_str().unwrap());
                 assert_eq!(entries[1], libdir1.to_str().unwrap());
-                assert_eq!(entries[2], slibdir(arch)?.as_str());
                 Ok(())
             }
             Err(e) => Err(Error::new(ErrorKind::Other, e)),
@@ -277,8 +242,6 @@ mod tests {
 
     #[test]
     fn parse_ld_conf_include_duplicated() -> Result<(), std::io::Error> {
-        let arch = Architecture::X86_64;
-
         let tmpdir = TempDir::new()?;
         let filepath = tmpdir.path().join("ld.so.conf");
         let mut file = File::create(&filepath)?;
@@ -296,11 +259,10 @@ mod tests {
         write!(file, "{}\n", libdir1.display())?;
         write!(subfile, "{}\n", libdir1.display())?;
 
-        match parse_ld_so_conf(Architecture::X86_64, &filepath) {
+        match parse_ld_so_conf(&filepath) {
             Ok(entries) => {
-                assert_eq!(entries.len(), 2);
+                assert_eq!(entries.len(), 1);
                 assert_eq!(entries[0], libdir1.to_str().unwrap());
-                assert_eq!(entries[1], slibdir(arch)?.as_str());
                 Ok(())
             }
             Err(e) => Err(Error::new(ErrorKind::Other, e)),
@@ -309,8 +271,6 @@ mod tests {
 
     #[test]
     fn parse_ld_conf_comments() -> Result<(), std::io::Error> {
-        let arch = Architecture::X86_64;
-
         let tmpdir = TempDir::new()?;
         let filepath = tmpdir.path().join("ld.so.conf");
         let mut file = File::create(&filepath)?;
@@ -326,11 +286,10 @@ mod tests {
         write!(file, "include subdir/*  # comment number 3\n")?;
         write!(file, "{}  # comment number 4\n", libdir1.display())?;
 
-        match parse_ld_so_conf(Architecture::X86_64, &filepath) {
+        match parse_ld_so_conf(&filepath) {
             Ok(entries) => {
-                assert_eq!(entries.len(), 2);
+                    assert_eq!(entries.len(), 1);
                 assert_eq!(entries[0], libdir1.to_str().unwrap());
-                assert_eq!(entries[1], slibdir(arch)?.as_str());
                 Ok(())
             }
             Err(e) => Err(Error::new(ErrorKind::Other, e)),
