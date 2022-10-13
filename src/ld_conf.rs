@@ -1,9 +1,7 @@
 use glob::glob;
-use object::Architecture;
 use std::fs::File;
 use std::io::{self, BufRead};
 use std::path::Path;
-//use std::{fmt, fs};
 
 use crate::search_path::*;
 
