@@ -18,8 +18,8 @@ struct Config {
 
 type DtNeededVec = Vec<String>;
 
-struct ElfLoaderConf
-{
+struct ElfLoaderConf {
+    soname: Option<String>,
     rpath: Option<String>,
     runpath: Option<String>,
     dtneeded: DtNeededVec,
@@ -137,12 +137,13 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
 
         return match parse_elf_dtneeded(endian, elf, dynamic, dynstr) {
             Ok(dtneeded) => Ok(ElfLoaderConf {
+                soname: parse_elf_dyn_str::<Elf>(endian, DT_SONAME, dynamic, dynstr),
                 rpath: parse_elf_dyn_str::<Elf>(endian, DT_RPATH, dynamic, dynstr),
                 runpath: parse_elf_dyn_str::<Elf>(endian, DT_RUNPATH, dynamic, dynstr),
-                dtneeded: dtneeded
+                dtneeded: dtneeded,
             }),
             Err(e) => Err(e),
-        }
+        };
     }
     Err("Failure to parse dynamic segment")
 }
@@ -158,8 +159,8 @@ fn parse_elf_dyn_str<Elf: FileHeader>(
             break;
         }
 
-        if d.tag32(endian).is_none() || !d.is_string(endian)
-            || d.d_tag(endian).into() != tag.into() {
+        if d.tag32(endian).is_none() || !d.is_string(endian) || d.d_tag(endian).into() != tag.into()
+        {
             continue;
         }
 
@@ -184,8 +185,10 @@ fn parse_elf_dtneeded<Elf: FileHeader>(
             break;
         }
 
-        if d.tag32(endian).is_none() || !d.is_string(endian)
-            || d.d_tag(endian).into() != DT_NEEDED.into() {
+        if d.tag32(endian).is_none()
+            || !d.is_string(endian)
+            || d.d_tag(endian).into() != DT_NEEDED.into()
+        {
             continue;
         }
 
@@ -202,19 +205,102 @@ fn parse_elf_dtneeded<Elf: FileHeader>(
 }
 
 fn print_dependencies(config: &Config) {
-    if let Ok(elfloaderconf) = parse_object(&*config.file) {
-        if let Some(rpath) = elfloaderconf.rpath {
-            println!("rpath={}", rpath);
+    let elfloaderconf = match parse_object(&*config.file) {
+        Ok(r) => r,
+        Err(e) => {
+            println!("Problem opening the file: {:?}", e);
+            return;
         }
-        if let Some(runpath) = elfloaderconf.runpath {
-            println!("runpath={}", runpath);
-        }
-        for entry in elfloaderconf.dtneeded {
-            println!("{}", entry);
-        }
-    } else {
-        println!("Problem opening the file");
+    };
+
+    for entry in &elfloaderconf.dtneeded {
+        resolve_entry(
+            &entry,
+            /*
+            &elfloaderconf.rpath,
+            &config.ld_library_path,
+            &elfloaderconf.runpath,
+            &config.ld_so_conf,
+            &config.system_dirs
+            */
+            &config,
+            &elfloaderconf
+        );
     }
+}
+
+fn resolve_entry(
+    dtneeded: &String,
+    /*
+    rpath: &Option<String>,
+    ld_library_path: &search_path::SearchPathVec,
+    runpath: &Option<String>,
+    ld_so_conf: &search_path::SearchPathVec,
+    system_dirs: &search_path::SearchPathVec
+    */
+    config: &Config,
+    elfconfig: &ElfLoaderConf
+) {
+    println!("ENTRY={}", dtneeded);
+    // Consider DT_RPATH iff DT_RUNPATH is not set
+    if elfconfig.runpath.is_none() {
+        if let Some(rpath) = &elfconfig.rpath {
+            let path = Path::new(rpath).join(dtneeded);
+            if open_elf_file(&path).is_ok() {
+                 println!("  RPATH={}", path.display());
+                 return;
+            }
+        }
+    }
+
+    // Check LD_LIBRARY_PATH paths.
+    for searchpath in &config.ld_library_path {
+        let path = Path::new(&searchpath.path).join(dtneeded);
+        if open_elf_file(&path).is_ok() {
+            println!("  LD_LIBRARY_PATH={}", path.display());
+        }
+    }
+
+    // Check DT_RUNPATH.
+    if let Some(runpath) = &elfconfig.runpath {
+        let path = Path::new(runpath).join(dtneeded);
+        if open_elf_file(&path).is_ok() {
+            println!("  RPATH={}", path.display());
+            return;
+        }
+    }
+
+    // Check the search paths (ld.so.conf and system ones).
+    for searchpath in &config.ld_so_conf {
+        let path = Path::new(&searchpath.path).join(dtneeded);
+        if open_elf_file(&path).is_ok() {
+            println!("  LD_SO_CONF={}", path.display());
+            return;
+        }
+    }
+
+    // Finally the system directories.
+    for searchpath in &config.system_dirs {
+        let path = Path::new(&searchpath.path).join(dtneeded);
+        if open_elf_file(&path).is_ok() {
+            println!("  SYSTEM_DIRS={}", path.display());
+            return;
+        }
+    }
+}
+
+fn open_elf_file<P: AsRef<Path>>(filename: &P) -> Result<ElfLoaderConf, &'static str> {
+    let file = match fs::File::open(&filename) {
+        Ok(file) => file,
+        Err(_err) => return Err("Failed to open file"),
+    };
+
+    let mmap = match unsafe { memmap2::Mmap::map(&file) } {
+        Ok(mmap) => mmap,
+        Err(_err) => return Err("Failed to map file"),
+    };
+
+    parse_object(&*mmap)
 }
 
 fn main() {
