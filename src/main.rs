@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::{env, fmt, fs, process, str};
 
 use object::elf::*;
@@ -27,6 +28,19 @@ struct ElfLoaderConf {
     rpath: Option<String>,
     runpath: Option<String>,
     dtneeded: DtNeededVec,
+}
+
+// Keep track of DT_NEEDED already found.
+type DtNeededSet = HashSet<String>;
+
+#[derive(PartialEq)]
+enum DtNeededMode {
+    DtRpath,
+    LdLibraryPath,
+    DtRunpath,
+    LdSoConf,
+    SystemDirs,
+    NotFound,
 }
 
 fn parse_object(data: &[u8]) -> Result<ElfLoaderConf, &'static str> {
@@ -211,28 +225,66 @@ fn parse_elf_dtneeded<Elf: FileHeader>(
     Ok(dtneeded)
 }
 
-fn print_dependencies(config: &Config, elc: &ElfLoaderConf, idx: usize) {
+fn print_dependencies(
+    config: &Config,
+    elc: &ElfLoaderConf,
+    dtneededset: &mut DtNeededSet,
+    idx: usize,
+) {
     for entry in &elc.dtneeded {
-        resolve_entry(&entry, &config, &elc, idx);
+        resolve_dependency(&entry, &config, &elc, dtneededset, idx);
     }
 }
 
-fn resolve_entry(dtneeded: &String, config: &Config, elc: &ElfLoaderConf, idx: usize) {
-    let nextidx = idx + 2;
+fn resolve_dependency(
+    dtneeded: &String,
+    config: &Config,
+    elc: &ElfLoaderConf,
+    dtneededset: &mut DtNeededSet,
+    idx: usize,
+) {
+    if dtneededset.contains(dtneeded) {
+        return;
+    }
 
+    let (r, path, mode) = resolve_dependency_1(dtneeded, config, elc);
+    if mode != DtNeededMode::NotFound {
+        dtneededset.insert(dtneeded.to_string());
+
+        let modestr = match mode {
+            DtNeededMode::DtRpath => "rpath",
+            DtNeededMode::LdLibraryPath => "LdLibraryPath",
+            DtNeededMode::DtRunpath => "runpath",
+            DtNeededMode::LdSoConf => "ld.so.conf",
+            DtNeededMode::SystemDirs => "system default paths",
+            DtNeededMode::NotFound => "not found",
+        };
+        println!(
+            "{:>width$}{} => {} ({})",
+            "",
+            dtneeded,
+            path.unwrap().display(),
+            modestr,
+            width = idx
+        );
+        let nextidx = idx + 2;
+        print_dependencies(&config, &r.unwrap(), dtneededset, nextidx);
+    } else {
+        println!("{:>width$}{} (not found)", "", dtneeded, width = idx);
+    }
+}
+
+fn resolve_dependency_1<'a>(
+    dtneeded: &String,
+    config: &Config,
+    elc: &ElfLoaderConf,
+) -> (Option<ElfLoaderConf>, Option<PathBuf>, DtNeededMode) {
     // Consider DT_RPATH iff DT_RUNPATH is not set
     if elc.runpath.is_none() {
         if let Some(rpath) = &elc.rpath {
             let path = Path::new(rpath).join(dtneeded);
-            if let Ok(r) = open_elf_file(&path, Some(elc)) {
-                println!(
-                    "{:>width$} => {} (DT_RPATH)",
-                    dtneeded,
-                    path.display(),
-                    width = idx
-                );
-                print_dependencies(&config, &r, nextidx);
-                return;
+            if let Ok(r) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
+                return (Some(r), Some(path.to_path_buf()), DtNeededMode::DtRpath);
             }
         }
     }
@@ -240,67 +292,46 @@ fn resolve_entry(dtneeded: &String, config: &Config, elc: &ElfLoaderConf, idx: u
     // Check LD_LIBRARY_PATH paths.
     for searchpath in &config.ld_library_path {
         let path = Path::new(&searchpath.path).join(dtneeded);
-        if let Ok(r) = open_elf_file(&path, Some(elc)) {
-            println!(
-                "{:>width$} => {} (LD_LIBRARY_PATH)",
-                dtneeded,
-                path.display(),
-                width = idx
+        if let Ok(r) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
+            return (
+                Some(r),
+                Some(path.to_path_buf()),
+                DtNeededMode::LdLibraryPath,
             );
-            print_dependencies(&config, &r, nextidx);
-            return;
         }
     }
 
     // Check DT_RUNPATH.
     if let Some(runpath) = &elc.runpath {
         let path = Path::new(runpath).join(dtneeded);
-        if let Ok(r) = open_elf_file(&path, Some(elc)) {
-            println!(
-                "{:>width$} => {} (DT_RUNPATH)",
-                dtneeded,
-                path.display(),
-                width = idx
-            );
-            print_dependencies(&config, &r, nextidx);
-            return;
+        if let Ok(r) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
+            return (Some(r), Some(path.to_path_buf()), DtNeededMode::DtRunpath);
         }
     }
 
-    // Check the search paths (ld.so.conf and system ones).
+    // Check the cached search paths from ld.so.conf.
     for searchpath in &config.ld_so_conf {
         let path = Path::new(&searchpath.path).join(dtneeded);
-        if let Ok(r) = open_elf_file(&path, Some(elc)) {
-            println!(
-                "{:>width$} => {} (ld.so.conf)",
-                dtneeded,
-                path.display(),
-                width = idx
-            );
-            //print_dependencies(&config, &r, nextidx);
-            return;
+        if let Ok(r) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
+            return (Some(r), Some(path.to_path_buf()), DtNeededMode::LdSoConf);
         }
     }
 
     // Finally the system directories.
     for searchpath in &config.system_dirs {
         let path = Path::new(&searchpath.path).join(dtneeded);
-        if let Ok(r) = open_elf_file(&path, Some(elc)) {
-            println!(
-                "{:>width$} => {} (system)",
-                dtneeded,
-                path.display(),
-                width = idx
-            );
-            print_dependencies(&config, &r, nextidx);
-            return;
+        if let Ok(r) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
+            return (Some(r), Some(path.to_path_buf()), DtNeededMode::SystemDirs);
         }
     }
+
+    (None, None, DtNeededMode::NotFound)
 }
 
 fn open_elf_file<P: AsRef<Path>>(
     filename: &P,
     melc: Option<&ElfLoaderConf>,
+    dtneeded: Option<&String>,
 ) -> Result<ElfLoaderConf, &'static str> {
     let file = match fs::File::open(&filename) {
         Ok(file) => file,
@@ -316,6 +347,13 @@ fn open_elf_file<P: AsRef<Path>>(
         Ok(elc) => {
             if let Some(melc) = melc {
                 if check_elf_header(&elc) && match_elf_header(&melc, &elc) {
+                    if let Some(dtneeded) = dtneeded {
+                        if match_elf_soname(dtneeded, &elc) {
+                            return Ok(elc);
+                        } else {
+                            return Err("DT_SONAME does not match");
+                        }
+                    }
                     return Ok(elc);
                 }
                 return Err("ELF file does not match");
@@ -335,6 +373,14 @@ fn match_elf_header(a1: &ElfLoaderConf, a2: &ElfLoaderConf) -> bool {
     a1.ei_class == a2.ei_class && a1.ei_data == a2.ei_data && a1.e_machine == a2.e_machine
 }
 
+fn match_elf_soname(dtneeded: &String, elc: &ElfLoaderConf) -> bool {
+    let soname = &elc.soname;
+    if let Some(soname) = soname {
+        return dtneeded == soname;
+    }
+    true
+}
+
 fn main() {
     let mut args = env::args();
     let cmd = args.next().unwrap();
@@ -352,7 +398,7 @@ fn main() {
         }
     };
 
-    let elc = match open_elf_file(&filename, None) {
+    let elc = match open_elf_file(&filename, None, None) {
         Ok(elc) => elc,
         Err(err) => {
             eprintln!("Faile to read file '{}': {}", filename, err,);
@@ -374,5 +420,6 @@ fn main() {
         system_dirs: system_dirs,
     };
 
-    print_dependencies(&config, &elc, 0)
+    let mut dtneededset = DtNeededSet::new();
+    print_dependencies(&config, &elc, &mut dtneededset, 0)
 }
