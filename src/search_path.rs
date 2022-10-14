@@ -1,7 +1,11 @@
-use object::Architecture;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::{fmt, fs, env};
+use std::{env, fmt, fs};
+
+use object::elf::*;
+
+/* Not all machines are supported by object crate.  */
+const EM_ARCV2: u16 = 195;
 
 #[derive(Debug, PartialEq)]
 pub struct SearchPath {
@@ -44,24 +48,28 @@ pub fn add_searchpath<P: AsMut<SearchPathVec>>(v: &mut P, entry: &str) {
     }
 }
 
-pub fn get_system_dirs(arch: object::Architecture) -> Option<SearchPathVec> {
+pub fn get_system_dirs(e_machine: u16, ei_class: u8) -> Option<SearchPathVec> {
     let mut r = SearchPathVec::new();
 
-    let path = match arch {
-        Architecture::X86_64
-        | Architecture::Aarch64
-        | Architecture::LoongArch64
-        | Architecture::Mips64
-        | Architecture::PowerPc64
-        | Architecture::S390x
-        | Architecture::Sparc64 => "/lib64",
-        Architecture::Arm
-        | Architecture::I386
-        | Architecture::Mips
-        | Architecture::PowerPc => "/lib",
-        Architecture::Riscv64 => "/lib64/lp64d",
-        Architecture::Riscv32 => "/lib32/ilp32d",
-        Architecture::X86_64_X32 => "/libx32",
+    let path = match e_machine {
+        EM_AARCH64 | EM_ALPHA | EM_PPC64 | EM_LOONGARCH => "/lib64",
+        EM_ARCV2 | EM_ARM | EM_CSKY | EM_PARISC | EM_386 | EM_68K | EM_MICROBLAZE
+        | EM_ALTERA_NIOS2 | EM_OPENRISC | EM_PPC | EM_SH => "/lib",
+        EM_S390 | EM_SPARC | EM_MIPS | EM_MIPS_RS3_LE => match ei_class {
+            ELFCLASS32 => "/lib",
+            ELFCLASS64 => "/lib64",
+            _ => return None,
+        },
+        EM_RISCV => match ei_class {
+            ELFCLASS32 => "/lib32/ilp32d",
+            ELFCLASS64 => "/lib64/lp64d",
+            _ => return None,
+        },
+        EM_X86_64 => match ei_class {
+            ELFCLASS32 => "/libx32",
+            ELFCLASS64 => "/lib64",
+            _ => return None,
+        },
         _ => return None,
     };
 
@@ -76,7 +84,7 @@ pub fn get_system_dirs(arch: object::Architecture) -> Option<SearchPathVec> {
     r.push(SearchPath {
         path: format!("/usr/{}", path.to_string()),
         dev: 0,
-        ino: 0
+        ino: 0,
     });
 
     Some(r)
