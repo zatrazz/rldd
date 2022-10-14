@@ -288,7 +288,7 @@ mod tests {
 
         match parse_ld_so_conf(&filepath) {
             Ok(entries) => {
-                    assert_eq!(entries.len(), 1);
+                assert_eq!(entries.len(), 1);
                 assert_eq!(entries[0], libdir1.to_str().unwrap());
                 Ok(())
             }

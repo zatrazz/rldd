@@ -4,7 +4,7 @@ use std::{env, fmt, fs, process, str};
 use object::elf::*;
 use object::read::elf::*;
 use object::read::StringTable;
-use object::{Endianness};
+use object::Endianness;
 
 mod ld_conf;
 mod search_path;
@@ -89,7 +89,6 @@ fn parse_header_elf<Elf: FileHeader<Endian = Endianness>>(
     elf: &Elf,
     data: &[u8],
 ) -> Result<ElfLoaderConf, &'static str> {
-
     match elf.program_headers(endian, data) {
         Ok(segments) => parse_elf_program_headers(endian, data, elf, segments),
         Err(_) => Err("invalid segment"),
@@ -212,27 +211,27 @@ fn parse_elf_dtneeded<Elf: FileHeader>(
     Ok(dtneeded)
 }
 
-fn print_dependencies(config: &Config, elc: &ElfLoaderConf) {
+fn print_dependencies(config: &Config, elc: &ElfLoaderConf, idx: usize) {
     for entry in &elc.dtneeded {
-        resolve_entry(
-            &entry,
-            &config,
-            &elc
-        );
+        resolve_entry(&entry, &config, &elc, idx);
     }
 }
 
-fn resolve_entry(
-    dtneeded: &String,
-    config: &Config,
-    elc: &ElfLoaderConf
-) {
+fn resolve_entry(dtneeded: &String, config: &Config, elc: &ElfLoaderConf, idx: usize) {
+    let nextidx = idx + 2;
+
     // Consider DT_RPATH iff DT_RUNPATH is not set
     if elc.runpath.is_none() {
         if let Some(rpath) = &elc.rpath {
             let path = Path::new(rpath).join(dtneeded);
-            if let Ok(_) = open_elf_file(&path, Some(elc)) {
-                println!("{} (DT_RPATH)", dtneeded);
+            if let Ok(r) = open_elf_file(&path, Some(elc)) {
+                println!(
+                    "{:>width$} => {} (DT_RPATH)",
+                    dtneeded,
+                    path.display(),
+                    width = idx
+                );
+                print_dependencies(&config, &r, nextidx);
                 return;
             }
         }
@@ -241,8 +240,14 @@ fn resolve_entry(
     // Check LD_LIBRARY_PATH paths.
     for searchpath in &config.ld_library_path {
         let path = Path::new(&searchpath.path).join(dtneeded);
-        if let Ok(_) = open_elf_file(&path, Some(elc)) {
-            println!("{} (LD_LIBRARY_PATH)", dtneeded);
+        if let Ok(r) = open_elf_file(&path, Some(elc)) {
+            println!(
+                "{:>width$} => {} (LD_LIBRARY_PATH)",
+                dtneeded,
+                path.display(),
+                width = idx
+            );
+            print_dependencies(&config, &r, nextidx);
             return;
         }
     }
@@ -250,8 +255,14 @@ fn resolve_entry(
     // Check DT_RUNPATH.
     if let Some(runpath) = &elc.runpath {
         let path = Path::new(runpath).join(dtneeded);
-        if let Ok(_) = open_elf_file(&path, Some(elc)) {
-            println!("{} (DT_RUNPATH)", dtneeded);
+        if let Ok(r) = open_elf_file(&path, Some(elc)) {
+            println!(
+                "{:>width$} => {} (DT_RUNPATH)",
+                dtneeded,
+                path.display(),
+                width = idx
+            );
+            print_dependencies(&config, &r, nextidx);
             return;
         }
     }
@@ -259,8 +270,14 @@ fn resolve_entry(
     // Check the search paths (ld.so.conf and system ones).
     for searchpath in &config.ld_so_conf {
         let path = Path::new(&searchpath.path).join(dtneeded);
-        if let Ok(_) = open_elf_file(&path, Some(elc)) {
-            println!("{} => {} (ld.so.conf)", dtneeded, path.display());
+        if let Ok(r) = open_elf_file(&path, Some(elc)) {
+            println!(
+                "{:>width$} => {} (ld.so.conf)",
+                dtneeded,
+                path.display(),
+                width = idx
+            );
+            //print_dependencies(&config, &r, nextidx);
             return;
         }
     }
@@ -268,8 +285,14 @@ fn resolve_entry(
     // Finally the system directories.
     for searchpath in &config.system_dirs {
         let path = Path::new(&searchpath.path).join(dtneeded);
-        if let Ok(_) = open_elf_file(&path, Some(elc)) {
-            println!("{} => {} (system)", dtneeded, path.display());
+        if let Ok(r) = open_elf_file(&path, Some(elc)) {
+            println!(
+                "{:>width$} => {} (system)",
+                dtneeded,
+                path.display(),
+                width = idx
+            );
+            print_dependencies(&config, &r, nextidx);
             return;
         }
     }
@@ -277,7 +300,7 @@ fn resolve_entry(
 
 fn open_elf_file<P: AsRef<Path>>(
     filename: &P,
-    melc: Option<&ElfLoaderConf>
+    melc: Option<&ElfLoaderConf>,
 ) -> Result<ElfLoaderConf, &'static str> {
     let file = match fs::File::open(&filename) {
         Ok(file) => file,
@@ -295,10 +318,10 @@ fn open_elf_file<P: AsRef<Path>>(
                 if check_elf_header(&elc) && match_elf_header(&melc, &elc) {
                     return Ok(elc);
                 }
-                return Err("ELF file does not match")
+                return Err("ELF file does not match");
             }
             Ok(elc)
-        },
+        }
         Err(_) => Err("Failed to parse ELF file"),
     }
 }
@@ -309,9 +332,7 @@ fn check_elf_header(elc: &ElfLoaderConf) -> bool {
 }
 
 fn match_elf_header(a1: &ElfLoaderConf, a2: &ElfLoaderConf) -> bool {
-    a1.ei_class == a2.ei_class
-    && a1.ei_data == a2.ei_data
-    && a1.e_machine == a2.e_machine
+    a1.ei_class == a2.ei_class && a1.ei_data == a2.ei_data && a1.e_machine == a2.e_machine
 }
 
 fn main() {
@@ -323,14 +344,13 @@ fn main() {
     }
     let filename = args.next().unwrap();
 
-    let ld_so_conf =
-        match ld_conf::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")) {
-            Ok(ld_so_conf) => ld_so_conf,
-            Err(err) => {
-                eprintln!("Failed to read loader cache config: {}", err,);
-                process::exit(1);
-            }
-        };
+    let ld_so_conf = match ld_conf::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")) {
+        Ok(ld_so_conf) => ld_so_conf,
+        Err(err) => {
+            eprintln!("Failed to read loader cache config: {}", err,);
+            process::exit(1);
+        }
+    };
 
     let elc = match open_elf_file(&filename, None) {
         Ok(elc) => elc,
@@ -354,6 +374,5 @@ fn main() {
         system_dirs: system_dirs,
     };
 
-
-    print_dependencies(&config, &elc)
+    print_dependencies(&config, &elc, 0)
 }
