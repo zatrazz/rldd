@@ -359,22 +359,33 @@ fn open_elf_file<P: AsRef<Path>>(
     match parse_object(&*mmap) {
         Ok(elc) => {
             if let Some(melc) = melc {
-                if check_elf_header(&elc) && match_elf_header(&melc, &elc) {
-                    if let Some(dtneeded) = dtneeded {
-                        if match_elf_soname(dtneeded, &elc) {
-                            return Ok(elc);
-                        } else {
-                            return Err("DT_SONAME does not match");
-                        }
-                    }
+                if match_elf_name(melc, dtneeded, &elc) {
                     return Ok(elc);
+                } else {
+                    return Err("Error parsing ELF object");
                 }
-                return Err("ELF file does not match");
             }
             Ok(elc)
-        }
-        Err(_) => Err("Failed to parse ELF file"),
+        },
+        Err(e) => Err(e),
     }
+}
+
+fn match_elf_name(
+    melc: &ElfLoaderConf,
+    dtneeded: Option<&String>,
+    elc: &ElfLoaderConf
+) -> bool {
+    if !check_elf_header(&elc) || !match_elf_header(&melc, &elc) {
+        return false;
+    }
+
+    // If DT_SONAME is defined compare against it.
+    if let Some(dtneeded) = dtneeded {
+        return match_elf_soname(dtneeded, elc);
+    };
+
+    true
 }
 
 fn check_elf_header(elc: &ElfLoaderConf) -> bool {
