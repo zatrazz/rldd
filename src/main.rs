@@ -266,7 +266,7 @@ fn resolve_dependency(
 
         let modestr = match mode {
             DtNeededMode::DtRpath => "rpath",
-            DtNeededMode::LdLibraryPath => "LdLibraryPath",
+            DtNeededMode::LdLibraryPath => "LD_LIBRARY_PATH",
             DtNeededMode::DtRunpath => "runpath",
             DtNeededMode::LdSoConf => "ld.so.conf",
             DtNeededMode::SystemDirs => "system default paths",
