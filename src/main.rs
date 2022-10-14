@@ -135,6 +135,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
         let mut strtab = 0;
         let mut strsz = 0;
 
+        // To obtain the DT_NEEDED name we first need to find the DT_STRTAB/DT_STRSZ.
         dynamic.iter().for_each(|d| {
             let tag = d.d_tag(endian).into();
             if tag == DT_STRTAB.into() {
@@ -144,14 +145,10 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
             }
         });
 
-        let mut dynstr = StringTable::default();
-        // TODO: print error if DT_STRTAB/DT_STRSZ are invalid
-        for s in segments {
-            if let Ok(Some(data)) = s.data_range(endian, data, strtab, strsz) {
-                dynstr = StringTable::new(data, 0, data.len() as u64);
-                break;
-            }
-        }
+        let dynstr = match parse_elf_stringtable(endian, data, elf, segments, strtab, strsz) {
+            Some(dynstr) => dynstr,
+            None => return Err("Failure to parse the string table"),
+        };
 
         return match parse_elf_dtneeded(endian, elf, dynamic, dynstr) {
             Ok(dtneeded) => Ok(ElfLoaderConf {
@@ -168,6 +165,22 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
         };
     }
     Err("Failure to parse dynamic segment")
+}
+
+fn parse_elf_stringtable<'a, Elf: FileHeader>(
+    endian: Elf::Endian,
+    data: &'a [u8],
+    _elf: &Elf,
+    segments: &'a [Elf::ProgramHeader],
+    strtab: u64,
+    strsz: u64
+) -> Option<StringTable<'a>> {
+    for s in segments {
+        if let Ok(Some(data)) = s.data_range(endian, data, strtab, strsz) {
+            return Some(StringTable::new(data, 0, data.len() as u64));
+        }
+    }
+    None
 }
 
 fn parse_elf_dyn_str<Elf: FileHeader>(
