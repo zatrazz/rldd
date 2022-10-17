@@ -359,9 +359,7 @@ fn open_elf_file<P: AsRef<Path>>(
     match parse_object(&*mmap) {
         Ok(elc) => {
             if let Some(melc) = melc {
-                if match_elf_name(melc, dtneeded, &elc) {
-                    return Ok(elc);
-                } else {
+                if !match_elf_name(melc, dtneeded, &elc) {
                     return Err("Error parsing ELF object");
                 }
             }
