@@ -52,6 +52,14 @@ impl SearchPathVecExt for SearchPathVec {
     }
 }
 
+pub fn from_string(string: &str) -> SearchPathVec {
+    let mut r = SearchPathVec::new();
+    for path in string.split(":") {
+        r.add_path(path);
+    }
+    r
+}
+
 pub fn get_system_dirs(e_machine: u16, ei_class: u8) -> Option<SearchPathVec> {
     let mut r = SearchPathVec::new();
 
@@ -95,16 +103,8 @@ pub fn get_system_dirs(e_machine: u16, ei_class: u8) -> Option<SearchPathVec> {
 }
 
 pub fn get_ld_library_path() -> SearchPathVec {
-    let mut r = SearchPathVec::new();
-
-    let ld_library_path = match env::var("LD_LIBRARY_PATH") {
-        Ok(path) => path,
-        Err(_) => "".to_string(),
-    };
-
-    for path in ld_library_path.split(":") {
-        r.add_path(path);
+    if let Ok(ld_library_path) = env::var("LD_LIBRARY_PATH") {
+        return from_string(ld_library_path.as_str())
     }
-
-    r
+    SearchPathVec::new()
 }

@@ -25,8 +25,8 @@ struct ElfLoaderConf {
     e_machine: u16,
 
     soname: Option<String>,
-    rpath: Option<String>,
-    runpath: Option<String>,
+    rpath: search_path::SearchPathVec,
+    runpath: search_path::SearchPathVec,
     dtneeded: DtNeededVec,
 }
 
@@ -157,8 +157,8 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
                 ei_osabi: elf.e_ident().os_abi,
                 e_machine: elf.e_machine(endian),
                 soname: parse_elf_dyn_str::<Elf>(endian, DT_SONAME, dynamic, dynstr),
-                rpath: parse_elf_dyn_str::<Elf>(endian, DT_RPATH, dynamic, dynstr),
-                runpath: parse_elf_dyn_str::<Elf>(endian, DT_RUNPATH, dynamic, dynstr),
+                rpath: parse_elf_dyn_searchpath::<Elf>(endian, DT_RPATH, dynamic, dynstr),
+                runpath: parse_elf_dyn_searchpath::<Elf>(endian, DT_RUNPATH, dynamic, dynstr),
                 dtneeded: dtneeded,
             }),
             Err(e) => Err(e),
@@ -205,6 +205,18 @@ fn parse_elf_dyn_str<Elf: FileHeader>(
         }
     }
     None
+}
+
+fn parse_elf_dyn_searchpath<Elf: FileHeader>(
+    endian: Elf::Endian,
+    tag: u32,
+    dynamic: &[Elf::Dyn],
+    dynstr: StringTable,
+) -> search_path::SearchPathVec {
+    if let Some(dynstr) = parse_elf_dyn_str::<Elf>(endian, tag, dynamic, dynstr) {
+        return search_path::from_string(dynstr.as_str());
+    }
+    search_path::SearchPathVec::new()
 }
 
 fn parse_elf_dtneeded<Elf: FileHeader>(
@@ -293,11 +305,14 @@ fn resolve_dependency_1<'a>(
     elc: &ElfLoaderConf,
 ) -> (Option<ElfLoaderConf>, Option<PathBuf>, DtNeededMode) {
     // Consider DT_RPATH iff DT_RUNPATH is not set
-    if elc.runpath.is_none() {
-        if let Some(rpath) = &elc.rpath {
-            let path = Path::new(rpath).join(dtneeded);
+    if elc.runpath.is_empty() {
+        for searchpath in &elc.rpath {
+            let path = Path::new(&searchpath.path).join(dtneeded);
             if let Ok(r) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
-                return (Some(r), Some(path.to_path_buf()), DtNeededMode::DtRpath);
+                return (
+                    Some(r),
+                    Some(path.to_path_buf()),
+                    DtNeededMode::DtRpath);
             }
         }
     }
@@ -315,10 +330,13 @@ fn resolve_dependency_1<'a>(
     }
 
     // Check DT_RUNPATH.
-    if let Some(runpath) = &elc.runpath {
-        let path = Path::new(runpath).join(dtneeded);
+    for searchpath in &elc.runpath {
+        let path = Path::new(&searchpath.path).join(dtneeded);
         if let Ok(r) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
-            return (Some(r), Some(path.to_path_buf()), DtNeededMode::DtRunpath);
+            return (
+                Some(r),
+                Some(path.to_path_buf()),
+                DtNeededMode::DtRunpath);
         }
     }
 
