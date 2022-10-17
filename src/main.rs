@@ -150,7 +150,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
             None => return Err("Failure to parse the string table"),
         };
 
-        return match parse_elf_dtneeded(endian, elf, dynamic, dynstr) {
+        return match parse_elf_dtneeded::<Elf>(endian, dynamic, dynstr) {
             Ok(dtneeded) => Ok(ElfLoaderConf {
                 ei_class: elf.e_ident().class,
                 ei_data: elf.e_ident().data,
@@ -221,7 +221,6 @@ fn parse_elf_dyn_searchpath<Elf: FileHeader>(
 
 fn parse_elf_dtneeded<Elf: FileHeader>(
     endian: Elf::Endian,
-    _elf: &Elf,
     dynamic: &[Elf::Dyn],
     dynstr: StringTable,
 ) -> Result<DtNeededVec, &'static str> {
