@@ -37,14 +37,18 @@ fn get_search_path(entry: &str) -> Option<SearchPath> {
 // List of unique existent search path in the filesystem.
 pub type SearchPathVec = Vec<SearchPath>;
 
-pub fn add_searchpath<P: AsMut<SearchPathVec>>(v: &mut P, entry: &str) {
-    match get_search_path(entry) {
-        Some(searchpath) => {
-            if !v.as_mut().contains(&searchpath) {
-                v.as_mut().push(searchpath);
+pub trait SearchPathVecExt {
+    fn add_path(&mut self, entry: &str) -> &Self;
+}
+
+impl SearchPathVecExt for SearchPathVec {
+    fn add_path(&mut self, entry: &str) -> &Self {
+        if let Some(searchpath) = get_search_path(entry) {
+            if !self.contains(&searchpath) {
+                self.push(searchpath)
             }
         }
-        None => {}
+        self
     }
 }
 
@@ -99,7 +103,7 @@ pub fn get_ld_library_path() -> SearchPathVec {
     };
 
     for path in ld_library_path.split(":") {
-        add_searchpath(&mut r, path);
+        r.add_path(path);
     }
 
     r

@@ -45,7 +45,7 @@ pub fn parse_ld_so_conf<P: AsRef<Path>>(filename: &P) -> Result<SearchPathVec, &
             };
         // hwcap directives is ignored.
         } else if !entry.starts_with("hwcap") {
-            add_searchpath(&mut r, entry);
+            r.add_path(entry);
         }
     }
 
