@@ -43,29 +43,29 @@ enum DtNeededMode {
     NotFound,
 }
 
-fn parse_object(data: &[u8]) -> Result<ElfLoaderConf, &'static str> {
+fn parse_object(data: &[u8], origin: &str) -> Result<ElfLoaderConf, &'static str> {
     let kind = match object::FileKind::parse(data) {
         Ok(file) => file,
         Err(_err) => return Err("Failed to parse file"),
     };
 
     match kind {
-        object::FileKind::Elf32 => parse_elf32(data),
-        object::FileKind::Elf64 => parse_elf64(data),
+        object::FileKind::Elf32 => parse_elf32(data, origin),
+        object::FileKind::Elf64 => parse_elf64(data, origin),
         _ => Err("Invalid object"),
     }
 }
 
-fn parse_elf32(data: &[u8]) -> Result<ElfLoaderConf, &'static str> {
+fn parse_elf32(data: &[u8], origin: &str) -> Result<ElfLoaderConf, &'static str> {
     if let Some(elf) = FileHeader32::<Endianness>::parse(data).handle_err() {
-        return parse_elf(elf, data);
+        return parse_elf(elf, data, origin);
     }
     Err("Invalid ELF32 object")
 }
 
-fn parse_elf64(data: &[u8]) -> Result<ElfLoaderConf, &'static str> {
+fn parse_elf64(data: &[u8], origin: &str) -> Result<ElfLoaderConf, &'static str> {
     if let Some(elf) = FileHeader64::<Endianness>::parse(data).handle_err() {
-        return parse_elf(elf, data);
+        return parse_elf(elf, data, origin);
     }
     Err("Invalid ELF64 object")
 }
@@ -73,6 +73,7 @@ fn parse_elf64(data: &[u8]) -> Result<ElfLoaderConf, &'static str> {
 fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
     elf: &Elf,
     data: &[u8],
+    origin: &str,
 ) -> Result<ElfLoaderConf, &'static str> {
     let endian = match elf.endian() {
         Ok(val) => val,
@@ -80,7 +81,7 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
     };
 
     match elf.e_type(endian) {
-        ET_EXEC | ET_DYN => parse_header_elf(endian, elf, data),
+        ET_EXEC | ET_DYN => parse_header_elf(endian, elf, data, origin),
         _ => Err("Invalid ELF file"),
     }
 }
@@ -102,9 +103,10 @@ fn parse_header_elf<Elf: FileHeader<Endian = Endianness>>(
     endian: Elf::Endian,
     elf: &Elf,
     data: &[u8],
+    origin: &str,
 ) -> Result<ElfLoaderConf, &'static str> {
     match elf.program_headers(endian, data) {
-        Ok(segments) => parse_elf_program_headers(endian, data, elf, segments),
+        Ok(segments) => parse_elf_program_headers(endian, data, elf, segments, origin),
         Err(_) => Err("invalid segment"),
     }
 }
@@ -114,12 +116,13 @@ fn parse_elf_program_headers<Elf: FileHeader>(
     data: &[u8],
     elf: &Elf,
     segments: &[Elf::ProgramHeader],
+    origin: &str,
 ) -> Result<ElfLoaderConf, &'static str> {
     match segments
         .iter()
         .find(|&&seg| seg.p_type(endian) == PT_DYNAMIC)
     {
-        Some(seg) => parse_elf_segment_dynamic(endian, data, elf, segments, seg),
+        Some(seg) => parse_elf_segment_dynamic(endian, data, elf, segments, seg, origin),
         None => Err("No dynamic segments found"),
     }
 }
@@ -130,6 +133,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
     elf: &Elf,
     segments: &[Elf::ProgramHeader],
     segment: &Elf::ProgramHeader,
+    origin: &str,
 ) -> Result<ElfLoaderConf, &'static str> {
     if let Ok(Some(dynamic)) = segment.dynamic(endian, data) {
         let mut strtab = 0;
@@ -157,8 +161,8 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
                 ei_osabi: elf.e_ident().os_abi,
                 e_machine: elf.e_machine(endian),
                 soname: parse_elf_dyn_str::<Elf>(endian, DT_SONAME, dynamic, dynstr),
-                rpath: parse_elf_dyn_searchpath::<Elf>(endian, DT_RPATH, dynamic, dynstr),
-                runpath: parse_elf_dyn_searchpath::<Elf>(endian, DT_RUNPATH, dynamic, dynstr),
+                rpath: parse_elf_dyn_searchpath(endian, elf, DT_RPATH, dynamic, dynstr, origin),
+                runpath: parse_elf_dyn_searchpath(endian, elf, DT_RUNPATH, dynamic, dynstr, origin),
                 dtneeded: dtneeded,
             }),
             Err(e) => Err(e),
@@ -209,12 +213,23 @@ fn parse_elf_dyn_str<Elf: FileHeader>(
 
 fn parse_elf_dyn_searchpath<Elf: FileHeader>(
     endian: Elf::Endian,
+    elf: &Elf,
     tag: u32,
     dynamic: &[Elf::Dyn],
     dynstr: StringTable,
+    origin: &str,
 ) -> search_path::SearchPathVec {
     if let Some(dynstr) = parse_elf_dyn_str::<Elf>(endian, tag, dynamic, dynstr) {
-        return search_path::from_string(dynstr.as_str());
+        // Replace $ORIGIN and $LIB
+        // TODO: Add $PLATFORM support.
+        let newdynstr = dynstr.replace("$ORIGIN", origin);
+
+        let libdir = search_path::get_slibdir(
+            elf.e_machine(endian),
+            elf.e_ident().class).unwrap();
+        let newdynstr = newdynstr.replace("$LIB", libdir);
+
+        return search_path::from_string(newdynstr.as_str());
     }
     search_path::SearchPathVec::new()
 }
@@ -373,7 +388,12 @@ fn open_elf_file<P: AsRef<Path>>(
         Err(_) => return Err("Failed to map file"),
     };
 
-    match parse_object(&*mmap) {
+    let parent = match filename.as_ref().parent().and_then(Path::to_str) {
+        Some(parent) => parent,
+        None => ""
+    };
+
+    match parse_object(&*mmap, parent) {
         Ok(elc) => {
             if let Some(melc) = melc {
                 if !match_elf_name(melc, dtneeded, &elc) {
