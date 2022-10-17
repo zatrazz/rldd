@@ -60,31 +60,34 @@ pub fn from_string(string: &str) -> SearchPathVec {
     r
 }
 
-pub fn get_system_dirs(e_machine: u16, ei_class: u8) -> Option<SearchPathVec> {
-    let mut r = SearchPathVec::new();
-
-    let path = match e_machine {
-        EM_AARCH64 | EM_ALPHA | EM_PPC64 | EM_LOONGARCH => "/lib64",
+pub fn get_slibdir(e_machine: u16, ei_class: u8) -> Option<&'static str> {
+    match e_machine {
+        EM_AARCH64 | EM_ALPHA | EM_PPC64 | EM_LOONGARCH => Some("/lib64"),
         EM_ARCV2 | EM_ARM | EM_CSKY | EM_PARISC | EM_386 | EM_68K | EM_MICROBLAZE
-        | EM_ALTERA_NIOS2 | EM_OPENRISC | EM_PPC | EM_SH => "/lib",
+        | EM_ALTERA_NIOS2 | EM_OPENRISC | EM_PPC | EM_SH => Some("/lib"),
         EM_S390 | EM_SPARC | EM_MIPS | EM_MIPS_RS3_LE => match ei_class {
-            ELFCLASS32 => "/lib",
-            ELFCLASS64 => "/lib64",
+            ELFCLASS32 => Some("/lib"),
+            ELFCLASS64 => Some("/lib64"),
             _ => return None,
         },
         EM_RISCV => match ei_class {
-            ELFCLASS32 => "/lib32/ilp32d",
-            ELFCLASS64 => "/lib64/lp64d",
+            ELFCLASS32 => Some("/lib32/ilp32d"),
+            ELFCLASS64 => Some("/lib64/lp64d"),
             _ => return None,
         },
         EM_X86_64 => match ei_class {
-            ELFCLASS32 => "/libx32",
-            ELFCLASS64 => "/lib64",
+            ELFCLASS32 => Some("/libx32"),
+            ELFCLASS64 => Some("/lib64"),
             _ => return None,
         },
         _ => return None,
-    };
+    }
+}
 
+pub fn get_system_dirs(e_machine: u16, ei_class: u8) -> Option<SearchPathVec> {
+    let mut r = SearchPathVec::new();
+
+    let path = get_slibdir(e_machine, ei_class)?;
     r.push(SearchPath {
         path: path.to_string(),
         dev: 0,
