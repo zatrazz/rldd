@@ -479,6 +479,5 @@ fn main() {
         system_dirs: system_dirs,
     };
 
-    let mut dtneededset = DtNeededSet::new();
-    print_dependencies(&config, &elc, &mut dtneededset, 0)
+    print_dependencies(&config, &elc, &mut DtNeededSet::new(), 0)
 }
