@@ -27,6 +27,8 @@ struct ElfLoaderConf {
     soname: Option<String>,
     rpath: search_path::SearchPathVec,
     runpath: search_path::SearchPathVec,
+    nodeflibs: bool,
+
     dtneeded: DtNeededVec,
 }
 
@@ -155,6 +157,10 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
             None => return Err("Failure to parse the string table"),
         };
 
+        let df_1_nodeflib = u64::from(DF_1_NODEFLIB);
+        let dt_flags_1 = parse_elf_dyn_flags::<Elf>(endian, DT_FLAGS_1, dynamic);
+        let nodeflibs = dt_flags_1 & df_1_nodeflib == df_1_nodeflib;
+
         return match parse_elf_dtneeded::<Elf>(endian, dynamic, dynstr) {
             Ok(dtneeded) => Ok(ElfLoaderConf {
                 ei_class: elf.e_ident().class,
@@ -164,6 +170,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
                 soname: parse_elf_dyn_str::<Elf>(endian, DT_SONAME, dynamic, dynstr),
                 rpath: parse_elf_dyn_searchpath(endian, elf, DT_RPATH, dynamic, dynstr, origin),
                 runpath: parse_elf_dyn_searchpath(endian, elf, DT_RUNPATH, dynamic, dynstr, origin),
+                nodeflibs: nodeflibs,
                 dtneeded: dtneeded,
             }),
             Err(e) => Err(e),
@@ -265,6 +272,26 @@ fn parse_elf_dtneeded<Elf: FileHeader>(
     Ok(dtneeded)
 }
 
+fn parse_elf_dyn_flags<Elf: FileHeader>(
+    endian: Elf::Endian,
+    tag: u32,
+    dynamic: &[Elf::Dyn],
+) -> u64
+{
+    for d in dynamic {
+        if d.d_tag(endian).into() == DT_NULL.into() {
+            break;
+        }
+
+        if d.tag32(endian).is_none() || d.d_tag(endian).into() != tag.into() {
+            continue;
+        }
+
+        return d.d_val(endian).into();
+    }
+    0
+}
+
 fn print_dependencies(
     config: &Config,
     elc: &ElfLoaderConf,
@@ -283,7 +310,9 @@ fn resolve_dependency(
     dtneededset: &mut DtNeededSet,
     idx: usize,
 ) {
-    if dtneededset.contains(dtneeded) {
+    // If DF_1_NODEFLIB is set ignore the search cache in the case a depedency could
+    // resolve the library.
+    if !elc.nodeflibs && dtneededset.contains(dtneeded) {
         return;
     }
 
@@ -368,7 +397,11 @@ fn resolve_dependency_1<'a>(
         }
     }
 
-    // Check the cached search paths from ld.so.conf.
+    if elc.nodeflibs {
+        return (None, None, DtNeededMode::NotFound)
+    }
+
+    // Check the cached search paths from ld.so.conf
     for searchpath in &config.ld_so_conf {
         let path = Path::new(&searchpath.path).join(dtneeded);
         if let Ok(r) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
