@@ -35,6 +35,7 @@ type DtNeededSet = HashSet<String>;
 
 #[derive(PartialEq)]
 enum DtNeededMode {
+    Direct,
     DtRpath,
     LdLibraryPath,
     DtRunpath,
@@ -291,6 +292,7 @@ fn resolve_dependency(
         dtneededset.insert(dtneeded.to_string());
 
         let modestr = match mode {
+            DtNeededMode::Direct => "direct",
             DtNeededMode::DtRpath => "rpath",
             DtNeededMode::LdLibraryPath => "LD_LIBRARY_PATH",
             DtNeededMode::DtRunpath => "runpath",
@@ -318,6 +320,18 @@ fn resolve_dependency_1<'a>(
     config: &Config,
     elc: &ElfLoaderConf,
 ) -> (Option<ElfLoaderConf>, Option<PathBuf>, DtNeededMode) {
+    let path = Path::new(&dtneeded);
+    // If the path is absolute skip the other tests.
+    if path.is_absolute() {
+        if let Ok(r) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
+            return (
+                Some(r),
+                Some(path.to_path_buf()),
+                DtNeededMode::Direct);
+            }
+        return (None, None, DtNeededMode::NotFound);
+    }
+
     // Consider DT_RPATH iff DT_RUNPATH is not set
     if elc.runpath.is_empty() {
         for searchpath in &elc.rpath {
