@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::{env, fmt, fs, process, str};
+use std::{env, fmt, fs, process, str, io};
 
 use object::elf::*;
 use object::read::elf::*;
@@ -9,6 +9,8 @@ use object::Endianness;
 
 mod ld_conf;
 mod search_path;
+mod printer;
+use printer::*;
 
 struct Config {
     ld_library_path: search_path::SearchPathVec,
@@ -292,28 +294,30 @@ fn parse_elf_dyn_flags<Elf: FileHeader>(
     0
 }
 
-fn print_binary(filename: &Path, config: &Config, elc: &ElfLoaderConf) {
-    println!("{}", filename.display());
-    print_dependencies(&config, &elc, &mut DtNeededSet::new(), 1)
+fn print_binary(p: &mut Printer<'_>, filename: &Path, config: &Config, elc: &ElfLoaderConf) {
+    p.print_executable(filename);
+    print_dependencies(p, &config, &elc, &mut DtNeededSet::new(), 1)
 }
 
 fn print_dependencies(
+    p: &mut Printer<'_>,
     config: &Config,
     elc: &ElfLoaderConf,
     dtneededset: &mut DtNeededSet,
     idx: usize,
 ) {
     for entry in &elc.dtneeded {
-        resolve_dependency(&entry, &config, &elc, dtneededset, idx);
+        resolve_dependency(p, &entry, &config, &elc, dtneededset, idx);
     }
 }
 
 fn resolve_dependency(
+    p: &mut Printer<'_>,
     dtneeded: &String,
     config: &Config,
     elc: &ElfLoaderConf,
     dtneededset: &mut DtNeededSet,
-    idx: usize,
+    depth: usize,
 ) {
     // If DF_1_NODEFLIB is set ignore the search cache in the case a depedency could
     // resolve the library.
@@ -334,18 +338,11 @@ fn resolve_dependency(
             DtNeededMode::SystemDirs => "system default paths",
             DtNeededMode::NotFound => "not found",
         };
-        println!(
-            "{:>width$}{} => {} ({})",
-            "",
-            dtneeded,
-            path.unwrap().display(),
-            modestr,
-            width = idx
-        );
-        let nextidx = idx + 2;
-        print_dependencies(&config, &r.unwrap(), dtneededset, nextidx);
+        p.print_dependency(dtneeded, path, modestr, depth);
+        let depth = depth + 1;
+        print_dependencies(p, &config, &r.unwrap(), dtneededset, depth);
     } else {
-        println!("{:>width$}{} (not found)", "", dtneeded, width = idx);
+        p.print_not_found(dtneeded, depth);
     }
 }
 
@@ -548,5 +545,8 @@ fn main() {
         system_dirs: system_dirs,
     };
 
-    print_binary(&filename, &config, &elc)
+    let mut stdout = io::stdout().lock();
+    let mut stderr = io::stderr().lock();
+    let mut printer = printer::create(&mut stdout, &mut stderr);
+    print_binary(&mut printer, &filename, &config, &elc)
 }
