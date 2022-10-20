@@ -292,6 +292,11 @@ fn parse_elf_dyn_flags<Elf: FileHeader>(
     0
 }
 
+fn print_binary(filename: &Path, config: &Config, elc: &ElfLoaderConf) {
+    println!("{}", filename.display());
+    print_dependencies(&config, &elc, &mut DtNeededSet::new(), 1)
+}
+
 fn print_dependencies(
     config: &Config,
     elc: &ElfLoaderConf,
@@ -453,27 +458,6 @@ fn open_elf_file<P: AsRef<Path>>(
     }
 }
 
-// On glibc/Linux the RTLD_DI_ORIGIN for the executable itself (used for $ORIGIN
-// expansion) is obtained by first following the '/proc/self/exe' symlink and if
-// it is not available the loader also checks the 'LD_ORIGIN_PATH' environment
-// variable.
-// The '/proc/self/exec' is an absolute path and to mimic loader behavior we first
-// try to canocalize the input filename to remove any symlinks.  There is not much
-// sense in trying LD_ORIGIN_PATH, since it is only checked by the loader if
-// the binary can not dereference the procfs entry.
-fn open_elf_file_executable<P: AsRef<Path>>(
-    filename: &P,
-    melc: Option<&ElfLoaderConf>,
-    dtneeded: Option<&String>,
-) -> Result<ElfLoaderConf, &'static str>
-{
-    let filename = match filename.as_ref().canonicalize() {
-        Ok(filename) => filename,
-        Err(_e) => return Err("Failed to read file"),
-    };
-    open_elf_file(&filename, melc, dtneeded)
-}
-
 fn match_elf_name(
     melc: &ElfLoaderConf,
     dtneeded: Option<&String>,
@@ -515,20 +499,37 @@ fn main() {
         eprintln!("Usage {} file", cmd);
         process::exit(1);
     }
-    let filename = args.next().unwrap();
 
-    let elc = match open_elf_file_executable(&filename, None, None) {
+    let arg = args.next().unwrap();
+
+    // On glibc/Linux the RTLD_DI_ORIGIN for the executable itself (used for $ORIGIN
+    // expansion) is obtained by first following the '/proc/self/exe' symlink and if
+    // it is not available the loader also checks the 'LD_ORIGIN_PATH' environment
+    // variable.
+    // The '/proc/self/exec' is an absolute path and to mimic loader behavior we first
+    // try to canocalize the input filename to remove any symlinks.  There is not much
+    // sense in trying LD_ORIGIN_PATH, since it is only checked by the loader if
+    // the binary can not dereference the procfs entry.
+    let filename = match Path::new(&arg).canonicalize() {
+        Ok(filename) => filename,
+        Err(err) => {
+            eprintln!("Failed to read file {}: {}", arg, err,);
+            process::exit(1);
+        },
+    };
+
+    let elc = match open_elf_file(&filename, None, None) {
         Ok(elc) => elc,
         Err(err) => {
-            eprintln!("error: {}", err);
+            eprintln!("Failed to parse file {}: {}", arg, err,);
             process::exit(1);
-        }
+        },
     };
 
     let ld_so_conf = match ld_conf::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")) {
         Ok(ld_so_conf) => ld_so_conf,
         Err(err) => {
-            eprintln!("Failed to read loader cache config: {}", err,);
+            eprintln!("Failed to read loader cache config: {}", err);
             process::exit(1);
         }
     };
@@ -547,5 +548,5 @@ fn main() {
         system_dirs: system_dirs,
     };
 
-    print_dependencies(&config, &elc, &mut DtNeededSet::new(), 0)
+    print_binary(&filename, &config, &elc)
 }
