@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use colored::*;
 
@@ -30,22 +30,60 @@ impl<'a> Printer<'a> {
         }
     }
 
-    pub fn print_dependency(&mut self, dtneeded: &String, path: PathBuf, mode: &str, depth: usize) {
-        let mode = format!("[{}]", mode).yellow();
-        let pathname = if self.pp {
-            path.as_path().to_str().unwrap()
-        } else {
-            dtneeded
+    fn print_entry(
+        &mut self,
+        dtneeded: &String,
+        path: &String,
+        mode: &str,
+        depth: usize,
+        found: bool,
+    ) {
+        write!(self.w, "{:>width$}", "", width = depth * 4).unwrap();
+
+        let delim = std::path::MAIN_SEPARATOR.to_string();
+        if self.pp {
+            write!(
+                self.w,
+                "{}{}",
+                if !found { path.cyan() } else { path.magenta() },
+                if !found {
+                    delim.cyan()
+                } else {
+                    delim.magenta()
+                }
+            )
+            .unwrap();
         };
+
         writeln!(
             self.w,
-            "{:>width$}{} {}",
-            "",
-            pathname.bright_cyan(),
-            mode,
-            width = depth * 4
+            "{} {}",
+            if !found {
+                dtneeded.bright_cyan().bold()
+            } else {
+                dtneeded.magenta()
+            },
+            if !found {
+                mode.yellow()
+            } else {
+                mode.magenta()
+            }
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    pub fn print_dependency(&mut self, dtneeded: &String, path: &String, mode: &str, depth: usize) {
+        self.print_entry(dtneeded, path, mode, depth, false)
+    }
+
+    pub fn print_already_found(
+        &mut self,
+        dtneeded: &String,
+        path: &String,
+        mode: &str,
+        depth: usize,
+    ) {
+        self.print_entry(dtneeded, path, mode, depth, true)
     }
 
     pub fn print_not_found(&mut self, dtneeded: &String, depth: usize) {
