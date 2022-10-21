@@ -14,9 +14,9 @@ mod search_path;
 mod printer;
 use printer::*;
 
-struct Config {
+struct Config<'a> {
     ld_library_path: search_path::SearchPathVec,
-    ld_so_conf: search_path::SearchPathVec,
+    ld_so_conf: &'a search_path::SearchPathVec,
     system_dirs: search_path::SearchPathVec,
 }
 
@@ -406,7 +406,7 @@ fn resolve_dependency_1<'a>(
     }
 
     // Check the cached search paths from ld.so.conf
-    for searchpath in &config.ld_so_conf {
+    for searchpath in config.ld_so_conf {
         let path = Path::new(&searchpath.path).join(dtneeded);
         if let Ok(r) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
             return (Some(r), Some(path.to_path_buf()), DtNeededMode::LdSoConf);
@@ -491,7 +491,7 @@ fn match_elf_soname(dtneeded: &String, elc: &ElfLoaderConf) -> bool {
     true
 }
 
-fn print_binary_dependencies(p: &mut Printer<'_>, arg: &str) {
+fn print_binary_dependencies(p: &mut Printer<'_>, ld_so_conf: &search_path::SearchPathVec, arg: &str) {
     // On glibc/Linux the RTLD_DI_ORIGIN for the executable itself (used for $ORIGIN
     // expansion) is obtained by first following the '/proc/self/exe' symlink and if
     // it is not available the loader also checks the 'LD_ORIGIN_PATH' environment
@@ -514,14 +514,6 @@ fn print_binary_dependencies(p: &mut Printer<'_>, arg: &str) {
             eprintln!("Failed to parse file {}: {}", arg, err,);
             process::exit(1);
         },
-    };
-
-    let ld_so_conf = match ld_conf::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")) {
-        Ok(ld_so_conf) => ld_so_conf,
-        Err(err) => {
-            eprintln!("Failed to read loader cache config: {}", err);
-            process::exit(1);
-        }
     };
 
     let system_dirs = match search_path::get_system_dirs(elc.e_machine, elc.ei_class) {
@@ -551,6 +543,10 @@ fn main() {
             .short('p')
             .action(ArgAction::SetTrue)
             .help("Show the resolved path instead of the library soname"))
+        .arg(Arg::new("ld_library_path")
+            .short('l')
+            .long("ld-library-path")
+            .help("Assume the LD_LIBRATY_PATH is set"))
         .get_matches();
 
     let args = matches
@@ -564,7 +560,15 @@ fn main() {
     let pp = matches.get_flag("path");
     let mut printer = printer::create(&mut stdout, &mut stderr, pp);
 
+    let ld_so_conf = match ld_conf::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")) {
+        Ok(ld_so_conf) => ld_so_conf,
+        Err(err) => {
+            eprintln!("Failed to read loader cache config: {}", err);
+            process::exit(1);
+        }
+    };
+
     for arg in args {
-      print_binary_dependencies(&mut printer, arg)
+      print_binary_dependencies(&mut printer, &ld_so_conf, arg)
     }
 }
