@@ -549,7 +549,8 @@ fn main() {
             .action(ArgAction::Append))
         .arg(Arg::new("path")
             .short('p')
-            .action(ArgAction::SetTrue))
+            .action(ArgAction::SetTrue)
+            .help("Show the resolved path instead of the library soname"))
         .get_matches();
 
     let args = matches
