@@ -7,6 +7,8 @@ use object::read::elf::*;
 use object::read::StringTable;
 use object::Endianness;
 
+use clap::{command, Arg, ArgAction};
+
 mod ld_conf;
 mod search_path;
 mod printer;
@@ -489,16 +491,7 @@ fn match_elf_soname(dtneeded: &String, elc: &ElfLoaderConf) -> bool {
     true
 }
 
-fn main() {
-    let mut args = env::args();
-    let cmd = args.next().unwrap();
-    if args.len() == 0 {
-        eprintln!("Usage {} file", cmd);
-        process::exit(1);
-    }
-
-    let arg = args.next().unwrap();
-
+fn print_binary_dependencies(p: &mut Printer<'_>, arg: &str) {
     // On glibc/Linux the RTLD_DI_ORIGIN for the executable itself (used for $ORIGIN
     // expansion) is obtained by first following the '/proc/self/exe' symlink and if
     // it is not available the loader also checks the 'LD_ORIGIN_PATH' environment
@@ -507,7 +500,7 @@ fn main() {
     // try to canocalize the input filename to remove any symlinks.  There is not much
     // sense in trying LD_ORIGIN_PATH, since it is only checked by the loader if
     // the binary can not dereference the procfs entry.
-    let filename = match Path::new(&arg).canonicalize() {
+    let filename = match Path::new(arg).canonicalize() {
         Ok(filename) => filename,
         Err(err) => {
             eprintln!("Failed to read file {}: {}", arg, err,);
@@ -545,8 +538,28 @@ fn main() {
         system_dirs: system_dirs,
     };
 
+    print_binary(p, &filename, &config, &elc)
+}
+
+fn main() {
+    let matches = command!()
+        .arg(Arg::new("file")
+            .required(true)
+            .help("binary to print the depedencies")
+            .action(ArgAction::Append))
+        .get_matches();
+
+    let args = matches
+        .get_many::<String>("file")
+        .unwrap_or_default()
+        .map(|v| v.as_str())
+        .collect::<Vec<_>>();
+
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
     let mut printer = printer::create(&mut stdout, &mut stderr);
-    print_binary(&mut printer, &filename, &config, &elc)
+
+    for arg in args {
+      print_binary_dependencies(&mut printer, arg)
+    }
 }

@@ -2,12 +2,15 @@
 name = "rldd"
 version = "0.1.0"
 edition = "2021"
+description = "Print shared object dependencies"
+repository = "https://github.com/zatrazz/rldd/"
 
 [dependencies]
 object = "0.29.0"
 memmap2 = "0.5.7"
 glob = "0.3.0"
 colored = "2"
+clap = { version = "4.0.17", features = ["derive", "cargo"] }
 
 [dev-dependencies]
 tempfile = "3.3.0"
