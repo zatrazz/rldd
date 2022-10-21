@@ -340,7 +340,7 @@ fn resolve_dependency(
             DtNeededMode::SystemDirs => "system default paths",
             DtNeededMode::NotFound => "not found",
         };
-        p.print_dependency(dtneeded, path, modestr, depth);
+        p.print_dependency(dtneeded, path.unwrap(), modestr, depth);
         let depth = depth + 1;
         print_dependencies(p, &config, &r.unwrap(), dtneededset, depth);
     } else {
@@ -547,6 +547,9 @@ fn main() {
             .required(true)
             .help("binary to print the depedencies")
             .action(ArgAction::Append))
+        .arg(Arg::new("path")
+            .short('p')
+            .action(ArgAction::SetTrue))
         .get_matches();
 
     let args = matches
@@ -557,7 +560,8 @@ fn main() {
 
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
-    let mut printer = printer::create(&mut stdout, &mut stderr);
+    let pp = matches.get_flag("path");
+    let mut printer = printer::create(&mut stdout, &mut stderr, pp);
 
     for arg in args {
       print_binary_dependencies(&mut printer, arg)

@@ -6,11 +6,12 @@ use colored::*;
 pub struct Printer<'a> {
     w: &'a mut dyn Write,
     e: &'a mut dyn Write,
+    pp: bool
 }
 
 impl<'a> Printer<'a> {
-    pub fn new(w: &'a mut dyn Write, e: &'a mut dyn Write) -> Self {
-        Self { w, e }
+    pub fn new(w: &'a mut dyn Write, e: &'a mut dyn Write, pp: bool) -> Self {
+        Self { w, e, pp }
     }
 
     pub fn print_executable(&mut self, path: &Path) {
@@ -32,16 +33,21 @@ impl<'a> Printer<'a> {
     pub fn print_dependency(
         &mut self,
         dtneeded: &String,
-        _path: Option<PathBuf>,
+        path: PathBuf,
         mode: &str,
         depth: usize,
     ) {
         let mode = format!("[{}]", mode).yellow();
+        let pathname = if self.pp {
+            path.as_path().to_str().unwrap()
+        } else {
+            dtneeded
+        };
         writeln!(
             self.w,
             "{:>width$}{} {}",
             "",
-            dtneeded.bright_cyan(),
+            pathname.bright_cyan(),
             mode,
             width = depth * 4
         )
@@ -60,6 +66,6 @@ impl<'a> Printer<'a> {
     }
 }
 
-pub fn create<'a>(w: &'a mut dyn Write, e: &'a mut dyn Write) -> Printer<'a> {
-    Printer::new(w, e)
+pub fn create<'a>(w: &'a mut dyn Write, e: &'a mut dyn Write, pp: bool) -> Printer<'a> {
+    Printer::new(w, e, pp)
 }
