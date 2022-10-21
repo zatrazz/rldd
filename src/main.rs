@@ -15,7 +15,7 @@ mod printer;
 use printer::*;
 
 struct Config<'a> {
-    ld_library_path: search_path::SearchPathVec,
+    ld_library_path: &'a search_path::SearchPathVec,
     ld_so_conf: &'a search_path::SearchPathVec,
     system_dirs: search_path::SearchPathVec,
 }
@@ -379,7 +379,7 @@ fn resolve_dependency_1<'a>(
     }
 
     // Check LD_LIBRARY_PATH paths.
-    for searchpath in &config.ld_library_path {
+    for searchpath in config.ld_library_path {
         let path = Path::new(&searchpath.path).join(dtneeded);
         if let Ok(r) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
             return (
@@ -491,7 +491,11 @@ fn match_elf_soname(dtneeded: &String, elc: &ElfLoaderConf) -> bool {
     true
 }
 
-fn print_binary_dependencies(p: &mut Printer<'_>, ld_so_conf: &search_path::SearchPathVec, arg: &str) {
+fn print_binary_dependencies(
+    p: &mut Printer<'_>,
+    ld_so_conf: &search_path::SearchPathVec,
+    ld_library_path: &search_path::SearchPathVec,
+    arg: &str) {
     // On glibc/Linux the RTLD_DI_ORIGIN for the executable itself (used for $ORIGIN
     // expansion) is obtained by first following the '/proc/self/exe' symlink and if
     // it is not available the loader also checks the 'LD_ORIGIN_PATH' environment
@@ -525,7 +529,7 @@ fn print_binary_dependencies(p: &mut Printer<'_>, ld_so_conf: &search_path::Sear
     };
 
     let config = Config {
-        ld_library_path: search_path::get_ld_library_path(),
+        ld_library_path: ld_library_path,
         ld_so_conf: ld_so_conf,
         system_dirs: system_dirs,
     };
@@ -546,7 +550,8 @@ fn main() {
         .arg(Arg::new("ld_library_path")
             .short('l')
             .long("ld-library-path")
-            .help("Assume the LD_LIBRATY_PATH is set"))
+            .help("Assume the LD_LIBRATY_PATH is set")
+            .default_value(""))
         .get_matches();
 
     let args = matches
@@ -568,7 +573,11 @@ fn main() {
         }
     };
 
+    let ld_library_path = search_path::from_string(
+        matches.get_one::<String>("ld_library_path")
+        .expect("ld_library_path should be always set"));
+
     for arg in args {
-      print_binary_dependencies(&mut printer, &ld_so_conf, arg)
+      print_binary_dependencies(&mut printer, &ld_so_conf, &ld_library_path, arg)
     }
 }

@@ -1,6 +1,6 @@
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::{env, fmt, fs};
+use std::{fmt, fs};
 
 use object::elf::*;
 
@@ -103,11 +103,4 @@ pub fn get_system_dirs(e_machine: u16, ei_class: u8) -> Option<SearchPathVec> {
     });
 
     Some(r)
-}
-
-pub fn get_ld_library_path() -> SearchPathVec {
-    if let Ok(ld_library_path) = env::var("LD_LIBRARY_PATH") {
-        return from_string(ld_library_path.as_str())
-    }
-    SearchPathVec::new()
 }
