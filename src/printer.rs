@@ -6,7 +6,7 @@ use colored::*;
 pub struct Printer<'a> {
     w: &'a mut dyn Write,
     e: &'a mut dyn Write,
-    pp: bool
+    pp: bool,
 }
 
 impl<'a> Printer<'a> {
@@ -30,13 +30,7 @@ impl<'a> Printer<'a> {
         }
     }
 
-    pub fn print_dependency(
-        &mut self,
-        dtneeded: &String,
-        path: PathBuf,
-        mode: &str,
-        depth: usize,
-    ) {
+    pub fn print_dependency(&mut self, dtneeded: &String, path: PathBuf, mode: &str, depth: usize) {
         let mode = format!("[{}]", mode).yellow();
         let pathname = if self.pp {
             path.as_path().to_str().unwrap()

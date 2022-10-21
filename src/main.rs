@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::{env, fmt, fs, process, str, io};
+use std::{env, fmt, fs, io, process, str};
 
 use object::elf::*;
 use object::read::elf::*;
@@ -10,8 +10,8 @@ use object::Endianness;
 use clap::{command, Arg, ArgAction};
 
 mod ld_conf;
-mod search_path;
 mod printer;
+mod search_path;
 use printer::*;
 
 struct Config<'a> {
@@ -189,7 +189,7 @@ fn parse_elf_stringtable<'a, Elf: FileHeader>(
     _elf: &Elf,
     segments: &'a [Elf::ProgramHeader],
     strtab: u64,
-    strsz: u64
+    strsz: u64,
 ) -> Option<StringTable<'a>> {
     for s in segments {
         if let Ok(Some(data)) = s.data_range(endian, data, strtab, strsz) {
@@ -236,9 +236,7 @@ fn parse_elf_dyn_searchpath<Elf: FileHeader>(
         // TODO: Add $PLATFORM support.
         let newdynstr = dynstr.replace("$ORIGIN", origin);
 
-        let libdir = search_path::get_slibdir(
-            elf.e_machine(endian),
-            elf.e_ident().class).unwrap();
+        let libdir = search_path::get_slibdir(elf.e_machine(endian), elf.e_ident().class).unwrap();
         let newdynstr = newdynstr.replace("$LIB", libdir);
 
         return search_path::from_string(newdynstr.as_str());
@@ -280,8 +278,7 @@ fn parse_elf_dyn_flags<Elf: FileHeader>(
     endian: Elf::Endian,
     tag: u32,
     dynamic: &[Elf::Dyn],
-) -> u64
-{
+) -> u64 {
     for d in dynamic {
         if d.d_tag(endian).into() == DT_NULL.into() {
             break;
@@ -357,11 +354,8 @@ fn resolve_dependency_1<'a>(
     // If the path is absolute skip the other tests.
     if path.is_absolute() {
         if let Ok(r) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
-            return (
-                Some(r),
-                Some(path.to_path_buf()),
-                DtNeededMode::Direct);
-            }
+            return (Some(r), Some(path.to_path_buf()), DtNeededMode::Direct);
+        }
         return (None, None, DtNeededMode::NotFound);
     }
 
@@ -370,10 +364,7 @@ fn resolve_dependency_1<'a>(
         for searchpath in &elc.rpath {
             let path = Path::new(&searchpath.path).join(dtneeded);
             if let Ok(r) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
-                return (
-                    Some(r),
-                    Some(path.to_path_buf()),
-                    DtNeededMode::DtRpath);
+                return (Some(r), Some(path.to_path_buf()), DtNeededMode::DtRpath);
             }
         }
     }
@@ -394,15 +385,12 @@ fn resolve_dependency_1<'a>(
     for searchpath in &elc.runpath {
         let path = Path::new(&searchpath.path).join(dtneeded);
         if let Ok(r) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
-            return (
-                Some(r),
-                Some(path.to_path_buf()),
-                DtNeededMode::DtRunpath);
+            return (Some(r), Some(path.to_path_buf()), DtNeededMode::DtRunpath);
         }
     }
 
     if elc.nodeflibs {
-        return (None, None, DtNeededMode::NotFound)
+        return (None, None, DtNeededMode::NotFound);
     }
 
     // Check the cached search paths from ld.so.conf
@@ -441,7 +429,7 @@ fn open_elf_file<P: AsRef<Path>>(
 
     let parent = match filename.as_ref().parent().and_then(Path::to_str) {
         Some(parent) => parent,
-        None => ""
+        None => "",
     };
 
     match parse_object(&*mmap, parent) {
@@ -452,16 +440,12 @@ fn open_elf_file<P: AsRef<Path>>(
                 }
             }
             Ok(elc)
-        },
+        }
         Err(e) => Err(e),
     }
 }
 
-fn match_elf_name(
-    melc: &ElfLoaderConf,
-    dtneeded: Option<&String>,
-    elc: &ElfLoaderConf
-) -> bool {
+fn match_elf_name(melc: &ElfLoaderConf, dtneeded: Option<&String>, elc: &ElfLoaderConf) -> bool {
     if !check_elf_header(&elc) || !match_elf_header(&melc, &elc) {
         return false;
     }
@@ -495,7 +479,8 @@ fn print_binary_dependencies(
     p: &mut Printer<'_>,
     ld_so_conf: &search_path::SearchPathVec,
     ld_library_path: &search_path::SearchPathVec,
-    arg: &str) {
+    arg: &str,
+) {
     // On glibc/Linux the RTLD_DI_ORIGIN for the executable itself (used for $ORIGIN
     // expansion) is obtained by first following the '/proc/self/exe' symlink and if
     // it is not available the loader also checks the 'LD_ORIGIN_PATH' environment
@@ -509,7 +494,7 @@ fn print_binary_dependencies(
         Err(err) => {
             eprintln!("Failed to read file {}: {}", arg, err,);
             process::exit(1);
-        },
+        }
     };
 
     let elc = match open_elf_file(&filename, None, None) {
@@ -517,7 +502,7 @@ fn print_binary_dependencies(
         Err(err) => {
             eprintln!("Failed to parse file {}: {}", arg, err,);
             process::exit(1);
-        },
+        }
     };
 
     let system_dirs = match search_path::get_system_dirs(elc.e_machine, elc.ei_class) {
@@ -539,19 +524,25 @@ fn print_binary_dependencies(
 
 fn main() {
     let matches = command!()
-        .arg(Arg::new("file")
-            .required(true)
-            .help("binary to print the depedencies")
-            .action(ArgAction::Append))
-        .arg(Arg::new("path")
-            .short('p')
-            .action(ArgAction::SetTrue)
-            .help("Show the resolved path instead of the library soname"))
-        .arg(Arg::new("ld_library_path")
-            .short('l')
-            .long("ld-library-path")
-            .help("Assume the LD_LIBRATY_PATH is set")
-            .default_value(""))
+        .arg(
+            Arg::new("file")
+                .required(true)
+                .help("binary to print the depedencies")
+                .action(ArgAction::Append),
+        )
+        .arg(
+            Arg::new("path")
+                .short('p')
+                .action(ArgAction::SetTrue)
+                .help("Show the resolved path instead of the library soname"),
+        )
+        .arg(
+            Arg::new("ld_library_path")
+                .short('l')
+                .long("ld-library-path")
+                .help("Assume the LD_LIBRATY_PATH is set")
+                .default_value(""),
+        )
         .get_matches();
 
     let args = matches
@@ -574,10 +565,12 @@ fn main() {
     };
 
     let ld_library_path = search_path::from_string(
-        matches.get_one::<String>("ld_library_path")
-        .expect("ld_library_path should be always set"));
+        matches
+            .get_one::<String>("ld_library_path")
+            .expect("ld_library_path should be always set"),
+    );
 
     for arg in args {
-      print_binary_dependencies(&mut printer, &ld_so_conf, &ld_library_path, arg)
+        print_binary_dependencies(&mut printer, &ld_so_conf, &ld_library_path, arg)
     }
 }
