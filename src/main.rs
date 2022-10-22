@@ -44,7 +44,6 @@ enum DtNeededMode {
     DtRunpath,
     LdSoConf,
     SystemDirs,
-    NotFound,
 }
 
 impl fmt::Display for DtNeededMode {
@@ -56,7 +55,6 @@ impl fmt::Display for DtNeededMode {
             DtNeededMode::DtRunpath => write!(f, "[runpath]"),
             DtNeededMode::LdSoConf => write!(f, "[ld.so.conf]"),
             DtNeededMode::SystemDirs => write!(f, "[system default paths]"),
-            DtNeededMode::NotFound => write!(f, "[not found]"),
         }
     }
 }
@@ -329,6 +327,12 @@ fn print_dependencies(
     }
 }
 
+struct ResolvedDependency<'a> {
+    elc: ElfLoaderConf,
+    path: &'a String,
+    mode: DtNeededMode,
+}
+
 fn resolve_dependency(
     p: &mut Printer<'_>,
     dtneeded: &String,
@@ -337,7 +341,7 @@ fn resolve_dependency(
     dtneededset: &mut DtNeededSet,
     depth: usize,
 ) {
-    // If DF_1_NODEFLIB is set ignore the search cache in the case a depedency could
+    // If DF_1_NODEFLIB is set ignore the search cache in the case a dependency could
     // resolve the library.
     if !elc.nodeflibs {
         if let Some(entry) = dtneededset.get(dtneeded) {
@@ -346,22 +350,19 @@ fn resolve_dependency(
         }
     }
 
-    let (r, path, mode) = resolve_dependency_1(dtneeded, config, elc);
-    if mode != DtNeededMode::NotFound {
-        let path = path.unwrap();
-
-        //dtneededset.insert(dtneeded.to_string());
+    if let Some(dep) = resolve_dependency_1(dtneeded, config, elc) {
         dtneededset.insert(
-            dtneeded.clone(),
+            //dtneeded.to_string(),
+            dtneeded.to_string(),
             DtNeededFound {
-                path: path.clone(),
-                mode: mode,
+                path: dep.path.clone(),
+                mode: dep.mode,
             },
         );
 
-        p.print_dependency(dtneeded, &path, &mode.to_string(), depth);
+        p.print_dependency(dtneeded, &dep.path, &dep.mode.to_string(), depth);
         let depth = depth + 1;
-        print_dependencies(p, &config, &r.unwrap(), dtneededset, depth);
+        print_dependencies(p, &config, &dep.elc, dtneededset, depth);
     } else {
         p.print_not_found(dtneeded, depth);
     }
@@ -371,22 +372,31 @@ fn resolve_dependency_1<'a>(
     dtneeded: &'a String,
     config: &'a Config,
     elc: &'a ElfLoaderConf,
-) -> (Option<ElfLoaderConf>, Option<&'a String>, DtNeededMode) {
+) -> Option<ResolvedDependency<'a>> {
     let path = Path::new(&dtneeded);
     // If the path is absolute skip the other tests.
     if path.is_absolute() {
-        if let Ok(r) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
-            return (Some(r), Some(dtneeded), DtNeededMode::Direct);
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
+            //return (Some(elc), Some(dtneeded), DtNeededMode::Direct);
+            return Some(ResolvedDependency {
+                elc: elc,
+                path: dtneeded,
+                mode: DtNeededMode::Direct
+            });
         }
-        return (None, None, DtNeededMode::NotFound);
+        return None
     }
 
     // Consider DT_RPATH iff DT_RUNPATH is not set
     if elc.runpath.is_empty() {
         for searchpath in &elc.rpath {
             let path = Path::new(&searchpath.path).join(dtneeded);
-            if let Ok(r) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
-                return (Some(r), Some(&searchpath.path), DtNeededMode::DtRpath);
+            if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
+                return Some(ResolvedDependency {
+                    elc: elc,
+                    path: &searchpath.path,
+                    mode: DtNeededMode::DtRpath
+                });
             }
         }
     }
@@ -394,40 +404,57 @@ fn resolve_dependency_1<'a>(
     // Check LD_LIBRARY_PATH paths.
     for searchpath in config.ld_library_path {
         let path = Path::new(&searchpath.path).join(dtneeded);
-        if let Ok(r) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
-            return (Some(r), Some(&searchpath.path), DtNeededMode::LdLibraryPath);
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
+            return Some(ResolvedDependency {
+                elc: elc,
+                path: &searchpath.path,
+                mode: DtNeededMode::LdLibraryPath
+            });
         }
     }
 
     // Check DT_RUNPATH.
     for searchpath in &elc.runpath {
         let path = Path::new(&searchpath.path).join(dtneeded);
-        if let Ok(r) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
-            return (Some(r), Some(&searchpath.path), DtNeededMode::DtRunpath);
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
+            return Some(ResolvedDependency {
+                elc: elc,
+                path: &searchpath.path,
+                mode: DtNeededMode::DtRunpath
+            });
         }
     }
 
+    // Skip system paths if DF_1_NODEFLIB is set.
     if elc.nodeflibs {
-        return (None, None, DtNeededMode::NotFound);
+        return None;
     }
 
     // Check the cached search paths from ld.so.conf
     for searchpath in config.ld_so_conf {
         let path = Path::new(&searchpath.path).join(dtneeded);
-        if let Ok(r) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
-            return (Some(r), Some(&searchpath.path), DtNeededMode::LdSoConf);
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
+            return Some(ResolvedDependency {
+                elc: elc,
+                path: &searchpath.path,
+                mode: DtNeededMode::LdSoConf
+            });
         }
     }
 
     // Finally the system directories.
     for searchpath in &config.system_dirs {
         let path = Path::new(&searchpath.path).join(dtneeded);
-        if let Ok(r) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
-            return (Some(r), Some(&searchpath.path), DtNeededMode::SystemDirs);
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
+            return Some(ResolvedDependency {
+                elc: elc,
+                path: &searchpath.path,
+                mode: DtNeededMode::SystemDirs
+            });
         }
     }
 
-    (None, None, DtNeededMode::NotFound)
+    None
 }
 
 fn open_elf_file<P: AsRef<Path>>(
