@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::{env, fmt, fs, io, process, str};
+use std::{env, fmt, fs, process, str};
 
 use object::elf::*;
 use object::read::elf::*;
@@ -310,13 +310,13 @@ fn parse_elf_dyn_flags<Elf: FileHeader>(
     0
 }
 
-fn print_binary(p: &mut Printer<'_>, filename: &Path, config: &Config, elc: &ElfLoaderConf) {
+fn print_binary(p: &Printer, filename: &Path, config: &Config, elc: &ElfLoaderConf) {
     p.print_executable(filename);
     print_dependencies(p, &config, &elc, &mut DtNeededSet::new(), 1)
 }
 
 fn print_dependencies(
-    p: &mut Printer<'_>,
+    p: &Printer,
     config: &Config,
     elc: &ElfLoaderConf,
     dtneededset: &mut DtNeededSet,
@@ -334,7 +334,7 @@ struct ResolvedDependency<'a> {
 }
 
 fn resolve_dependency(
-    p: &mut Printer<'_>,
+    p: &Printer,
     dtneeded: &String,
     config: &Config,
     elc: &ElfLoaderConf,
@@ -381,10 +381,10 @@ fn resolve_dependency_1<'a>(
             return Some(ResolvedDependency {
                 elc: elc,
                 path: dtneeded,
-                mode: DtNeededMode::Direct
+                mode: DtNeededMode::Direct,
             });
         }
-        return None
+        return None;
     }
 
     // Consider DT_RPATH iff DT_RUNPATH is not set
@@ -395,7 +395,7 @@ fn resolve_dependency_1<'a>(
                 return Some(ResolvedDependency {
                     elc: elc,
                     path: &searchpath.path,
-                    mode: DtNeededMode::DtRpath
+                    mode: DtNeededMode::DtRpath,
                 });
             }
         }
@@ -408,7 +408,7 @@ fn resolve_dependency_1<'a>(
             return Some(ResolvedDependency {
                 elc: elc,
                 path: &searchpath.path,
-                mode: DtNeededMode::LdLibraryPath
+                mode: DtNeededMode::LdLibraryPath,
             });
         }
     }
@@ -420,7 +420,7 @@ fn resolve_dependency_1<'a>(
             return Some(ResolvedDependency {
                 elc: elc,
                 path: &searchpath.path,
-                mode: DtNeededMode::DtRunpath
+                mode: DtNeededMode::DtRunpath,
             });
         }
     }
@@ -437,7 +437,7 @@ fn resolve_dependency_1<'a>(
             return Some(ResolvedDependency {
                 elc: elc,
                 path: &searchpath.path,
-                mode: DtNeededMode::LdSoConf
+                mode: DtNeededMode::LdSoConf,
             });
         }
     }
@@ -449,7 +449,7 @@ fn resolve_dependency_1<'a>(
             return Some(ResolvedDependency {
                 elc: elc,
                 path: &searchpath.path,
-                mode: DtNeededMode::SystemDirs
+                mode: DtNeededMode::SystemDirs,
             });
         }
     }
@@ -521,7 +521,7 @@ fn match_elf_soname(dtneeded: &String, elc: &ElfLoaderConf) -> bool {
 }
 
 fn print_binary_dependencies(
-    p: &mut Printer<'_>,
+    p: &Printer,
     ld_so_conf: &search_path::SearchPathVec,
     ld_library_path: &search_path::SearchPathVec,
     arg: &str,
@@ -596,10 +596,8 @@ fn main() {
         .map(|v| v.as_str())
         .collect::<Vec<_>>();
 
-    let mut stdout = io::stdout().lock();
-    let mut stderr = io::stderr().lock();
     let pp = matches.get_flag("path");
-    let mut printer = printer::create(&mut stdout, &mut stderr, pp);
+    let mut printer = printer::create(pp);
 
     let ld_so_conf = match ld_conf::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")) {
         Ok(ld_so_conf) => ld_so_conf,
