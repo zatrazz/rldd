@@ -1,3 +1,15 @@
+// Run-time link-editor configuration file parsing function.  The root files follow a simple
+// format:
+//
+// - Each line issues a directive to a path (absolute or relative) or a include comment to include
+//   another configuration file.
+// - Each entry can have any leading or trailing whitespace.
+// - Comments are started with '#' (as shell scritps).
+// - Empty lines are ignored.
+// - The 'include' command can reference a glob entry, which can include multiple file after
+//   expansion.
+// - Relative path are expanded based on the root of its parent.
+
 use glob::glob;
 use std::fs::File;
 use std::io::{self, BufRead};
@@ -10,6 +22,8 @@ fn merge_searchpaths(v: &mut SearchPathVec, n: &mut SearchPathVec) {
     v.append(n)
 }
 
+// Returns a vector of all available paths (it must exist on the filesystem)
+// parsed form the filename.
 pub fn parse_ld_so_conf<P: AsRef<Path>>(filename: &P) -> Result<SearchPathVec, &'static str> {
     let mut lines = match read_lines(filename) {
         Ok(lines) => lines,
