@@ -15,10 +15,12 @@ mod search_path;
 use printer::*;
 
 // Global configuration used on program dynamic resolution:
+// - ld_preload: Search path parser from ld.so.preload
 // - ld_library_path: Search path parsed from --ld-library-path.
 // - ld_so_conf: paths parsed from the ld.so.conf in the system.
 // - system_dirs: system defaults deirectories based on binary architecture.
 struct Config<'a> {
+    ld_preload: &'a search_path::SearchPathVec,
     ld_library_path: &'a search_path::SearchPathVec,
     ld_so_conf: &'a search_path::SearchPathVec,
     system_dirs: search_path::SearchPathVec,
@@ -49,6 +51,7 @@ struct ElfInfo {
 // The resolution mode for a dependency, used mostly for printing.
 #[derive(PartialEq, Clone, Copy)]
 enum DepMode {
+    Preload,        // Preload library.
     Direct,         // DT_SONAME refers to an aboslute path.
     DtRpath,        // DT_RPATH.
     LdLibraryPath,  // LD_LIBRARY_PATH.
@@ -60,6 +63,7 @@ enum DepMode {
 impl fmt::Display for DepMode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            DepMode::Preload => write!(f, "[preload]"),
             DepMode::Direct => write!(f, "[direct]"),
             DepMode::DtRpath => write!(f, "[rpath]"),
             DepMode::LdLibraryPath => write!(f, "[LD_LIBRARY_PATH]"),
@@ -329,7 +333,12 @@ fn parse_elf_dyn_flags<Elf: FileHeader>(
 
 fn print_binary(p: &Printer, filename: &Path, config: &Config, elc: &ElfInfo) {
     p.print_executable(filename);
-    print_dependencies(p, &config, &elc, &mut DtNeededSet::new(), 1)
+
+    let mut depset = DtNeededSet::new();
+    for entry in config.ld_preload {
+        resolve_dependency(p, &entry.path, &config, &elc, &mut depset, 1, true);
+    }
+    print_dependencies(p, &config, &elc, &mut depset, 1, false)
 }
 
 fn print_dependencies(
@@ -338,9 +347,10 @@ fn print_dependencies(
     elc: &ElfInfo,
     dtneededset: &mut DtNeededSet,
     idx: usize,
+    preload: bool,
 ) {
     for entry in &elc.deps {
-        resolve_dependency(p, &entry, &config, &elc, dtneededset, idx);
+        resolve_dependency(p, &entry, &config, &elc, dtneededset, idx, preload);
     }
 }
 
@@ -353,35 +363,36 @@ struct ResolvedDependency<'a> {
 
 fn resolve_dependency(
     p: &Printer,
-    dtneeded: &String,
+    dependency: &String,
     config: &Config,
     elc: &ElfInfo,
     dtneededset: &mut DtNeededSet,
     depth: usize,
+    preload: bool,
 ) {
     // If DF_1_NODEFLIB is set ignore the search cache in the case a dependency could
     // resolve the library.
     if !elc.nodeflibs {
-        if let Some(entry) = dtneededset.get(dtneeded) {
-            p.print_already_found(dtneeded, &entry.path, &entry.mode.to_string(), depth);
+        if let Some(entry) = dtneededset.get(dependency) {
+            p.print_already_found(dependency, &entry.path, &entry.mode.to_string(), depth);
             return;
         }
     }
 
-    if let Some(dep) = resolve_dependency_1(dtneeded, config, elc) {
+    if let Some(dep) = resolve_dependency_1(dependency, config, elc, preload) {
         dtneededset.insert(
-            dtneeded.to_string(),
+            dependency.to_string(),
             DepFound {
                 path: dep.path.clone(),
                 mode: dep.mode,
             },
         );
 
-        p.print_dependency(dtneeded, &dep.path, &dep.mode.to_string(), depth);
+        p.print_dependency(dependency, &dep.path, &dep.mode.to_string(), depth);
         let depth = depth + 1;
-        print_dependencies(p, &config, &dep.elc, dtneededset, depth);
+        print_dependencies(p, &config, &dep.elc, dtneededset, depth, preload);
     } else {
-        p.print_not_found(dtneeded, depth);
+        p.print_not_found(dependency, depth);
     }
 }
 
@@ -389,17 +400,17 @@ fn resolve_dependency_1<'a>(
     dtneeded: &'a String,
     config: &'a Config,
     elc: &'a ElfInfo,
+    preload: bool,
 ) -> Option<ResolvedDependency<'a>> {
     let path = Path::new(&dtneeded);
 
     // If the path is absolute skip the other modes.
     if path.is_absolute() {
         if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
-            //return (Some(elc), Some(dtneeded), DepMode::Direct);
             return Some(ResolvedDependency {
                 elc: elc,
                 path: dtneeded,
-                mode: DepMode::Direct,
+                mode: if preload { DepMode::Preload } else { DepMode::Direct },
             });
         }
         return None;
@@ -540,6 +551,7 @@ fn match_elf_soname(dtneeded: &String, elc: &ElfInfo) -> bool {
 
 fn print_binary_dependencies(
     p: &Printer,
+    ld_preload: &search_path::SearchPathVec,
     ld_so_conf: &search_path::SearchPathVec,
     ld_library_path: &search_path::SearchPathVec,
     arg: &str,
@@ -577,6 +589,7 @@ fn print_binary_dependencies(
     };
 
     let config = Config {
+        ld_preload: ld_preload,
         ld_library_path: ld_library_path,
         ld_so_conf: ld_so_conf,
         system_dirs: system_dirs,
@@ -606,6 +619,12 @@ fn main() {
                 .help("Assume the LD_LIBRATY_PATH is set")
                 .default_value(""),
         )
+        .arg(
+            Arg::new("ld_preload")
+                .long("ld-preload")
+                .help("Assume the LD_PRELOAD is set")
+                .default_value(""),
+        )
         .get_matches();
 
     let args = matches
@@ -631,7 +650,18 @@ fn main() {
             .expect("ld_library_path should be always set"),
     );
 
+    // glibc first parses LD_PRELOAD and then ls.so.preload.
+    let mut ld_preload = search_path::from_string(
+        matches
+            .get_one::<String>("ld_preload")
+            .expect("ld_preload should be alwas set"),
+    );
+
+    ld_preload.extend(
+        ld_conf::parse_ld_so_preload(&Path::new("/etc/ld.so.preload"))
+    );
+
     for arg in args {
-        print_binary_dependencies(&mut printer, &ld_so_conf, &ld_library_path, arg)
+        print_binary_dependencies(&mut printer, &ld_preload, &ld_so_conf, &ld_library_path, arg)
     }
 }
