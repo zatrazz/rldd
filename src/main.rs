@@ -614,7 +614,6 @@ fn main() {
         )
         .arg(
             Arg::new("ld_library_path")
-                .short('l')
                 .long("ld-library-path")
                 .help("Assume the LD_LIBRATY_PATH is set")
                 .default_value(""),
