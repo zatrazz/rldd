@@ -81,7 +81,7 @@ struct DepFound {
     mode: DepMode,
 }
 // Maps the dependency name (from DT_NEEDED) with the resolution information.
-type DtNeededSet = HashMap<String, DepFound>;
+type DepSet = HashMap<String, DepFound>;
 
 
 // ELF Parsing routines.
@@ -334,7 +334,7 @@ fn parse_elf_dyn_flags<Elf: FileHeader>(
 fn print_binary(p: &Printer, filename: &Path, config: &Config, elc: &ElfInfo) {
     p.print_executable(filename);
 
-    let mut depset = DtNeededSet::new();
+    let mut depset = DepSet::new();
     for entry in config.ld_preload {
         resolve_dependency(p, &entry.path, &config, &elc, &mut depset, 1, true);
     }
@@ -345,12 +345,12 @@ fn print_dependencies(
     p: &Printer,
     config: &Config,
     elc: &ElfInfo,
-    dtneededset: &mut DtNeededSet,
+    depset: &mut DepSet,
     idx: usize,
     preload: bool,
 ) {
     for entry in &elc.deps {
-        resolve_dependency(p, &entry, &config, &elc, dtneededset, idx, preload);
+        resolve_dependency(p, &entry, &config, &elc, depset, idx, preload);
     }
 }
 
@@ -366,21 +366,21 @@ fn resolve_dependency(
     dependency: &String,
     config: &Config,
     elc: &ElfInfo,
-    dtneededset: &mut DtNeededSet,
+    depset: &mut DepSet,
     depth: usize,
     preload: bool,
 ) {
     // If DF_1_NODEFLIB is set ignore the search cache in the case a dependency could
     // resolve the library.
     if !elc.nodeflibs {
-        if let Some(entry) = dtneededset.get(dependency) {
+        if let Some(entry) = depset.get(dependency) {
             p.print_already_found(dependency, &entry.path, &entry.mode.to_string(), depth);
             return;
         }
     }
 
     if let Some(dep) = resolve_dependency_1(dependency, config, elc, preload) {
-        dtneededset.insert(
+        depset.insert(
             dependency.to_string(),
             DepFound {
                 path: dep.path.clone(),
@@ -390,7 +390,7 @@ fn resolve_dependency(
 
         p.print_dependency(dependency, &dep.path, &dep.mode.to_string(), depth);
         let depth = depth + 1;
-        print_dependencies(p, &config, &dep.elc, dtneededset, depth, preload);
+        print_dependencies(p, &config, &dep.elc, depset, depth, preload);
     } else {
         p.print_not_found(dependency, depth);
     }
