@@ -1,3 +1,15 @@
+// Run-time link-editor configuration file parsing function.  The root files follow a simple
+// format:
+//
+// - Each line issues a directive to a path (absolute or relative) or a include comment to include
+//   another configuration file.
+// - Each entry can have any leading or trailing whitespace.
+// - Comments are started with '#' (as shell scritps).
+// - Empty lines are ignored.
+// - The 'include' command can reference a glob entry, which can include multiple file after
+//   expansion.
+// - Relative path are expanded based on the root of its parent.
+
 use glob::glob;
 use std::fs::File;
 use std::io::{self, BufRead};
@@ -10,6 +22,8 @@ fn merge_searchpaths(v: &mut SearchPathVec, n: &mut SearchPathVec) {
     v.append(n)
 }
 
+// Returns a vector of all available paths (it must exist on the filesystem)
+// parsed form the filename.
 pub fn parse_ld_so_conf<P: AsRef<Path>>(filename: &P) -> Result<SearchPathVec, &'static str> {
     let mut lines = match read_lines(filename) {
         Ok(lines) => lines,
@@ -18,24 +32,14 @@ pub fn parse_ld_so_conf<P: AsRef<Path>>(filename: &P) -> Result<SearchPathVec, &
 
     let mut r = SearchPathVec::new();
 
-    while let Some(Ok(entry)) = lines.next() {
-        // Remove leading whitespace.
-        let entry = entry.trim_start();
-        // Remove trailing comments.
-        let comment = match entry.find('#') {
-            Some(comment) => comment,
-            None => entry.len(),
+    while let Some(Ok(line)) = lines.next() {
+        let line = match parse_line(&line) {
+            Some(line) => line,
+            None => continue,
         };
-        let entry = &entry[0..comment];
-        // Remove trailing whitespaces.
-        let entry = entry.trim_end();
-        // Skip empty lines.
-        if entry.is_empty() {
-            continue;
-        }
 
-        if entry.starts_with("include") {
-            let mut fields = entry.split_whitespace();
+        if line.starts_with("include") {
+            let mut fields = line.split_whitespace();
             match fields.nth(1) {
                 Some(e) => match parse_ld_so_conf_glob(&filename.as_ref().parent(), e) {
                     Ok(mut v) => merge_searchpaths(&mut r, &mut v),
@@ -44,8 +48,8 @@ pub fn parse_ld_so_conf<P: AsRef<Path>>(filename: &P) -> Result<SearchPathVec, &
                 None => return Err("Invalid ld.so.conf"),
             };
         // hwcap directives is ignored.
-        } else if !entry.starts_with("hwcap") {
-            r.add_path(entry);
+        } else if !line.starts_with("hwcap") {
+            r.add_path(&line);
         }
     }
 
@@ -58,6 +62,24 @@ where
 {
     let file = File::open(filename)?;
     Ok(io::BufReader::new(file).lines())
+}
+
+fn parse_line(line: &String) -> Option<String> {
+    // Remove leading whitespace.
+    let line = line.trim_start();
+    // Remove trailing comments.
+    let comment = match line.find('#') {
+        Some(comment) => comment,
+        None => line.len(),
+    };
+    let line = &line[0..comment];
+    // Remove trailing whitespaces.
+    let line = line.trim_end();
+    // Skip empty lines.
+    if line.is_empty() {
+        return None
+    }
+    Some(line.to_string())
 }
 
 fn parse_ld_so_conf_glob(
@@ -88,6 +110,31 @@ fn parse_ld_so_conf_glob(
     }
 
     Ok(r)
+}
+
+// Returns a vector of libraries read from file FILENAME.  The file contains names of
+// libraries to be loaded, separated by white spaces or `:'.
+pub fn parse_ld_so_preload<P: AsRef<Path>>(filename: &P) -> SearchPathVec {
+    let mut r = SearchPathVec::new();
+
+    let mut lines = match read_lines(filename) {
+        Ok(lines) => lines,
+        // Ignore errors if file can not be read.
+        Err(_) => return r,
+    };
+
+    while let Some(Ok(line)) = lines.next() {
+        let line = match parse_line(&line) {
+            Some(line) => line,
+            None => continue,
+        };
+
+        for entry in line.split(&[':', ' ', '\t'][..]) {
+            r.add_path(&entry);
+        }
+    }
+
+    r
 }
 
 #[cfg(test)]
@@ -294,5 +341,33 @@ mod tests {
             }
             Err(e) => Err(Error::new(ErrorKind::Other, e)),
         }
+    }
+
+    #[test]
+    fn parse_ld_so_preload_single() -> Result<(), std::io::Error> {
+        let tmpdir = TempDir::new()?;
+        let filepath = tmpdir.path().join("ld.so.preload");
+        let mut file = File::create(&filepath)?;
+
+        let libdir1 = tmpdir.path().join("lib1");
+        fs::create_dir(&libdir1)?;
+        let libdir2 = tmpdir.path().join("lib2");
+        fs::create_dir(&libdir2)?;
+        let libdir3 = tmpdir.path().join("lib3");
+        fs::create_dir(&libdir3)?;
+        let libdir4 = tmpdir.path().join("lib4");
+        fs::create_dir(&libdir4)?;
+
+        write!(file, "   # comment number 1\n")?;
+        write!(file, " {}:{} # comment number 4\n", libdir1.display(), libdir2.display())?;
+        write!(file, " {} {} # comment number 4\n", libdir3.display(), libdir4.display())?;
+
+        let entries = parse_ld_so_preload(&filepath);
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0], libdir1.to_str().unwrap());
+        assert_eq!(entries[1], libdir2.to_str().unwrap());
+        assert_eq!(entries[2], libdir3.to_str().unwrap());
+        assert_eq!(entries[3], libdir4.to_str().unwrap());
+        Ok(())
     }
 }

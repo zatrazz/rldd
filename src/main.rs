@@ -14,15 +14,27 @@ mod printer;
 mod search_path;
 use printer::*;
 
+// Global configuration used on program dynamic resolution:
+// - ld_preload: Search path parser from ld.so.preload
+// - ld_library_path: Search path parsed from --ld-library-path.
+// - ld_so_conf: paths parsed from the ld.so.conf in the system.
+// - system_dirs: system defaults deirectories based on binary architecture.
 struct Config<'a> {
+    ld_preload: &'a search_path::SearchPathVec,
     ld_library_path: &'a search_path::SearchPathVec,
     ld_so_conf: &'a search_path::SearchPathVec,
     system_dirs: search_path::SearchPathVec,
 }
 
-type DtNeededVec = Vec<String>;
+type DepsVec = Vec<String>;
 
-struct ElfLoaderConf {
+// A parsed ELF object with the relevant informations:
+// - ei_class/ei_data/ei_osabi: ElfXX_Ehdr fields used in system library paths resolution,
+// - soname: DT_SONAME, if present.
+// - rpath: DT_RPATH search list paths, if present.
+// - runpatch: DT_RUNPATH search list paths, if present.
+// - nodeflibs: set if DF_1_NODEFLIB from DT_FLAGS_1 is set.
+struct ElfInfo {
     ei_class: u8,
     ei_data: u8,
     ei_osabi: u8,
@@ -33,41 +45,48 @@ struct ElfLoaderConf {
     runpath: search_path::SearchPathVec,
     nodeflibs: bool,
 
-    dtneeded: DtNeededVec,
+    deps: DepsVec,
 }
 
+// The resolution mode for a dependency, used mostly for printing.
 #[derive(PartialEq, Clone, Copy)]
-enum DtNeededMode {
-    Direct,
-    DtRpath,
-    LdLibraryPath,
-    DtRunpath,
-    LdSoConf,
-    SystemDirs,
+enum DepMode {
+    Preload,        // Preload library.
+    Direct,         // DT_SONAME refers to an aboslute path.
+    DtRpath,        // DT_RPATH.
+    LdLibraryPath,  // LD_LIBRARY_PATH.
+    DtRunpath,      // DT_RUNPATH.
+    LdSoConf,       // ld.so.conf.
+    SystemDirs,     // Default system directory (i.e '/lib64').
 }
 
-impl fmt::Display for DtNeededMode {
+impl fmt::Display for DepMode {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            DtNeededMode::Direct => write!(f, "[direct]"),
-            DtNeededMode::DtRpath => write!(f, "[rpath]"),
-            DtNeededMode::LdLibraryPath => write!(f, "[LD_LIBRARY_PATH]"),
-            DtNeededMode::DtRunpath => write!(f, "[runpath]"),
-            DtNeededMode::LdSoConf => write!(f, "[ld.so.conf]"),
-            DtNeededMode::SystemDirs => write!(f, "[system default paths]"),
+            DepMode::Preload => write!(f, "[preload]"),
+            DepMode::Direct => write!(f, "[direct]"),
+            DepMode::DtRpath => write!(f, "[rpath]"),
+            DepMode::LdLibraryPath => write!(f, "[LD_LIBRARY_PATH]"),
+            DepMode::DtRunpath => write!(f, "[runpath]"),
+            DepMode::LdSoConf => write!(f, "[ld.so.conf]"),
+            DepMode::SystemDirs => write!(f, "[system default paths]"),
         }
     }
 }
 
-// Keep track of DT_NEEDED already found.
-struct DtNeededFound {
+// A found dependency (DT_NEEDED), used either suppress printing or use a different
+// color scheme.
+struct DepFound {
     path: String,
-    mode: DtNeededMode,
+    mode: DepMode,
 }
+// Maps the dependency name (from DT_NEEDED) with the resolution information.
+type DtNeededSet = HashMap<String, DepFound>;
 
-type DtNeededSet = HashMap<String, DtNeededFound>;
 
-fn parse_object(data: &[u8], origin: &str) -> Result<ElfLoaderConf, &'static str> {
+// ELF Parsing routines.
+
+fn parse_object(data: &[u8], origin: &str) -> Result<ElfInfo, &'static str> {
     let kind = match object::FileKind::parse(data) {
         Ok(file) => file,
         Err(_err) => return Err("Failed to parse file"),
@@ -80,14 +99,14 @@ fn parse_object(data: &[u8], origin: &str) -> Result<ElfLoaderConf, &'static str
     }
 }
 
-fn parse_elf32(data: &[u8], origin: &str) -> Result<ElfLoaderConf, &'static str> {
+fn parse_elf32(data: &[u8], origin: &str) -> Result<ElfInfo, &'static str> {
     if let Some(elf) = FileHeader32::<Endianness>::parse(data).handle_err() {
         return parse_elf(elf, data, origin);
     }
     Err("Invalid ELF32 object")
 }
 
-fn parse_elf64(data: &[u8], origin: &str) -> Result<ElfLoaderConf, &'static str> {
+fn parse_elf64(data: &[u8], origin: &str) -> Result<ElfInfo, &'static str> {
     if let Some(elf) = FileHeader64::<Endianness>::parse(data).handle_err() {
         return parse_elf(elf, data, origin);
     }
@@ -98,7 +117,7 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
     elf: &Elf,
     data: &[u8],
     origin: &str,
-) -> Result<ElfLoaderConf, &'static str> {
+) -> Result<ElfInfo, &'static str> {
     let endian = match elf.endian() {
         Ok(val) => val,
         Err(_) => return Err("invalid endianess"),
@@ -128,7 +147,7 @@ fn parse_header_elf<Elf: FileHeader<Endian = Endianness>>(
     elf: &Elf,
     data: &[u8],
     origin: &str,
-) -> Result<ElfLoaderConf, &'static str> {
+) -> Result<ElfInfo, &'static str> {
     match elf.program_headers(endian, data) {
         Ok(segments) => parse_elf_program_headers(endian, data, elf, segments, origin),
         Err(_) => Err("invalid segment"),
@@ -141,7 +160,7 @@ fn parse_elf_program_headers<Elf: FileHeader>(
     elf: &Elf,
     segments: &[Elf::ProgramHeader],
     origin: &str,
-) -> Result<ElfLoaderConf, &'static str> {
+) -> Result<ElfInfo, &'static str> {
     match segments
         .iter()
         .find(|&&seg| seg.p_type(endian) == PT_DYNAMIC)
@@ -158,7 +177,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
     segments: &[Elf::ProgramHeader],
     segment: &Elf::ProgramHeader,
     origin: &str,
-) -> Result<ElfLoaderConf, &'static str> {
+) -> Result<ElfInfo, &'static str> {
     if let Ok(Some(dynamic)) = segment.dynamic(endian, data) {
         let mut strtab = 0;
         let mut strsz = 0;
@@ -183,7 +202,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
         let nodeflibs = dt_flags_1 & df_1_nodeflib == df_1_nodeflib;
 
         return match parse_elf_dtneeded::<Elf>(endian, dynamic, dynstr) {
-            Ok(dtneeded) => Ok(ElfLoaderConf {
+            Ok(dtneeded) => Ok(ElfInfo {
                 ei_class: elf.e_ident().class,
                 ei_data: elf.e_ident().data,
                 ei_osabi: elf.e_ident().os_abi,
@@ -192,7 +211,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
                 rpath: parse_elf_dyn_searchpath(endian, elf, DT_RPATH, dynamic, dynstr, origin),
                 runpath: parse_elf_dyn_searchpath(endian, elf, DT_RUNPATH, dynamic, dynstr, origin),
                 nodeflibs: nodeflibs,
-                dtneeded: dtneeded,
+                deps: dtneeded,
             }),
             Err(e) => Err(e),
         };
@@ -265,8 +284,8 @@ fn parse_elf_dtneeded<Elf: FileHeader>(
     endian: Elf::Endian,
     dynamic: &[Elf::Dyn],
     dynstr: StringTable,
-) -> Result<DtNeededVec, &'static str> {
-    let mut dtneeded = DtNeededVec::new();
+) -> Result<DepsVec, &'static str> {
+    let mut dtneeded = DepsVec::new();
     for d in dynamic {
         if d.d_tag(endian).into() == DT_NULL.into() {
             break;
@@ -310,84 +329,94 @@ fn parse_elf_dyn_flags<Elf: FileHeader>(
     0
 }
 
-fn print_binary(p: &Printer, filename: &Path, config: &Config, elc: &ElfLoaderConf) {
+// Printing dependencies functions.
+
+fn print_binary(p: &Printer, filename: &Path, config: &Config, elc: &ElfInfo) {
     p.print_executable(filename);
-    print_dependencies(p, &config, &elc, &mut DtNeededSet::new(), 1)
+
+    let mut depset = DtNeededSet::new();
+    for entry in config.ld_preload {
+        resolve_dependency(p, &entry.path, &config, &elc, &mut depset, 1, true);
+    }
+    print_dependencies(p, &config, &elc, &mut depset, 1, false)
 }
 
 fn print_dependencies(
     p: &Printer,
     config: &Config,
-    elc: &ElfLoaderConf,
+    elc: &ElfInfo,
     dtneededset: &mut DtNeededSet,
     idx: usize,
+    preload: bool,
 ) {
-    for entry in &elc.dtneeded {
-        resolve_dependency(p, &entry, &config, &elc, dtneededset, idx);
+    for entry in &elc.deps {
+        resolve_dependency(p, &entry, &config, &elc, dtneededset, idx, preload);
     }
 }
 
+// Returned from resolve_dependency_1 with resolved information.
 struct ResolvedDependency<'a> {
-    elc: ElfLoaderConf,
+    elc: ElfInfo,
     path: &'a String,
-    mode: DtNeededMode,
+    mode: DepMode,
 }
 
 fn resolve_dependency(
     p: &Printer,
-    dtneeded: &String,
+    dependency: &String,
     config: &Config,
-    elc: &ElfLoaderConf,
+    elc: &ElfInfo,
     dtneededset: &mut DtNeededSet,
     depth: usize,
+    preload: bool,
 ) {
     // If DF_1_NODEFLIB is set ignore the search cache in the case a dependency could
     // resolve the library.
     if !elc.nodeflibs {
-        if let Some(entry) = dtneededset.get(dtneeded) {
-            p.print_already_found(dtneeded, &entry.path, &entry.mode.to_string(), depth);
+        if let Some(entry) = dtneededset.get(dependency) {
+            p.print_already_found(dependency, &entry.path, &entry.mode.to_string(), depth);
             return;
         }
     }
 
-    if let Some(dep) = resolve_dependency_1(dtneeded, config, elc) {
+    if let Some(dep) = resolve_dependency_1(dependency, config, elc, preload) {
         dtneededset.insert(
-            //dtneeded.to_string(),
-            dtneeded.to_string(),
-            DtNeededFound {
+            dependency.to_string(),
+            DepFound {
                 path: dep.path.clone(),
                 mode: dep.mode,
             },
         );
 
-        p.print_dependency(dtneeded, &dep.path, &dep.mode.to_string(), depth);
+        p.print_dependency(dependency, &dep.path, &dep.mode.to_string(), depth);
         let depth = depth + 1;
-        print_dependencies(p, &config, &dep.elc, dtneededset, depth);
+        print_dependencies(p, &config, &dep.elc, dtneededset, depth, preload);
     } else {
-        p.print_not_found(dtneeded, depth);
+        p.print_not_found(dependency, depth);
     }
 }
 
 fn resolve_dependency_1<'a>(
     dtneeded: &'a String,
     config: &'a Config,
-    elc: &'a ElfLoaderConf,
+    elc: &'a ElfInfo,
+    preload: bool,
 ) -> Option<ResolvedDependency<'a>> {
     let path = Path::new(&dtneeded);
-    // If the path is absolute skip the other tests.
+
+    // If the path is absolute skip the other modes.
     if path.is_absolute() {
         if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
-            //return (Some(elc), Some(dtneeded), DtNeededMode::Direct);
             return Some(ResolvedDependency {
                 elc: elc,
                 path: dtneeded,
-                mode: DtNeededMode::Direct,
+                mode: if preload { DepMode::Preload } else { DepMode::Direct },
             });
         }
         return None;
     }
 
-    // Consider DT_RPATH iff DT_RUNPATH is not set
+    // Consider DT_RPATH iff DT_RUNPATH is not set.
     if elc.runpath.is_empty() {
         for searchpath in &elc.rpath {
             let path = Path::new(&searchpath.path).join(dtneeded);
@@ -395,7 +424,7 @@ fn resolve_dependency_1<'a>(
                 return Some(ResolvedDependency {
                     elc: elc,
                     path: &searchpath.path,
-                    mode: DtNeededMode::DtRpath,
+                    mode: DepMode::DtRpath,
                 });
             }
         }
@@ -408,7 +437,7 @@ fn resolve_dependency_1<'a>(
             return Some(ResolvedDependency {
                 elc: elc,
                 path: &searchpath.path,
-                mode: DtNeededMode::LdLibraryPath,
+                mode: DepMode::LdLibraryPath,
             });
         }
     }
@@ -420,7 +449,7 @@ fn resolve_dependency_1<'a>(
             return Some(ResolvedDependency {
                 elc: elc,
                 path: &searchpath.path,
-                mode: DtNeededMode::DtRunpath,
+                mode: DepMode::DtRunpath,
             });
         }
     }
@@ -437,7 +466,7 @@ fn resolve_dependency_1<'a>(
             return Some(ResolvedDependency {
                 elc: elc,
                 path: &searchpath.path,
-                mode: DtNeededMode::LdSoConf,
+                mode: DepMode::LdSoConf,
             });
         }
     }
@@ -449,7 +478,7 @@ fn resolve_dependency_1<'a>(
             return Some(ResolvedDependency {
                 elc: elc,
                 path: &searchpath.path,
-                mode: DtNeededMode::SystemDirs,
+                mode: DepMode::SystemDirs,
             });
         }
     }
@@ -459,9 +488,9 @@ fn resolve_dependency_1<'a>(
 
 fn open_elf_file<P: AsRef<Path>>(
     filename: &P,
-    melc: Option<&ElfLoaderConf>,
+    melc: Option<&ElfInfo>,
     dtneeded: Option<&String>,
-) -> Result<ElfLoaderConf, &'static str> {
+) -> Result<ElfInfo, &'static str> {
     let file = match fs::File::open(&filename) {
         Ok(file) => file,
         Err(_) => return Err("Failed to open file"),
@@ -490,7 +519,7 @@ fn open_elf_file<P: AsRef<Path>>(
     }
 }
 
-fn match_elf_name(melc: &ElfLoaderConf, dtneeded: Option<&String>, elc: &ElfLoaderConf) -> bool {
+fn match_elf_name(melc: &ElfInfo, dtneeded: Option<&String>, elc: &ElfInfo) -> bool {
     if !check_elf_header(&elc) || !match_elf_header(&melc, &elc) {
         return false;
     }
@@ -503,16 +532,16 @@ fn match_elf_name(melc: &ElfLoaderConf, dtneeded: Option<&String>, elc: &ElfLoad
     true
 }
 
-fn check_elf_header(elc: &ElfLoaderConf) -> bool {
+fn check_elf_header(elc: &ElfInfo) -> bool {
     // TODO: ARM also accepts ELFOSABI_SYSV
     elc.ei_osabi == ELFOSABI_SYSV || elc.ei_osabi == ELFOSABI_GNU
 }
 
-fn match_elf_header(a1: &ElfLoaderConf, a2: &ElfLoaderConf) -> bool {
+fn match_elf_header(a1: &ElfInfo, a2: &ElfInfo) -> bool {
     a1.ei_class == a2.ei_class && a1.ei_data == a2.ei_data && a1.e_machine == a2.e_machine
 }
 
-fn match_elf_soname(dtneeded: &String, elc: &ElfLoaderConf) -> bool {
+fn match_elf_soname(dtneeded: &String, elc: &ElfInfo) -> bool {
     let soname = &elc.soname;
     if let Some(soname) = soname {
         return dtneeded == soname;
@@ -522,6 +551,7 @@ fn match_elf_soname(dtneeded: &String, elc: &ElfLoaderConf) -> bool {
 
 fn print_binary_dependencies(
     p: &Printer,
+    ld_preload: &search_path::SearchPathVec,
     ld_so_conf: &search_path::SearchPathVec,
     ld_library_path: &search_path::SearchPathVec,
     arg: &str,
@@ -559,6 +589,7 @@ fn print_binary_dependencies(
     };
 
     let config = Config {
+        ld_preload: ld_preload,
         ld_library_path: ld_library_path,
         ld_so_conf: ld_so_conf,
         system_dirs: system_dirs,
@@ -588,6 +619,12 @@ fn main() {
                 .help("Assume the LD_LIBRATY_PATH is set")
                 .default_value(""),
         )
+        .arg(
+            Arg::new("ld_preload")
+                .long("ld-preload")
+                .help("Assume the LD_PRELOAD is set")
+                .default_value(""),
+        )
         .get_matches();
 
     let args = matches
@@ -613,7 +650,18 @@ fn main() {
             .expect("ld_library_path should be always set"),
     );
 
+    // glibc first parses LD_PRELOAD and then ls.so.preload.
+    let mut ld_preload = search_path::from_string(
+        matches
+            .get_one::<String>("ld_preload")
+            .expect("ld_preload should be alwas set"),
+    );
+
+    ld_preload.extend(
+        ld_conf::parse_ld_so_preload(&Path::new("/etc/ld.so.preload"))
+    );
+
     for arg in args {
-        print_binary_dependencies(&mut printer, &ld_so_conf, &ld_library_path, arg)
+        print_binary_dependencies(&mut printer, &ld_preload, &ld_so_conf, &ld_library_path, arg)
     }
 }

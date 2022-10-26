@@ -1,3 +1,6 @@
+// Provides helper function to handle search path for library resolution, for either DT_RPATH,
+// DT_RUNPATH, ld.so.conf, or system directories.
+
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::{fmt, fs};
@@ -60,6 +63,8 @@ pub fn from_string(string: &str) -> SearchPathVec {
     r
 }
 
+// Return the default system directory for the architectures and class.  It is hard
+// wired on glibc install for each triplet (the $slibdir).
 pub fn get_slibdir(e_machine: u16, ei_class: u8) -> Option<&'static str> {
     match e_machine {
         EM_AARCH64 | EM_ALPHA | EM_PPC64 | EM_LOONGARCH => Some("/lib64"),
@@ -93,8 +98,8 @@ pub fn get_system_dirs(e_machine: u16, ei_class: u8) -> Option<SearchPathVec> {
         dev: 0,
         ino: 0,
     });
-    // The '/usr' part is configurable on glibc configure, however there is no
-    // direct way to obtain it on runtime.
+    // The '/usr' part is configurable on glibc install, however there is no direct
+    // way to obtain it on runtime.
     // TODO: Add an option to override it.
     r.push(SearchPath {
         path: format!("/usr/{}", path.to_string()),
