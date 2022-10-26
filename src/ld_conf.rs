@@ -77,7 +77,7 @@ fn parse_line(line: &String) -> Option<String> {
     let line = line.trim_end();
     // Skip empty lines.
     if line.is_empty() {
-        return None
+        return None;
     }
     Some(line.to_string())
 }
@@ -359,8 +359,18 @@ mod tests {
         fs::create_dir(&libdir4)?;
 
         write!(file, "   # comment number 1\n")?;
-        write!(file, " {}:{} # comment number 4\n", libdir1.display(), libdir2.display())?;
-        write!(file, " {} {} # comment number 4\n", libdir3.display(), libdir4.display())?;
+        write!(
+            file,
+            " {}:{} # comment number 4\n",
+            libdir1.display(),
+            libdir2.display()
+        )?;
+        write!(
+            file,
+            " {} {} # comment number 4\n",
+            libdir3.display(),
+            libdir4.display()
+        )?;
 
         let entries = parse_ld_so_preload(&filepath);
         assert_eq!(entries.len(), 4);

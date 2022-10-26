@@ -10,6 +10,7 @@ use object::Endianness;
 use clap::{command, Arg, ArgAction};
 
 mod ld_conf;
+mod platform;
 mod printer;
 mod search_path;
 use printer::*;
@@ -24,6 +25,7 @@ struct Config<'a> {
     ld_library_path: &'a search_path::SearchPathVec,
     ld_so_conf: &'a search_path::SearchPathVec,
     system_dirs: search_path::SearchPathVec,
+    platform: Option<&'a String>,
 }
 
 type DepsVec = Vec<String>;
@@ -51,13 +53,13 @@ struct ElfInfo {
 // The resolution mode for a dependency, used mostly for printing.
 #[derive(PartialEq, Clone, Copy)]
 enum DepMode {
-    Preload,        // Preload library.
-    Direct,         // DT_SONAME refers to an aboslute path.
-    DtRpath,        // DT_RPATH.
-    LdLibraryPath,  // LD_LIBRARY_PATH.
-    DtRunpath,      // DT_RUNPATH.
-    LdSoConf,       // ld.so.conf.
-    SystemDirs,     // Default system directory (i.e '/lib64').
+    Preload,       // Preload library.
+    Direct,        // DT_SONAME refers to an aboslute path.
+    DtRpath,       // DT_RPATH.
+    LdLibraryPath, // LD_LIBRARY_PATH.
+    DtRunpath,     // DT_RUNPATH.
+    LdSoConf,      // ld.so.conf.
+    SystemDirs,    // Default system directory (i.e '/lib64').
 }
 
 impl fmt::Display for DepMode {
@@ -83,32 +85,43 @@ struct DepFound {
 // Maps the dependency name (from DT_NEEDED) with the resolution information.
 type DepSet = HashMap<String, DepFound>;
 
-
 // ELF Parsing routines.
 
-fn parse_object(data: &[u8], origin: &str) -> Result<ElfInfo, &'static str> {
+fn parse_object(
+    data: &[u8],
+    origin: &str,
+    platform: Option<&String>,
+) -> Result<ElfInfo, &'static str> {
     let kind = match object::FileKind::parse(data) {
         Ok(file) => file,
         Err(_err) => return Err("Failed to parse file"),
     };
 
     match kind {
-        object::FileKind::Elf32 => parse_elf32(data, origin),
-        object::FileKind::Elf64 => parse_elf64(data, origin),
+        object::FileKind::Elf32 => parse_elf32(data, origin, platform),
+        object::FileKind::Elf64 => parse_elf64(data, origin, platform),
         _ => Err("Invalid object"),
     }
 }
 
-fn parse_elf32(data: &[u8], origin: &str) -> Result<ElfInfo, &'static str> {
+fn parse_elf32(
+    data: &[u8],
+    origin: &str,
+    platform: Option<&String>,
+) -> Result<ElfInfo, &'static str> {
     if let Some(elf) = FileHeader32::<Endianness>::parse(data).handle_err() {
-        return parse_elf(elf, data, origin);
+        return parse_elf(elf, data, origin, platform);
     }
     Err("Invalid ELF32 object")
 }
 
-fn parse_elf64(data: &[u8], origin: &str) -> Result<ElfInfo, &'static str> {
+fn parse_elf64(
+    data: &[u8],
+    origin: &str,
+    platform: Option<&String>,
+) -> Result<ElfInfo, &'static str> {
     if let Some(elf) = FileHeader64::<Endianness>::parse(data).handle_err() {
-        return parse_elf(elf, data, origin);
+        return parse_elf(elf, data, origin, platform);
     }
     Err("Invalid ELF64 object")
 }
@@ -117,6 +130,7 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
     elf: &Elf,
     data: &[u8],
     origin: &str,
+    platform: Option<&String>,
 ) -> Result<ElfInfo, &'static str> {
     let endian = match elf.endian() {
         Ok(val) => val,
@@ -124,7 +138,7 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
     };
 
     match elf.e_type(endian) {
-        ET_EXEC | ET_DYN => parse_header_elf(endian, elf, data, origin),
+        ET_EXEC | ET_DYN => parse_header_elf(endian, elf, data, origin, platform),
         _ => Err("Invalid ELF file"),
     }
 }
@@ -147,9 +161,10 @@ fn parse_header_elf<Elf: FileHeader<Endian = Endianness>>(
     elf: &Elf,
     data: &[u8],
     origin: &str,
+    platform: Option<&String>,
 ) -> Result<ElfInfo, &'static str> {
     match elf.program_headers(endian, data) {
-        Ok(segments) => parse_elf_program_headers(endian, data, elf, segments, origin),
+        Ok(segments) => parse_elf_program_headers(endian, data, elf, segments, origin, platform),
         Err(_) => Err("invalid segment"),
     }
 }
@@ -160,12 +175,13 @@ fn parse_elf_program_headers<Elf: FileHeader>(
     elf: &Elf,
     segments: &[Elf::ProgramHeader],
     origin: &str,
+    platform: Option<&String>,
 ) -> Result<ElfInfo, &'static str> {
     match segments
         .iter()
         .find(|&&seg| seg.p_type(endian) == PT_DYNAMIC)
     {
-        Some(seg) => parse_elf_segment_dynamic(endian, data, elf, segments, seg, origin),
+        Some(seg) => parse_elf_segment_dynamic(endian, data, elf, segments, seg, origin, platform),
         None => Err("No dynamic segments found"),
     }
 }
@@ -177,6 +193,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
     segments: &[Elf::ProgramHeader],
     segment: &Elf::ProgramHeader,
     origin: &str,
+    platform: Option<&String>,
 ) -> Result<ElfInfo, &'static str> {
     if let Ok(Some(dynamic)) = segment.dynamic(endian, data) {
         let mut strtab = 0;
@@ -208,8 +225,12 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
                 ei_osabi: elf.e_ident().os_abi,
                 e_machine: elf.e_machine(endian),
                 soname: parse_elf_dyn_str::<Elf>(endian, DT_SONAME, dynamic, dynstr),
-                rpath: parse_elf_dyn_searchpath(endian, elf, DT_RPATH, dynamic, dynstr, origin),
-                runpath: parse_elf_dyn_searchpath(endian, elf, DT_RUNPATH, dynamic, dynstr, origin),
+                rpath: parse_elf_dyn_searchpath(
+                    endian, elf, DT_RPATH, dynamic, dynstr, origin, platform,
+                ),
+                runpath: parse_elf_dyn_searchpath(
+                    endian, elf, DT_RUNPATH, dynamic, dynstr, origin, platform,
+                ),
                 nodeflibs: nodeflibs,
                 deps: dtneeded,
             }),
@@ -266,14 +287,20 @@ fn parse_elf_dyn_searchpath<Elf: FileHeader>(
     dynamic: &[Elf::Dyn],
     dynstr: StringTable,
     origin: &str,
+    platform: Option<&String>,
 ) -> search_path::SearchPathVec {
     if let Some(dynstr) = parse_elf_dyn_str::<Elf>(endian, tag, dynamic, dynstr) {
-        // Replace $ORIGIN and $LIB
-        // TODO: Add $PLATFORM support.
+        // EXpand $ORIGIN, $LIB, and $PLATFORM.
         let newdynstr = dynstr.replace("$ORIGIN", origin);
 
         let libdir = search_path::get_slibdir(elf.e_machine(endian), elf.e_ident().class).unwrap();
         let newdynstr = newdynstr.replace("$LIB", libdir);
+
+        let platform = match platform {
+            Some(platform) => platform.to_string(),
+            None => platform::get(elf.e_machine(endian), elf.e_ident().data),
+        };
+        let newdynstr = newdynstr.replace("$PLATFORM", platform.as_str());
 
         return search_path::from_string(newdynstr.as_str());
     }
@@ -406,11 +433,15 @@ fn resolve_dependency_1<'a>(
 
     // If the path is absolute skip the other modes.
     if path.is_absolute() {
-        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
             return Some(ResolvedDependency {
                 elc: elc,
                 path: dtneeded,
-                mode: if preload { DepMode::Preload } else { DepMode::Direct },
+                mode: if preload {
+                    DepMode::Preload
+                } else {
+                    DepMode::Direct
+                },
             });
         }
         return None;
@@ -420,7 +451,7 @@ fn resolve_dependency_1<'a>(
     if elc.runpath.is_empty() {
         for searchpath in &elc.rpath {
             let path = Path::new(&searchpath.path).join(dtneeded);
-            if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
+            if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
                 return Some(ResolvedDependency {
                     elc: elc,
                     path: &searchpath.path,
@@ -433,7 +464,7 @@ fn resolve_dependency_1<'a>(
     // Check LD_LIBRARY_PATH paths.
     for searchpath in config.ld_library_path {
         let path = Path::new(&searchpath.path).join(dtneeded);
-        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
             return Some(ResolvedDependency {
                 elc: elc,
                 path: &searchpath.path,
@@ -445,7 +476,7 @@ fn resolve_dependency_1<'a>(
     // Check DT_RUNPATH.
     for searchpath in &elc.runpath {
         let path = Path::new(&searchpath.path).join(dtneeded);
-        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
             return Some(ResolvedDependency {
                 elc: elc,
                 path: &searchpath.path,
@@ -462,7 +493,7 @@ fn resolve_dependency_1<'a>(
     // Check the cached search paths from ld.so.conf
     for searchpath in config.ld_so_conf {
         let path = Path::new(&searchpath.path).join(dtneeded);
-        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
             return Some(ResolvedDependency {
                 elc: elc,
                 path: &searchpath.path,
@@ -474,7 +505,7 @@ fn resolve_dependency_1<'a>(
     // Finally the system directories.
     for searchpath in &config.system_dirs {
         let path = Path::new(&searchpath.path).join(dtneeded);
-        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded)) {
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
             return Some(ResolvedDependency {
                 elc: elc,
                 path: &searchpath.path,
@@ -486,10 +517,11 @@ fn resolve_dependency_1<'a>(
     None
 }
 
-fn open_elf_file<P: AsRef<Path>>(
+fn open_elf_file<'a, P: AsRef<Path>>(
     filename: &P,
     melc: Option<&ElfInfo>,
     dtneeded: Option<&String>,
+    platform: Option<&String>,
 ) -> Result<ElfInfo, &'static str> {
     let file = match fs::File::open(&filename) {
         Ok(file) => file,
@@ -506,7 +538,7 @@ fn open_elf_file<P: AsRef<Path>>(
         None => "",
     };
 
-    match parse_object(&*mmap, parent) {
+    match parse_object(&*mmap, parent, platform) {
         Ok(elc) => {
             if let Some(melc) = melc {
                 if !match_elf_name(melc, dtneeded, &elc) {
@@ -554,6 +586,7 @@ fn print_binary_dependencies(
     ld_preload: &search_path::SearchPathVec,
     ld_so_conf: &search_path::SearchPathVec,
     ld_library_path: &search_path::SearchPathVec,
+    platform: Option<&String>,
     arg: &str,
 ) {
     // On glibc/Linux the RTLD_DI_ORIGIN for the executable itself (used for $ORIGIN
@@ -572,7 +605,7 @@ fn print_binary_dependencies(
         }
     };
 
-    let elc = match open_elf_file(&filename, None, None) {
+    let elc = match open_elf_file(&filename, None, None, platform) {
         Ok(elc) => elc,
         Err(err) => {
             eprintln!("Failed to parse file {}: {}", arg, err,);
@@ -593,6 +626,7 @@ fn print_binary_dependencies(
         ld_library_path: ld_library_path,
         ld_so_conf: ld_so_conf,
         system_dirs: system_dirs,
+        platform: platform,
     };
 
     print_binary(p, &filename, &config, &elc)
@@ -624,6 +658,11 @@ fn main() {
                 .help("Assume the LD_PRELOAD is set")
                 .default_value(""),
         )
+        .arg(
+            Arg::new("plat")
+                .long("platform")
+                .help("Set the value of $PLATFORM in rpath/runpath expansion")
+        )
         .get_matches();
 
     let args = matches
@@ -653,14 +692,21 @@ fn main() {
     let mut ld_preload = search_path::from_string(
         matches
             .get_one::<String>("ld_preload")
-            .expect("ld_preload should be alwas set"),
+            .expect("ld_preload should be always set"),
     );
 
-    ld_preload.extend(
-        ld_conf::parse_ld_so_preload(&Path::new("/etc/ld.so.preload"))
-    );
+    ld_preload.extend(ld_conf::parse_ld_so_preload(&Path::new(
+        "/etc/ld.so.preload",
+    )));
 
     for arg in args {
-        print_binary_dependencies(&mut printer, &ld_preload, &ld_so_conf, &ld_library_path, arg)
+        print_binary_dependencies(
+            &mut printer,
+            &ld_preload,
+            &ld_so_conf,
+            &ld_library_path,
+            matches.get_one::<String>("plat"),
+            arg,
+        )
     }
 }
