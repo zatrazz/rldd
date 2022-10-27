@@ -63,6 +63,22 @@ pub fn from_string(string: &str) -> SearchPathVec {
     r
 }
 
+pub fn from_preload(string: &str) -> SearchPathVec {
+    let mut r = SearchPathVec::new();
+    for path in string.split(":") {
+        let path = match Path::new(path).canonicalize() {
+            Ok(path) => path,
+            // Maybe print an error message.
+            Err(_) => continue,
+        };
+        if let Some(path) = path.to_str() {
+            println!("from_preload={}", path);
+            r.add_path(path);
+        }
+    }
+    r
+}
+
 // Return the default system directory for the architectures and class.  It is hard
 // wired on glibc install for each triplet (the $slibdir).
 pub fn get_slibdir(e_machine: u16, ei_class: u8) -> Option<&'static str> {

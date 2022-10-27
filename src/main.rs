@@ -361,7 +361,9 @@ fn parse_elf_dyn_flags<Elf: FileHeader>(
 fn print_binary(p: &Printer, filename: &Path, config: &Config, elc: &ElfInfo) {
     p.print_executable(filename);
 
+    // Keep track of the already found libraries.
     let mut depset = DepSet::new();
+
     for entry in config.ld_preload {
         resolve_dependency(p, &entry.path, &config, &elc, &mut depset, 1, true);
     }
@@ -653,7 +655,7 @@ fn main() {
                 .default_value(""),
         )
         .arg(
-            Arg::new("ld_preload")
+            Arg::new("preload")
                 .long("ld-preload")
                 .help("Assume the LD_PRELOAD is set")
                 .default_value(""),
@@ -683,9 +685,9 @@ fn main() {
     );
 
     // glibc first parses LD_PRELOAD and then ls.so.preload.
-    let mut ld_preload = search_path::from_string(
+    let mut ld_preload = search_path::from_preload(
         matches
-            .get_one::<String>("ld_preload")
+            .get_one::<String>("preload")
             .expect("ld_preload should be always set"),
     );
 
