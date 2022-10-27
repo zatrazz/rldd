@@ -26,6 +26,7 @@ struct Config<'a> {
     ld_so_conf: &'a search_path::SearchPathVec,
     system_dirs: search_path::SearchPathVec,
     platform: Option<&'a String>,
+    unique: bool,
 }
 
 type DepsVec = Vec<String>;
@@ -426,7 +427,9 @@ fn resolve_dependency(
     // resolve the library.
     if !elc.nodeflibs {
         if let Some(entry) = depset.get(dependency) {
-            p.print_already_found(dependency, &entry.path, &entry.mode.to_string(), deptrace);
+            if !config.unique {
+                p.print_already_found(dependency, &entry.path, &entry.mode.to_string(), deptrace);
+            }
             return;
         }
     }
@@ -612,6 +615,7 @@ fn print_binary_dependencies(
     ld_so_conf: &search_path::SearchPathVec,
     ld_library_path: &search_path::SearchPathVec,
     platform: Option<&String>,
+    unique: bool,
     arg: &str,
 ) {
     // On glibc/Linux the RTLD_DI_ORIGIN for the executable itself (used for $ORIGIN
@@ -652,6 +656,7 @@ fn print_binary_dependencies(
         ld_so_conf: ld_so_conf,
         system_dirs: system_dirs,
         platform: platform,
+        unique: unique
     };
 
     print_binary(p, &filename, &config, &elc)
@@ -687,6 +692,13 @@ fn main() {
             Arg::new("plat")
                 .long("platform")
                 .help("Set the value of $PLATFORM in rpath/runpath expansion"),
+        )
+        .arg(
+            Arg::new("unique")
+                .short('u')
+                .long("unique")
+                .action(ArgAction::SetTrue)
+                .help("Do not print already resolved dependencies"),
         )
         .get_matches();
 
@@ -731,6 +743,7 @@ fn main() {
             &ld_so_conf,
             &ld_library_path,
             matches.get_one::<String>("plat"),
+            matches.get_flag("unique"),
             arg,
         )
     }
