@@ -77,11 +77,11 @@ impl Printer {
         ok!(writer.print(&buffer));
     }
 
-    fn print_entry(&self, dtneeded: &String, path: &String, mode: &str, depth: usize, found: bool) {
+    fn print_entry(&self, dtneeded: &String, path: &String, mode: &str, found: bool) {
         let writer = BufferWriter::stdout(ColorChoice::Always);
         let mut buffer = writer.buffer();
 
-        write!(buffer, "{:>width$}", "", width = depth * 4).unwrap();
+        //write!(buffer, "{:>width$}", "", width = depth * 4).unwrap();
 
         let mut color = termcolor::ColorSpec::new();
         if !found {
@@ -109,15 +109,37 @@ impl Printer {
         ok!(writer.print(&buffer));
     }
 
-    pub fn print_dependency(&self, dtneeded: &String, path: &String, mode: &str, depth: usize) {
-        self.print_entry(dtneeded, path, mode, depth, false)
+    fn print_preamble(&self, deptrace: &Vec<bool>) {
+        for v in &deptrace[0..deptrace.len() - 1] {
+            print!("{}", if *v { "|  " } else { "   " });
+        }
+        print!("\\_ ");
     }
 
-    pub fn print_already_found(&self, dtneeded: &String, path: &String, mode: &str, depth: usize) {
-        self.print_entry(dtneeded, path, mode, depth, true)
+    pub fn print_dependency(
+        &self,
+        dtneeded: &String,
+        path: &String,
+        mode: &str,
+        deptrace: &Vec<bool>,
+    ) {
+        self.print_preamble(deptrace);
+        self.print_entry(dtneeded, path, mode, false)
     }
 
-    pub fn print_not_found(&self, dtneeded: &String, depth: usize) {
+    pub fn print_already_found(
+        &self,
+        dtneeded: &String,
+        path: &String,
+        mode: &str,
+        deptrace: &Vec<bool>,
+    ) {
+        self.print_preamble(deptrace);
+        self.print_entry(dtneeded, path, mode, true)
+    }
+
+    pub fn print_not_found(&self, dtneeded: &String, deptrace: &Vec<bool>) {
+        self.print_preamble(deptrace);
         let writer = BufferWriter::stdout(ColorChoice::Always);
         let mut buffer = writer.buffer();
         self.writeln_colorized(
@@ -125,7 +147,7 @@ impl Printer {
             termcolor::ColorSpec::new()
                 .set_fg(Some(termcolor::Color::Red))
                 .set_bold(true),
-            format!("{:>width$}{} not found", "", dtneeded, width = depth * 4),
+            format!("{} not found", dtneeded),
         );
         ok!(writer.print(&buffer));
     }

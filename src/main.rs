@@ -364,10 +364,27 @@ fn print_binary(p: &Printer, filename: &Path, config: &Config, elc: &ElfInfo) {
     // Keep track of the already found libraries.
     let mut depset = DepSet::new();
 
-    for entry in config.ld_preload {
-        resolve_dependency(p, &entry.path, &config, &elc, &mut depset, 1, true);
+    // When to print a '|' or whitespace when printing the dependencies.
+    let mut deptrace = Vec::<bool>::new();
+
+    let mut iter = config.ld_preload.iter().peekable();
+    while let Some(entry) = iter.next() {
+        let v = elc.deps.len() > 1 && !iter.peek().is_none();
+        deptrace.push(v);
+        resolve_dependency(
+            p,
+            &entry.path,
+            &config,
+            &elc,
+            &mut depset,
+            1,
+            true,
+            &mut deptrace,
+        );
+        deptrace.pop();
     }
-    print_dependencies(p, &config, &elc, &mut depset, 1, false)
+
+    print_dependencies(p, &config, &elc, &mut depset, 0, false, &mut deptrace)
 }
 
 fn print_dependencies(
@@ -377,9 +394,14 @@ fn print_dependencies(
     depset: &mut DepSet,
     idx: usize,
     preload: bool,
+    deptrace: &mut Vec<bool>,
 ) {
-    for entry in &elc.deps {
-        resolve_dependency(p, &entry, &config, &elc, depset, idx, preload);
+    let mut iter = elc.deps.iter().peekable();
+    while let Some(entry) = iter.next() {
+        let v = elc.deps.len() > 1 && !iter.peek().is_none();
+        deptrace.push(v);
+        resolve_dependency(p, &entry, &config, &elc, depset, idx, preload, deptrace);
+        deptrace.pop();
     }
 }
 
@@ -398,12 +420,13 @@ fn resolve_dependency(
     depset: &mut DepSet,
     depth: usize,
     preload: bool,
+    deptrace: &mut Vec<bool>,
 ) {
     // If DF_1_NODEFLIB is set ignore the search cache in the case a dependency could
     // resolve the library.
     if !elc.nodeflibs {
         if let Some(entry) = depset.get(dependency) {
-            p.print_already_found(dependency, &entry.path, &entry.mode.to_string(), depth);
+            p.print_already_found(dependency, &entry.path, &entry.mode.to_string(), deptrace);
             return;
         }
     }
@@ -417,11 +440,11 @@ fn resolve_dependency(
             },
         );
 
-        p.print_dependency(dependency, &dep.path, &dep.mode.to_string(), depth);
+        p.print_dependency(dependency, &dep.path, &dep.mode.to_string(), deptrace);
         let depth = depth + 1;
-        print_dependencies(p, &config, &dep.elc, depset, depth, preload);
+        print_dependencies(p, &config, &dep.elc, depset, depth, preload, deptrace);
     } else {
-        p.print_not_found(dependency, depth);
+        p.print_not_found(dependency, deptrace);
     }
 }
 
@@ -663,7 +686,7 @@ fn main() {
         .arg(
             Arg::new("plat")
                 .long("platform")
-                .help("Set the value of $PLATFORM in rpath/runpath expansion")
+                .help("Set the value of $PLATFORM in rpath/runpath expansion"),
         )
         .get_matches();
 
