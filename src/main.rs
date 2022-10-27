@@ -210,7 +210,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
             }
         });
 
-        let dynstr = match parse_elf_stringtable(endian, data, elf, segments, strtab, strsz) {
+        let dynstr = match parse_elf_stringtable::<Elf>(endian, data, segments, strtab, strsz) {
             Some(dynstr) => dynstr,
             None => return Err("Failure to parse the string table"),
         };
@@ -244,7 +244,6 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
 fn parse_elf_stringtable<'a, Elf: FileHeader>(
     endian: Elf::Endian,
     data: &'a [u8],
-    _elf: &Elf,
     segments: &'a [Elf::ProgramHeader],
     strtab: u64,
     strsz: u64,
