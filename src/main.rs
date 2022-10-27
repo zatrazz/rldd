@@ -665,12 +665,6 @@ fn main() {
         )
         .get_matches();
 
-    let args = matches
-        .get_many::<String>("file")
-        .unwrap_or_default()
-        .map(|v| v.as_str())
-        .collect::<Vec<_>>();
-
     let pp = matches.get_flag("path");
     let mut printer = printer::create(pp);
 
@@ -698,6 +692,12 @@ fn main() {
     ld_preload.extend(ld_conf::parse_ld_so_preload(&Path::new(
         "/etc/ld.so.preload",
     )));
+
+    let args = matches
+        .get_many::<String>("file")
+        .unwrap_or_default()
+        .map(|v| v.as_str())
+        .collect::<Vec<_>>();
 
     for arg in args {
         print_binary_dependencies(
