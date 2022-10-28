@@ -655,7 +655,7 @@ fn print_binary_dependencies(
         ld_so_conf: ld_so_conf,
         system_dirs: system_dirs,
         platform: platform,
-        unique: unique
+        unique: unique,
     };
 
     print_binary(p, &filename, &config, &elc)

@@ -1,3 +1,5 @@
+// Configurable printer module.
+
 use std::io::Write;
 use std::path::Path;
 use termcolor::{BufferWriter, ColorChoice, WriteColor};

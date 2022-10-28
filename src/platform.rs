@@ -1,28 +1,27 @@
-// Maps the provided ELF architecture to PLATFORM expansion on rpath and runpath
+// Maps the provided ELF architecture to PLATFORM expansion for rpath and runpath.
 
 use object::elf::*;
 
-// glibc set the PLATFORM from AT_PLATFORM provided by the kernel through auxiliary vectors.
-// Some architecture, like x86, might change the value depending of the underlying processor
-// and not all architectures define PLATFORM.
-//
-// The kernel sets the AT_PLATFORM from a pre-defined value (fs/binfmt_elf.c::create_elf_tables),
-// so it is possible to map some the possible value used on glibc from the ELF machine and
-// endianness.
+// glibc expands the $PLATFORM on DT_RPATH/RT_RUNPATH based on the value obtained from the
+// AT_PLATFORM auxiliary vectors entry.  Some architectures, like x86, might change the value
+// depending of the underlying processor and not all architectures provides AT_PLATFORM.
+
+// For some architectures the kernel exports the AT_PLATFORM from a pre-defined value, while
+// for other it depends either on the kernel configuration and/or the CPU.  For the later the
+// function returns a common value.
 pub fn get(e_machine: u16, ei_endian: u8) -> String {
     let r = match e_machine {
-        // Alpha return either "ev4",  "ev5", "ev56", "ev6", or "ev67" depending of the processor,
+        // Alpha returns either "ev4", "ev5", "ev56", "ev6", or "ev67" depending of the CPU,
         // asssume the latest one.
         EM_ALPHA => "ev67",
 
-        // ARM returns a value depending of the MIDR register search in list built based on the
-        // supported platforms by the kernel (which depends on how the kernel is configured)
-        // and the endianness.
+        // ARM returns a value depending of the CPU matches against built-in list based on the
+        // supported platforms by the current kernel configuration and the endianness.
         //
         // Possible values for a recent kernel (6.0) are: 'v4', 'v5', 'v5t', 'v6', 'v7', 'v7m',
         // or 'v8' (for arm64 kernel) and the endianess is either 'l' (little endian) or 'b'
-        // (big endian).  So for a armv7-a little endian chip the value would be 'v7l', while
-        // on a aarch64 compat mode it will be 'v8l'.  Assume latest 32-bit one.
+        // (big endian).  So for a armv7-a big-endian chip the value would be 'v7b', while
+        // on a aarch64 little-endian compat mode it will be 'v8l'.  Assume latest 32-bit one.
         EM_ARM => match ei_endian {
             ELFDATA2LSB => "v7l",
             ELFDATA2MSB => "v7b",
