@@ -13,6 +13,7 @@ mod ld_conf;
 mod platform;
 mod printer;
 mod search_path;
+mod interp;
 use printer::*;
 
 // Global configuration used on program dynamic resolution:
@@ -23,7 +24,7 @@ use printer::*;
 struct Config<'a> {
     ld_preload: &'a search_path::SearchPathVec,
     ld_library_path: &'a search_path::SearchPathVec,
-    ld_so_conf: &'a search_path::SearchPathVec,
+    ld_so_conf: &'a Option<search_path::SearchPathVec>,
     system_dirs: search_path::SearchPathVec,
     platform: Option<&'a String>,
     unique: bool,
@@ -43,6 +44,7 @@ struct ElfInfo {
     ei_osabi: u8,
     e_machine: u16,
 
+    interp: Option<String>,
     soname: Option<String>,
     rpath: search_path::SearchPathVec,
     runpath: search_path::SearchPathVec,
@@ -174,15 +176,49 @@ fn parse_elf_program_headers<Elf: FileHeader>(
     endian: Elf::Endian,
     data: &[u8],
     elf: &Elf,
-    segments: &[Elf::ProgramHeader],
+    headers: &[Elf::ProgramHeader],
     origin: &str,
     platform: Option<&String>,
 ) -> Result<ElfInfo, &'static str> {
-    match segments
+    match parse_elf_dynamic_program_header(endian, data, elf, headers, origin, platform) {
+        Ok(mut elc) => {
+            elc.interp = parse_elf_interp::<Elf>(endian, data, headers);
+            return Ok(elc);
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn parse_elf_interp<Elf: FileHeader>(
+    endian: Elf::Endian,
+    data: &[u8],
+    headers: &[Elf::ProgramHeader],
+) -> Option<String> {
+    match headers.iter().find(|&hdr| hdr.p_type(endian) == PT_INTERP) {
+        Some(hdr) => {
+            let offset = hdr.p_offset(endian).into() as usize;
+            let fsize = hdr.p_filesz(endian).into() as usize;
+            str::from_utf8(&data[offset..offset + fsize])
+                .ok()
+                .map(|s| s.trim_matches(char::from(0)).to_string())
+        }
+        None => None,
+    }
+}
+
+fn parse_elf_dynamic_program_header<Elf: FileHeader>(
+    endian: Elf::Endian,
+    data: &[u8],
+    elf: &Elf,
+    headers: &[Elf::ProgramHeader],
+    origin: &str,
+    platform: Option<&String>,
+) -> Result<ElfInfo, &'static str> {
+    match headers
         .iter()
-        .find(|&&seg| seg.p_type(endian) == PT_DYNAMIC)
+        .find(|&&hdr| hdr.p_type(endian) == PT_DYNAMIC)
     {
-        Some(seg) => parse_elf_segment_dynamic(endian, data, elf, segments, seg, origin, platform),
+        Some(hdr) => parse_elf_segment_dynamic(endian, data, elf, headers, hdr, origin, platform),
         None => Err("No dynamic segments found"),
     }
 }
@@ -225,6 +261,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
                 ei_data: elf.e_ident().data,
                 ei_osabi: elf.e_ident().os_abi,
                 e_machine: elf.e_machine(endian),
+                interp: None,
                 soname: parse_elf_dyn_str::<Elf>(endian, DT_SONAME, dynamic, dynstr),
                 rpath: parse_elf_dyn_searchpath(
                     endian, elf, DT_RPATH, dynamic, dynstr, origin, platform,
@@ -518,14 +555,16 @@ fn resolve_dependency_1<'a>(
     }
 
     // Check the cached search paths from ld.so.conf
-    for searchpath in config.ld_so_conf {
-        let path = Path::new(&searchpath.path).join(dtneeded);
-        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
-            return Some(ResolvedDependency {
-                elc: elc,
-                path: &searchpath.path,
-                mode: DepMode::LdSoConf,
-            });
+    if let Some(ld_so_conf) = config.ld_so_conf {
+        for searchpath in ld_so_conf {
+            let path = Path::new(&searchpath.path).join(dtneeded);
+            if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
+                return Some(ResolvedDependency {
+                    elc: elc,
+                    path: &searchpath.path,
+                    mode: DepMode::LdSoConf,
+                });
+            }
         }
     }
 
@@ -608,10 +647,20 @@ fn match_elf_soname(dtneeded: &String, elc: &ElfInfo) -> bool {
     true
 }
 
+fn load_so_conf() -> Option<search_path::SearchPathVec> {
+    match ld_conf::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")) {
+        Ok(ld_so_conf) => return Some(ld_so_conf),
+        Err(err) => {
+            eprintln!("Failed to read loader cache config: {}", err);
+            process::exit(1);
+        }
+    };
+}
+
 fn print_binary_dependencies(
     p: &Printer,
     ld_preload: &search_path::SearchPathVec,
-    ld_so_conf: &search_path::SearchPathVec,
+    ld_so_conf: &mut Option<search_path::SearchPathVec>,
     ld_library_path: &search_path::SearchPathVec,
     platform: Option<&String>,
     unique: bool,
@@ -640,6 +689,10 @@ fn print_binary_dependencies(
             process::exit(1);
         }
     };
+
+    if interp::is_glibc(&elc.interp) && ld_so_conf.is_none() {
+        *ld_so_conf = load_so_conf();
+    }
 
     let system_dirs = match search_path::get_system_dirs(elc.e_machine, elc.ei_class) {
         Some(r) => r,
@@ -704,14 +757,6 @@ fn main() {
     let pp = matches.get_flag("path");
     let mut printer = printer::create(pp);
 
-    let ld_so_conf = match ld_conf::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")) {
-        Ok(ld_so_conf) => ld_so_conf,
-        Err(err) => {
-            eprintln!("Failed to read loader cache config: {}", err);
-            process::exit(1);
-        }
-    };
-
     let ld_library_path = search_path::from_string(
         matches
             .get_one::<String>("ld_library_path")
@@ -735,11 +780,15 @@ fn main() {
         .map(|v| v.as_str())
         .collect::<Vec<_>>();
 
+    // The loader search cache is lazy loaded if the binary has a loader that
+    // actually supports it.
+    let mut ld_so_conf: Option<search_path::SearchPathVec> = None;
+
     for arg in args {
         print_binary_dependencies(
             &mut printer,
             &ld_preload,
-            &ld_so_conf,
+            &mut ld_so_conf,
             &ld_library_path,
             matches.get_one::<String>("plat"),
             matches.get_flag("unique"),
