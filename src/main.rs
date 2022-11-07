@@ -690,8 +690,18 @@ fn print_binary_dependencies(
         }
     };
 
-    if interp::is_glibc(&elc.interp) && ld_so_conf.is_none() {
-        *ld_so_conf = load_so_conf();
+    // We need a new vector for the case of binaries with different interpreters.
+    let mut preload = ld_preload.to_vec();
+
+    if interp::is_glibc(&elc.interp) {
+        if ld_so_conf.is_none() {
+            *ld_so_conf = load_so_conf();
+        }
+
+        // glibc first parses LD_PRELOAD and then ls.so.preload.
+        preload.extend(ld_conf::parse_ld_so_preload(&Path::new(
+            "/etc/ld.so.preload",
+        )));
     }
 
     let system_dirs = match search_path::get_system_dirs(elc.e_machine, elc.ei_class) {
@@ -703,7 +713,7 @@ fn print_binary_dependencies(
     };
 
     let config = Config {
-        ld_preload: ld_preload,
+        ld_preload: &preload,
         ld_library_path: ld_library_path,
         ld_so_conf: ld_so_conf,
         system_dirs: system_dirs,
@@ -763,16 +773,11 @@ fn main() {
             .expect("ld_library_path should be always set"),
     );
 
-    // glibc first parses LD_PRELOAD and then ls.so.preload.
-    let mut ld_preload = search_path::from_preload(
+    let ld_preload = search_path::from_preload(
         matches
             .get_one::<String>("preload")
             .expect("ld_preload should be always set"),
     );
-
-    ld_preload.extend(ld_conf::parse_ld_so_preload(&Path::new(
-        "/etc/ld.so.preload",
-    )));
 
     let args = matches
         .get_many::<String>("file")

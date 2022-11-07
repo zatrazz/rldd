@@ -10,7 +10,7 @@ use object::elf::*;
 /* Not all machines are supported by object crate.  */
 const EM_ARCV2: u16 = 195;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct SearchPath {
     pub path: String,
     pub dev: u64,
