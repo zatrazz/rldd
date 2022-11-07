@@ -406,7 +406,8 @@ fn print_binary(p: &Printer, filename: &Path, config: &Config, elc: &ElfInfo) {
 
     let mut iter = config.ld_preload.iter().peekable();
     while let Some(entry) = iter.next() {
-        let v = elc.deps.len() > 1 && !iter.peek().is_none();
+        let v = (elc.deps.len() > 1 && !iter.peek().is_none())
+                || elc.deps.len() >= 1;
         deptrace.push(v);
         resolve_dependency(
             p,
