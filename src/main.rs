@@ -7,13 +7,13 @@ use object::read::elf::*;
 use object::read::StringTable;
 use object::Endianness;
 
-use argparse::{ArgumentParser, StoreTrue, Store, List};
+use argparse::{ArgumentParser, List, Store, StoreTrue};
 
+mod interp;
 mod ld_conf;
 mod platform;
 mod printer;
 mod search_path;
-mod interp;
 use printer::*;
 
 // Global configuration used on program dynamic resolution:
@@ -406,8 +406,7 @@ fn print_binary(p: &Printer, filename: &Path, config: &Config, elc: &ElfInfo) {
 
     let mut iter = config.ld_preload.iter().peekable();
     while let Some(entry) = iter.next() {
-        let v = (elc.deps.len() > 1 && !iter.peek().is_none())
-                || elc.deps.len() >= 1;
+        let v = (elc.deps.len() > 1 && !iter.peek().is_none()) || elc.deps.len() >= 1;
         deptrace.push(v);
         resolve_dependency(
             p,
@@ -731,28 +730,37 @@ fn main() {
     let mut ld_preload = String::new();
     let mut platform = String::new();
     let mut unique = false;
-    let mut args: Vec<String> = vec!();
+    let mut args: Vec<String> = vec![];
 
     {
         let mut ap = ArgumentParser::new();
-        ap.refer(&mut showpath)
-            .add_option(&["-p"], StoreTrue,
-            "Show the resolved path instead of the library soname");
-        ap.refer(&mut ld_library_path)
-            .add_option(&["--ld-library-path"], Store,
-            "Assume the LD_LIBRATY_PATH is set");
-        ap.refer(&mut ld_preload)
-            .add_option(&["--ld-library-path"], Store,
-            "Assume the LD_PRELOAD is set");
-        ap.refer(&mut platform)
-            .add_option(&["--ld-library-path"], Store,
-            "Set the value of $PLATFORM in rpath/runpath expansion");
-        ap.refer(&mut unique)
-            .add_option(&["-u", "--unique"], StoreTrue,
-            "Do not print already resolved dependencies");
+        ap.refer(&mut showpath).add_option(
+            &["-p"],
+            StoreTrue,
+            "Show the resolved path instead of the library soname",
+        );
+        ap.refer(&mut ld_library_path).add_option(
+            &["--ld-library-path"],
+            Store,
+            "Assume the LD_LIBRATY_PATH is set",
+        );
+        ap.refer(&mut ld_preload).add_option(
+            &["--ld-library-path"],
+            Store,
+            "Assume the LD_PRELOAD is set",
+        );
+        ap.refer(&mut platform).add_option(
+            &["--ld-library-path"],
+            Store,
+            "Set the value of $PLATFORM in rpath/runpath expansion",
+        );
+        ap.refer(&mut unique).add_option(
+            &["-u", "--unique"],
+            StoreTrue,
+            "Do not print already resolved dependencies",
+        );
         ap.refer(&mut args)
-            .add_argument("binary", List,
-            "binary to print the depedencies");
+            .add_argument("binary", List, "binary to print the depedencies");
         ap.stop_on_first_argument(true);
         ap.parse_args_or_exit();
     }
@@ -765,7 +773,11 @@ fn main() {
     // The loader search cache is lazy loaded if the binary has a loader that
     // actually supports it.
     let mut ld_so_conf: Option<search_path::SearchPathVec> = None;
-    let plat = if platform.is_empty() { None } else { Some (&platform) };
+    let plat = if platform.is_empty() {
+        None
+    } else {
+        Some(&platform)
+    };
 
     for arg in args {
         print_binary_dependencies(
