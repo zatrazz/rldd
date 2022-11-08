@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::{env, fmt, fs, process, str};
+use std::{fmt, fs, process, str};
 
 use object::elf::*;
 use object::read::elf::*;
 use object::read::StringTable;
 use object::Endianness;
 
-use clap::{command, Arg, ArgAction};
+use argparse::{ArgumentParser, StoreTrue, Store, List};
 
 mod ld_conf;
 mod platform;
@@ -726,69 +726,46 @@ fn print_binary_dependencies(
 }
 
 fn main() {
-    let matches = command!()
-        .arg(
-            Arg::new("file")
-                .required(true)
-                .help("binary to print the depedencies")
-                .action(ArgAction::Append),
-        )
-        .arg(
-            Arg::new("path")
-                .short('p')
-                .action(ArgAction::SetTrue)
-                .help("Show the resolved path instead of the library soname"),
-        )
-        .arg(
-            Arg::new("ld_library_path")
-                .long("ld-library-path")
-                .help("Assume the LD_LIBRATY_PATH is set")
-                .default_value(""),
-        )
-        .arg(
-            Arg::new("preload")
-                .long("ld-preload")
-                .help("Assume the LD_PRELOAD is set")
-                .default_value(""),
-        )
-        .arg(
-            Arg::new("plat")
-                .long("platform")
-                .help("Set the value of $PLATFORM in rpath/runpath expansion"),
-        )
-        .arg(
-            Arg::new("unique")
-                .short('u')
-                .long("unique")
-                .action(ArgAction::SetTrue)
-                .help("Do not print already resolved dependencies"),
-        )
-        .get_matches();
+    let mut showpath = false;
+    let mut ld_library_path = String::new();
+    let mut ld_preload = String::new();
+    let mut platform = String::new();
+    let mut unique = false;
+    let mut args: Vec<String> = vec!();
 
-    let pp = matches.get_flag("path");
-    let mut printer = printer::create(pp);
+    {
+        let mut ap = ArgumentParser::new();
+        ap.refer(&mut showpath)
+            .add_option(&["-p"], StoreTrue,
+            "Show the resolved path instead of the library soname");
+        ap.refer(&mut ld_library_path)
+            .add_option(&["--ld-library-path"], Store,
+            "Assume the LD_LIBRATY_PATH is set");
+        ap.refer(&mut ld_preload)
+            .add_option(&["--ld-library-path"], Store,
+            "Assume the LD_PRELOAD is set");
+        ap.refer(&mut platform)
+            .add_option(&["--ld-library-path"], Store,
+            "Set the value of $PLATFORM in rpath/runpath expansion");
+        ap.refer(&mut unique)
+            .add_option(&["-u", "--unique"], StoreTrue,
+            "Do not print already resolved dependencies");
+        ap.refer(&mut args)
+            .add_argument("binary", List,
+            "binary to print the depedencies");
+        ap.stop_on_first_argument(true);
+        ap.parse_args_or_exit();
+    }
 
-    let ld_library_path = search_path::from_string(
-        matches
-            .get_one::<String>("ld_library_path")
-            .expect("ld_library_path should be always set"),
-    );
+    let mut printer = printer::create(showpath);
 
-    let ld_preload = search_path::from_preload(
-        matches
-            .get_one::<String>("preload")
-            .expect("ld_preload should be always set"),
-    );
-
-    let args = matches
-        .get_many::<String>("file")
-        .unwrap_or_default()
-        .map(|v| v.as_str())
-        .collect::<Vec<_>>();
+    let ld_library_path = search_path::from_string(&ld_library_path.as_str());
+    let ld_preload = search_path::from_preload(&ld_preload.as_str());
 
     // The loader search cache is lazy loaded if the binary has a loader that
     // actually supports it.
     let mut ld_so_conf: Option<search_path::SearchPathVec> = None;
+    let plat = if platform.is_empty() { None } else { Some (&platform) };
 
     for arg in args {
         print_binary_dependencies(
@@ -796,9 +773,9 @@ fn main() {
             &ld_preload,
             &mut ld_so_conf,
             &ld_library_path,
-            matches.get_one::<String>("plat"),
-            matches.get_flag("unique"),
-            arg,
+            plat,
+            unique,
+            arg.as_str(),
         )
     }
 }
