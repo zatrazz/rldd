@@ -1,6 +1,7 @@
 [package]
 name = "rldd"
 version = "0.1.0"
+authors = "Adhemerval Zanella <zatrazz@gmail.com>"
 edition = "2021"
 license = "MIT"
 description = "Print shared object dependencies"
