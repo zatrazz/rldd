@@ -9,6 +9,7 @@ use object::Endianness;
 
 use argparse::{ArgumentParser, List, Store, StoreTrue};
 
+mod arenatree;
 mod interp;
 mod ld_conf;
 mod platform;
@@ -54,7 +55,7 @@ struct ElfInfo {
 }
 
 // The resolution mode for a dependency, used mostly for printing.
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 enum DepMode {
     Preload,       // Preload library.
     Direct,        // DT_SONAME refers to an aboslute path.
@@ -63,6 +64,8 @@ enum DepMode {
     DtRunpath,     // DT_RUNPATH.
     LdSoConf,      // ld.so.conf.
     SystemDirs,    // Default system directory (i.e '/lib64').
+    Executable,    // The root executable/library.
+    NotFound,
 }
 
 impl fmt::Display for DepMode {
@@ -75,18 +78,33 @@ impl fmt::Display for DepMode {
             DepMode::DtRunpath => write!(f, "[runpath]"),
             DepMode::LdSoConf => write!(f, "[ld.so.conf]"),
             DepMode::SystemDirs => write!(f, "[system default paths]"),
+            DepMode::Executable => write!(f, ""),
+            DepMode::NotFound => write!(f, "[not found]"),
         }
     }
 }
 
 // A found dependency (DT_NEEDED), used either suppress printing or use a different
 // color scheme.
+#[derive(PartialEq)]
 struct DepFound {
     path: String,
     mode: DepMode,
 }
-// Maps the dependency name (from DT_NEEDED) with the resolution information.
+// Maps the dependency name (from DT_NEEDED) with the resolved information.
 type DepSet = HashMap<String, DepFound>;
+
+// A resolved dependency, after ELF parsing.
+#[derive(PartialEq)]
+struct DepNode {
+    path: Option<String>,
+    name: String,
+    mode: DepMode,
+    found: bool,
+}
+// The resolved binary dependency tree.
+type DepTree = arenatree::ArenaTree<DepNode>;
+
 
 // ELF Parsing routines.
 
@@ -393,53 +411,44 @@ fn parse_elf_dyn_flags<Elf: FileHeader>(
     0
 }
 
-// Printing dependencies functions.
+// Function that mimic the dynamic loader resolution.
 
-fn print_binary(p: &Printer, filename: &Path, config: &Config, elc: &ElfInfo) {
-    p.print_executable(filename);
+fn resolve_binary(filename: &Path, config: &Config, elc: &ElfInfo) -> DepTree {
+    let mut deptree = DepTree::new();
 
-    // Keep track of the already found libraries.
-    let mut depset = DepSet::new();
+    let mut deps = DepSet::new();
 
-    // When to print a '|' or whitespace when printing the dependencies.
-    let mut deptrace = Vec::<bool>::new();
+    let depp = deptree.addroot(DepNode {
+        path: filename
+            .parent()
+            .and_then(|s| s.to_str())
+            .and_then(|s| Some(s.to_string())),
+        name: filename
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string(),
+        mode: DepMode::Executable,
+        found: false,
+    });
 
-    let mut iter = config.ld_preload.iter().peekable();
-    while let Some(entry) = iter.next() {
-        let v = (elc.deps.len() > 1 && !iter.peek().is_none()) || elc.deps.len() >= 1;
-        deptrace.push(v);
+    for ld_preload in config.ld_preload {
         resolve_dependency(
-            p,
-            &entry.path,
             &config,
+            &ld_preload.path,
             &elc,
-            &mut depset,
-            1,
+            &mut deps,
+            &mut deptree,
+            depp,
             true,
-            &mut deptrace,
         );
-        deptrace.pop();
     }
 
-    print_dependencies(p, &config, &elc, &mut depset, 0, false, &mut deptrace)
-}
-
-fn print_dependencies(
-    p: &Printer,
-    config: &Config,
-    elc: &ElfInfo,
-    depset: &mut DepSet,
-    idx: usize,
-    preload: bool,
-    deptrace: &mut Vec<bool>,
-) {
-    let mut iter = elc.deps.iter().peekable();
-    while let Some(entry) = iter.next() {
-        let v = elc.deps.len() > 1 && !iter.peek().is_none();
-        deptrace.push(v);
-        resolve_dependency(p, &entry, &config, &elc, depset, idx, preload, deptrace);
-        deptrace.pop();
+    for dep in &elc.deps {
+        resolve_dependency(&config, &dep, &elc, &mut deps, &mut deptree, depp, false);
     }
+
+    deptree
 }
 
 // Returned from resolve_dependency_1 with resolved information.
@@ -450,28 +459,45 @@ struct ResolvedDependency<'a> {
 }
 
 fn resolve_dependency(
-    p: &Printer,
-    dependency: &String,
     config: &Config,
+    dependency: &String,
     elc: &ElfInfo,
-    depset: &mut DepSet,
-    depth: usize,
+    deps: &mut DepSet,
+    deptree: &mut DepTree,
+    depp: usize,
     preload: bool,
-    deptrace: &mut Vec<bool>,
 ) {
     // If DF_1_NODEFLIB is set ignore the search cache in the case a dependency could
     // resolve the library.
     if !elc.nodeflibs {
-        if let Some(entry) = depset.get(dependency) {
+        if let Some(entry) = deps.get(dependency) {
             if !config.unique {
-                p.print_already_found(dependency, &entry.path, &entry.mode.to_string(), deptrace);
+                deptree.addnode(
+                    DepNode {
+                        path: Some(entry.path.to_string()),
+                        name: dependency.to_string(),
+                        mode: entry.mode,
+                        found: true,
+                    },
+                    depp,
+                );
             }
             return;
         }
     }
 
     if let Some(dep) = resolve_dependency_1(dependency, config, elc, preload) {
-        depset.insert(
+        let c = deptree.addnode(
+            DepNode {
+                path: Some(dep.path.to_string()),
+                name: dependency.to_string(),
+                mode: dep.mode,
+                found: false,
+            },
+            depp,
+        );
+
+        deps.insert(
             dependency.to_string(),
             DepFound {
                 path: dep.path.clone(),
@@ -479,11 +505,20 @@ fn resolve_dependency(
             },
         );
 
-        p.print_dependency(dependency, &dep.path, &dep.mode.to_string(), deptrace);
-        let depth = depth + 1;
-        print_dependencies(p, &config, &dep.elc, depset, depth, preload, deptrace);
+        let elc = &dep.elc;
+        for dep in &elc.deps {
+            resolve_dependency(&config, &dep, &elc, deps, deptree, c, preload);
+        }
     } else {
-        p.print_not_found(dependency, deptrace);
+        deptree.addnode(
+            DepNode {
+                path: None,
+                name: dependency.to_string(),
+                mode: DepMode::NotFound,
+                found: false,
+            },
+            depp,
+        );
     }
 }
 
@@ -657,6 +692,51 @@ fn load_so_conf() -> Option<search_path::SearchPathVec> {
     };
 }
 
+// Printing functions.
+
+fn print_deps(p: &Printer, deps: &DepTree) {
+    let bin = deps.arena.first().unwrap();
+    p.print_executable(&bin.val.path, &bin.val.name);
+
+    let mut deptrace = Vec::<bool>::new();
+    print_deps_children(p, deps, &bin.children, &mut deptrace);
+}
+
+fn print_deps_children(
+    p: &Printer,
+    deps: &DepTree,
+    children: &Vec<usize>,
+    deptrace: &mut Vec<bool>,
+) {
+    let mut iter = children.iter().peekable();
+    while let Some(c) = iter.next() {
+        let dep = &deps.arena[*c];
+        deptrace.push(children.len() > 1);
+        if dep.val.found {
+            p.print_already_found(
+                &dep.val.name,
+                dep.val.path.as_ref().unwrap(),
+                &dep.val.mode.to_string(),
+                &deptrace,
+            );
+        } else if dep.val.mode != DepMode::NotFound {
+            p.print_dependency(
+                &dep.val.name,
+                dep.val.path.as_ref().unwrap(),
+                &dep.val.mode.to_string(),
+                &deptrace,
+            );
+        } else {
+            p.print_not_found(&dep.val.name, &deptrace);
+        }
+        deptrace.pop();
+
+        deptrace.push(children.len() > 1 && !iter.peek().is_none());
+        print_deps_children(p, deps, &dep.children, deptrace);
+        deptrace.pop();
+    }
+}
+
 fn print_binary_dependencies(
     p: &Printer,
     ld_preload: &search_path::SearchPathVec,
@@ -721,7 +801,9 @@ fn print_binary_dependencies(
         unique: unique,
     };
 
-    print_binary(p, &filename, &config, &elc)
+    let mut deptree = resolve_binary(&filename, &config, &elc);
+
+    print_deps(p, &mut deptree);
 }
 
 fn main() {

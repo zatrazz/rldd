@@ -1,7 +1,6 @@
 // Configurable printer module.
 
 use std::io::Write;
-use std::path::Path;
 use termcolor::{BufferWriter, ColorChoice, WriteColor};
 
 // Ignore output error for now.
@@ -43,47 +42,33 @@ impl Printer {
         self.write_colorized(buffer, color, format!("{}\n", content.into()));
     }
 
-    pub fn print_executable(&self, path: &Path) {
+    pub fn print_executable(&self, path: &Option<String>, name: &String) {
         let writer = BufferWriter::stdout(ColorChoice::Always);
         let mut buffer = writer.buffer();
 
-        if let Some(parent) = path.parent() {
-            let parent = parent.to_string_lossy();
+        if let Some(path) = path {
             let delim = std::path::MAIN_SEPARATOR.to_string();
             self.write_colorized(
                 &mut buffer,
                 termcolor::ColorSpec::new().set_fg(Some(termcolor::Color::Cyan)),
-                &format!("{}{}", parent, delim),
+                &format!("{}{}", path, delim),
             );
         }
 
-        match path.file_name() {
-            Some(filename) => {
-                let filename = filename.to_string_lossy();
-                self.writeln_colorized(
-                    &mut buffer,
-                    termcolor::ColorSpec::new()
-                        .set_fg(Some(termcolor::Color::Cyan))
-                        .set_intense(true),
-                    filename.as_ref(),
-                );
-            }
-            None => {
-                self.writeln_colorized(
-                    &mut buffer,
-                    termcolor::ColorSpec::new().set_fg(Some(termcolor::Color::Red)),
-                    "error invalid filename",
-                );
-            }
-        }
+        self.writeln_colorized(
+            &mut buffer,
+            termcolor::ColorSpec::new()
+                .set_fg(Some(termcolor::Color::Cyan))
+                .set_intense(true),
+            name,
+        );
+
         ok!(writer.print(&buffer));
     }
 
     fn print_entry(&self, dtneeded: &String, path: &String, mode: &str, found: bool) {
         let writer = BufferWriter::stdout(ColorChoice::Always);
         let mut buffer = writer.buffer();
-
-        //write!(buffer, "{:>width$}", "", width = depth * 4).unwrap();
 
         let mut color = termcolor::ColorSpec::new();
         if !found {
