@@ -24,6 +24,10 @@ where
     }
 }
 
+pub trait EqualString {
+    fn eqstr(&self, other: &String) -> bool;
+}
+
 pub struct ArenaTree<T>
 where
     T: PartialEq,
@@ -33,7 +37,7 @@ where
 
 impl<T> ArenaTree<T>
 where
-    T: PartialEq,
+    T: PartialEq + EqualString + Clone,
 {
     pub fn new() -> Self {
         Self {
@@ -53,5 +57,15 @@ where
         self.arena[parent].children.push(idx);
         self.arena[idx].parent = Some(parent);
         idx
+    }
+
+    pub fn get(&mut self, val: &String) -> Option<T>
+    {
+        for node in &self.arena {
+            if node.val.eqstr(val) {
+                return Some(node.val.clone())
+            }
+        }
+        None
     }
 }

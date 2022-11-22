@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::Path;
 use std::{fmt, fs, process, str};
 
@@ -84,24 +83,21 @@ impl fmt::Display for DepMode {
     }
 }
 
-// A found dependency (DT_NEEDED), used either suppress printing or use a different
-// color scheme.
-#[derive(PartialEq)]
-struct DepFound {
-    path: String,
-    mode: DepMode,
-}
-// Maps the dependency name (from DT_NEEDED) with the resolved information.
-type DepSet = HashMap<String, DepFound>;
-
 // A resolved dependency, after ELF parsing.
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone)]
 struct DepNode {
     path: Option<String>,
     name: String,
     mode: DepMode,
     found: bool,
 }
+
+impl arenatree::EqualString for DepNode {
+    fn eqstr(&self, other: &String) -> bool {
+        self.name == *other
+    }
+}
+
 // The resolved binary dependency tree.
 type DepTree = arenatree::ArenaTree<DepNode>;
 
@@ -416,8 +412,6 @@ fn parse_elf_dyn_flags<Elf: FileHeader>(
 fn resolve_binary(filename: &Path, config: &Config, elc: &ElfInfo) -> DepTree {
     let mut deptree = DepTree::new();
 
-    let mut deps = DepSet::new();
-
     let depp = deptree.addroot(DepNode {
         path: filename
             .parent()
@@ -437,7 +431,6 @@ fn resolve_binary(filename: &Path, config: &Config, elc: &ElfInfo) -> DepTree {
             &config,
             &ld_preload.path,
             &elc,
-            &mut deps,
             &mut deptree,
             depp,
             true,
@@ -445,7 +438,7 @@ fn resolve_binary(filename: &Path, config: &Config, elc: &ElfInfo) -> DepTree {
     }
 
     for dep in &elc.deps {
-        resolve_dependency(&config, &dep, &elc, &mut deps, &mut deptree, depp, false);
+        resolve_dependency(&config, &dep, &elc, &mut deptree, depp, false);
     }
 
     deptree
@@ -462,7 +455,6 @@ fn resolve_dependency(
     config: &Config,
     dependency: &String,
     elc: &ElfInfo,
-    deps: &mut DepSet,
     deptree: &mut DepTree,
     depp: usize,
     preload: bool,
@@ -470,13 +462,13 @@ fn resolve_dependency(
     // If DF_1_NODEFLIB is set ignore the search cache in the case a dependency could
     // resolve the library.
     if !elc.nodeflibs {
-        if let Some(entry) = deps.get(dependency) {
+        if let Some(entry) = deptree.get(dependency) {
             if !config.unique {
                 deptree.addnode(
                     DepNode {
-                        path: Some(entry.path.to_string()),
+                        path: entry.path,
                         name: dependency.to_string(),
-                        mode: entry.mode,
+                        mode: entry.mode.clone(),
                         found: true,
                     },
                     depp,
@@ -497,17 +489,9 @@ fn resolve_dependency(
             depp,
         );
 
-        deps.insert(
-            dependency.to_string(),
-            DepFound {
-                path: dep.path.clone(),
-                mode: dep.mode,
-            },
-        );
-
         let elc = &dep.elc;
         for dep in &elc.deps {
-            resolve_dependency(&config, &dep, &elc, deps, deptree, c, preload);
+            resolve_dependency(&config, &dep, &elc, deptree, c, preload);
         }
     } else {
         deptree.addnode(
