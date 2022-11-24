@@ -17,3 +17,12 @@ argparse = "0.2.2"
 
 [dev-dependencies]
 tempfile = "3.3.0"
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
+# Defaultimproves compile times, but prevents some optimizations.
+codegen-units = 1
+# Remove stack unwinder and backtrace.
+panic = "abort"
