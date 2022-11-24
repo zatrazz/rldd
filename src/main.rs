@@ -811,12 +811,12 @@ fn main() {
             "Assume the LD_LIBRATY_PATH is set",
         );
         ap.refer(&mut ld_preload).add_option(
-            &["--ld-library-path"],
+            &["--ld-preload"],
             Store,
             "Assume the LD_PRELOAD is set",
         );
         ap.refer(&mut platform).add_option(
-            &["--ld-library-path"],
+            &["--platform"],
             Store,
             "Set the value of $PLATFORM in rpath/runpath expansion",
         );
@@ -826,7 +826,7 @@ fn main() {
             "Do not print already resolved dependencies",
         );
         ap.refer(&mut args)
-            .add_argument("binary", List, "binary to print the depedencies");
+            .add_argument("binary", List, "binaries to print the dependencies");
         ap.stop_on_first_argument(true);
         ap.parse_args_or_exit();
     }
