@@ -15,11 +15,17 @@ macro_rules! ok {
 
 pub struct Printer {
     pp: bool,
+    ldd: bool,
+    one: bool,
 }
 
 impl Printer {
-    pub fn new(pp: bool) -> Self {
-        Self { pp: pp }
+    pub fn new(pp: bool, ldd: bool, one: bool) -> Self {
+        Self {
+            pp: pp,
+            ldd: ldd,
+            one: one,
+        }
     }
 
     fn write_colorized<S: Into<String>>(
@@ -46,22 +52,27 @@ impl Printer {
         let writer = BufferWriter::stdout(ColorChoice::Always);
         let mut buffer = writer.buffer();
 
-        if let Some(path) = path {
-            let delim = std::path::MAIN_SEPARATOR.to_string();
-            self.write_colorized(
-                &mut buffer,
-                termcolor::ColorSpec::new().set_fg(Some(termcolor::Color::Cyan)),
-                &format!("{}{}", path, delim),
-            );
+        let mut color_path = termcolor::ColorSpec::new();
+        let mut color_name = termcolor::ColorSpec::new();
+        if self.ldd {
+            if self.one {
+                return;
+            }
+        } else {
+            color_path.set_fg(Some(termcolor::Color::Cyan));
+            color_name.set_fg(Some(termcolor::Color::Cyan));
         }
 
-        self.writeln_colorized(
-            &mut buffer,
-            termcolor::ColorSpec::new()
-                .set_fg(Some(termcolor::Color::Cyan))
-                .set_intense(true),
-            name,
-        );
+        if let Some(path) = path {
+            let delim = std::path::MAIN_SEPARATOR.to_string();
+            self.write_colorized(&mut buffer, &color_path, &format!("{}{}", path, delim));
+        }
+
+        if self.ldd {
+            self.writeln_colorized(&mut buffer, &color_name, format!("{}:", name));
+        } else {
+            self.writeln_colorized(&mut buffer, &color_name, name);
+        }
 
         ok!(writer.print(&buffer));
     }
@@ -103,6 +114,24 @@ impl Printer {
         print!("\\_ ");
     }
 
+    fn print_ldd(&self, dtneeded: &String, path: &String) {
+        let writer = BufferWriter::stdout(ColorChoice::Always);
+        let mut buffer = writer.buffer();
+
+        ok!(buffer.write_all(
+            format!(
+                "        {} => {}{}{}\n",
+                dtneeded,
+                path,
+                std::path::MAIN_SEPARATOR,
+                dtneeded
+            )
+            .as_bytes()
+        ));
+
+        ok!(writer.print(&buffer));
+    }
+
     pub fn print_dependency(
         &self,
         dtneeded: &String,
@@ -110,6 +139,10 @@ impl Printer {
         mode: &str,
         deptrace: &Vec<bool>,
     ) {
+        if self.ldd {
+            self.print_ldd(dtneeded, path);
+            return;
+        }
         self.print_preamble(deptrace);
         self.print_entry(dtneeded, path, mode, false)
     }
@@ -140,6 +173,6 @@ impl Printer {
     }
 }
 
-pub fn create(pp: bool) -> Printer {
-    Printer::new(pp)
+pub fn create(pp: bool, ldd: bool, one: bool) -> Printer {
+    Printer::new(pp, ldd, one)
 }

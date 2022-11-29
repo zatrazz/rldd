@@ -59,11 +59,10 @@ where
         idx
     }
 
-    pub fn get(&mut self, val: &String) -> Option<T>
-    {
+    pub fn get(&mut self, val: &String) -> Option<T> {
         for node in &self.arena {
             if node.val.eqstr(val) {
-                return Some(node.val.clone())
+                return Some(node.val.clone());
             }
         }
         None

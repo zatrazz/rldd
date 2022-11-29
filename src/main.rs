@@ -101,7 +101,6 @@ impl arenatree::EqualString for DepNode {
 // The resolved binary dependency tree.
 type DepTree = arenatree::ArenaTree<DepNode>;
 
-
 // ELF Parsing routines.
 
 fn parse_object(
@@ -427,14 +426,7 @@ fn resolve_binary(filename: &Path, config: &Config, elc: &ElfInfo) -> DepTree {
     });
 
     for ld_preload in config.ld_preload {
-        resolve_dependency(
-            &config,
-            &ld_preload.path,
-            &elc,
-            &mut deptree,
-            depp,
-            true,
-        );
+        resolve_dependency(&config, &ld_preload.path, &elc, &mut deptree, depp, true);
     }
 
     for dep in &elc.deps {
@@ -796,6 +788,7 @@ fn main() {
     let mut ld_preload = String::new();
     let mut platform = String::new();
     let mut unique = false;
+    let mut ldd = false;
     let mut args: Vec<String> = vec![];
 
     {
@@ -825,13 +818,21 @@ fn main() {
             StoreTrue,
             "Do not print already resolved dependencies",
         );
+        ap.refer(&mut ldd).add_option(
+            &["-l", "--ldd"],
+            StoreTrue,
+            "Output similar to lld (unique dependencies, one per line)",
+        );
         ap.refer(&mut args)
             .add_argument("binary", List, "binaries to print the dependencies");
         ap.stop_on_first_argument(true);
         ap.parse_args_or_exit();
     }
 
-    let mut printer = printer::create(showpath);
+    let mut printer = printer::create(showpath, ldd, args.len() == 1);
+    if ldd {
+        unique = true;
+    }
 
     let ld_library_path = search_path::from_string(&ld_library_path.as_str());
     let ld_preload = search_path::from_preload(&ld_preload.as_str());
