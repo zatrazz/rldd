@@ -14,6 +14,7 @@ mod ld_conf;
 mod platform;
 mod printer;
 mod search_path;
+mod system_dirs;
 use printer::*;
 
 // Global configuration used on program dynamic resolution:
@@ -343,7 +344,7 @@ fn parse_elf_dyn_searchpath<Elf: FileHeader>(
         // EXpand $ORIGIN, $LIB, and $PLATFORM.
         let newdynstr = dynstr.replace("$ORIGIN", origin);
 
-        let libdir = search_path::get_slibdir(elf.e_machine(endian), elf.e_ident().class).unwrap();
+        let libdir = system_dirs::get_slibdir(elf.e_machine(endian), elf.e_ident().class).unwrap();
         let newdynstr = newdynstr.replace("$LIB", libdir);
 
         let platform = match platform {
@@ -760,7 +761,7 @@ fn print_binary_dependencies(
         )));
     }
 
-    let system_dirs = match search_path::get_system_dirs(elc.e_machine, elc.ei_class) {
+    let system_dirs = match system_dirs::get_system_dirs(elc.e_machine, elc.ei_class) {
         Some(r) => r,
         None => {
             eprintln!("Invalid ELF architcture");
