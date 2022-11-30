@@ -7,6 +7,7 @@ use crate::search_path;
 
 // Return the default system directory for the architectures and class.  It is hard
 // wired on glibc install for each triplet (the $slibdir).
+#[cfg(target_os = "linux")]
 pub fn get_slibdir(e_machine: u16, ei_class: u8) -> Option<&'static str> {
     match e_machine {
         EM_AARCH64 | EM_ALPHA | EM_PPC64 | EM_LOONGARCH => Some("/lib64"),
@@ -31,7 +32,11 @@ pub fn get_slibdir(e_machine: u16, ei_class: u8) -> Option<&'static str> {
     }
 }
 
-pub fn get_system_dirs(e_machine: u16, ei_class: u8) -> Option<search_path::SearchPathVec> {
+#[cfg(target_os = "linux")]
+pub fn get_system_dirs(
+    e_machine: u16,
+    ei_class: u8,
+) -> Option<search_path::SearchPathVec> {
     let mut r = search_path::SearchPathVec::new();
 
     let path = get_slibdir(e_machine, ei_class)?;
