@@ -9,7 +9,9 @@ use object::Endianness;
 use argparse::{ArgumentParser, List, Store, StoreTrue};
 
 mod arenatree;
+#[cfg(target_os = "linux")]
 mod interp;
+#[cfg(target_os = "linux")]
 mod ld_conf;
 mod platform;
 mod printer;
@@ -682,14 +684,34 @@ fn match_elf_soname(dtneeded: &String, elc: &ElfInfo) -> bool {
     true
 }
 
-fn load_so_conf() -> Option<search_path::SearchPathVec> {
-    match ld_conf::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")) {
-        Ok(ld_so_conf) => return Some(ld_so_conf),
-        Err(err) => {
-            eprintln!("Failed to read loader cache config: {}", err);
-            process::exit(1);
+#[cfg(target_os = "linux")]
+fn load_so_conf(interp: &Option<String>) -> Option<search_path::SearchPathVec> {
+    if interp::is_glibc(interp) {
+        match ld_conf::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")) {
+            Ok(ld_so_conf) => return Some(ld_so_conf),
+            Err(err) => {
+                eprintln!("Failed to read loader cache config: {}", err);
+                process::exit(1);
+            }
         }
-    };
+    }
+    None
+}
+#[cfg(target_os = "freebsd")]
+fn load_so_conf(_interp: &Option<String>) -> Option<search_path::SearchPathVec> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn load_ld_so_preload(interp: &Option<String>) -> search_path::SearchPathVec {
+    if interp::is_glibc(interp) {
+        return ld_conf::parse_ld_so_preload(&Path::new("/etc/ld.so.preload"))
+    }
+    search_path::SearchPathVec::new()
+}
+#[cfg(target_os = "freebsd")]
+fn load_ld_so_preload(_interp: &Option<String>) -> search_path::SearchPathVec {
+    search_path::SearchPathVec::new()
 }
 
 // Printing functions.
@@ -770,19 +792,14 @@ fn print_binary_dependencies(
         }
     };
 
-    // We need a new vector for the case of binaries with different interpreters.
-    let mut preload = ld_preload.to_vec();
-
-    if interp::is_glibc(&elc.interp) {
-        if ld_so_conf.is_none() {
-            *ld_so_conf = load_so_conf();
-        }
-
-        // glibc first parses LD_PRELOAD and then ls.so.preload.
-        preload.extend(ld_conf::parse_ld_so_preload(&Path::new(
-            "/etc/ld.so.preload",
-        )));
+    if ld_so_conf.is_none() {
+        *ld_so_conf = load_so_conf(&elc.interp);
     }
+
+    let mut preload = ld_preload.to_vec();
+    // glibc first parses LD_PRELOAD and then ld.so.preload.
+    // We need a new vector for the case of binaries with different interpreters.
+    preload.extend(load_ld_so_preload(&elc.interp));
 
     let system_dirs = match system_dirs::get_system_dirs(elc.e_machine, elc.ei_class) {
         Some(r) => r,
