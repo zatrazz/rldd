@@ -9,11 +9,16 @@ use object::Endianness;
 use argparse::{ArgumentParser, List, Store, StoreTrue};
 
 mod arenatree;
+#[cfg(target_os = "linux")]
 mod interp;
+#[cfg(target_os = "linux")]
 mod ld_conf;
+#[cfg(target_os = "freebsd")]
+mod ld_hints;
 mod platform;
 mod printer;
 mod search_path;
+mod system_dirs;
 use printer::*;
 
 // Global configuration used on program dynamic resolution:
@@ -38,6 +43,7 @@ type DepsVec = Vec<String>;
 // - rpath: DT_RPATH search list paths, if present.
 // - runpatch: DT_RUNPATH search list paths, if present.
 // - nodeflibs: set if DF_1_NODEFLIB from DT_FLAGS_1 is set.
+#[derive(Debug)]
 struct ElfInfo {
     ei_class: u8,
     ei_data: u8,
@@ -75,7 +81,10 @@ impl fmt::Display for DepMode {
             DepMode::DtRpath => write!(f, "[rpath]"),
             DepMode::LdLibraryPath => write!(f, "[LD_LIBRARY_PATH]"),
             DepMode::DtRunpath => write!(f, "[runpath]"),
+            #[cfg(target_os = "linux")]
             DepMode::LdSoConf => write!(f, "[ld.so.conf]"),
+            #[cfg(target_os = "freebsd")]
+            DepMode::LdSoConf => write!(f, "[ld-elf.so.hints]"),
             DepMode::SystemDirs => write!(f, "[system default paths]"),
             DepMode::Executable => write!(f, ""),
             DepMode::NotFound => write!(f, "[not found]"),
@@ -330,6 +339,23 @@ fn parse_elf_dyn_str<Elf: FileHeader>(
     None
 }
 
+
+#[cfg(target_os = "linux")]
+fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
+    endian: Elf::Endian,
+    elf: &Elf,
+    dynstr: &mut String) {
+    let libdir = system_dirs::get_slibdir(elf.e_machine(endian), elf.e_ident().class).unwrap();
+    *dynstr = dynstr.replace("$LIB", libdir);
+}
+
+#[cfg(target_os = "freebsd")]
+fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
+    _endian: Elf::Endian,
+    _elf: &Elf,
+    _dynstr: &mut String) {
+}
+
 fn parse_elf_dyn_searchpath<Elf: FileHeader>(
     endian: Elf::Endian,
     elf: &Elf,
@@ -341,10 +367,9 @@ fn parse_elf_dyn_searchpath<Elf: FileHeader>(
 ) -> search_path::SearchPathVec {
     if let Some(dynstr) = parse_elf_dyn_str::<Elf>(endian, tag, dynamic, dynstr) {
         // EXpand $ORIGIN, $LIB, and $PLATFORM.
-        let newdynstr = dynstr.replace("$ORIGIN", origin);
+        let mut newdynstr = dynstr.replace("$ORIGIN", origin);
 
-        let libdir = search_path::get_slibdir(elf.e_machine(endian), elf.e_ident().class).unwrap();
-        let newdynstr = newdynstr.replace("$LIB", libdir);
+        parse_elf_dyn_searchpath_lib(endian, elf, &mut newdynstr);
 
         let platform = match platform {
             Some(platform) => platform.to_string(),
@@ -641,9 +666,15 @@ fn match_elf_name(melc: &ElfInfo, dtneeded: Option<&String>, elc: &ElfInfo) -> b
     true
 }
 
+#[cfg(target_os = "linux")]
 fn check_elf_header(elc: &ElfInfo) -> bool {
     // TODO: ARM also accepts ELFOSABI_SYSV
     elc.ei_osabi == ELFOSABI_SYSV || elc.ei_osabi == ELFOSABI_GNU
+}
+
+#[cfg(target_os = "freebsd")]
+fn check_elf_header(elc: &ElfInfo) -> bool {
+    elc.ei_osabi == ELFOSABI_FREEBSD
 }
 
 fn match_elf_header(a1: &ElfInfo, a2: &ElfInfo) -> bool {
@@ -658,14 +689,34 @@ fn match_elf_soname(dtneeded: &String, elc: &ElfInfo) -> bool {
     true
 }
 
-fn load_so_conf() -> Option<search_path::SearchPathVec> {
-    match ld_conf::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")) {
-        Ok(ld_so_conf) => return Some(ld_so_conf),
-        Err(err) => {
-            eprintln!("Failed to read loader cache config: {}", err);
-            process::exit(1);
+#[cfg(target_os = "linux")]
+fn load_so_conf(interp: &Option<String>) -> Option<search_path::SearchPathVec> {
+    if interp::is_glibc(interp) {
+        match ld_conf::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")) {
+            Ok(ld_so_conf) => return Some(ld_so_conf),
+            Err(err) => {
+                eprintln!("Failed to read loader cache config: {}", err);
+                process::exit(1);
+            }
         }
-    };
+    }
+    None
+}
+#[cfg(target_os = "freebsd")]
+fn load_so_conf(_interp: &Option<String>) -> Option<search_path::SearchPathVec> {
+    ld_hints::parse_ld_so_hints(&Path::new("/var/run/ld-elf.so.hints")).ok()
+}
+
+#[cfg(target_os = "linux")]
+fn load_ld_so_preload(interp: &Option<String>) -> search_path::SearchPathVec {
+    if interp::is_glibc(interp) {
+        return ld_conf::parse_ld_so_preload(&Path::new("/etc/ld.so.preload"))
+    }
+    search_path::SearchPathVec::new()
+}
+#[cfg(target_os = "freebsd")]
+fn load_ld_so_preload(_interp: &Option<String>) -> search_path::SearchPathVec {
+    search_path::SearchPathVec::new()
 }
 
 // Printing functions.
@@ -746,21 +797,16 @@ fn print_binary_dependencies(
         }
     };
 
-    // We need a new vector for the case of binaries with different interpreters.
-    let mut preload = ld_preload.to_vec();
-
-    if interp::is_glibc(&elc.interp) {
-        if ld_so_conf.is_none() {
-            *ld_so_conf = load_so_conf();
-        }
-
-        // glibc first parses LD_PRELOAD and then ls.so.preload.
-        preload.extend(ld_conf::parse_ld_so_preload(&Path::new(
-            "/etc/ld.so.preload",
-        )));
+    if ld_so_conf.is_none() {
+        *ld_so_conf = load_so_conf(&elc.interp);
     }
 
-    let system_dirs = match search_path::get_system_dirs(elc.e_machine, elc.ei_class) {
+    let mut preload = ld_preload.to_vec();
+    // glibc first parses LD_PRELOAD and then ld.so.preload.
+    // We need a new vector for the case of binaries with different interpreters.
+    preload.extend(load_ld_so_preload(&elc.interp));
+
+    let system_dirs = match system_dirs::get_system_dirs(elc.e_machine, elc.ei_class) {
         Some(r) => r,
         None => {
             eprintln!("Invalid ELF architcture");
