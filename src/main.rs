@@ -39,6 +39,7 @@ type DepsVec = Vec<String>;
 // - rpath: DT_RPATH search list paths, if present.
 // - runpatch: DT_RUNPATH search list paths, if present.
 // - nodeflibs: set if DF_1_NODEFLIB from DT_FLAGS_1 is set.
+#[derive(Debug)]
 struct ElfInfo {
     ei_class: u8,
     ei_data: u8,
@@ -331,6 +332,23 @@ fn parse_elf_dyn_str<Elf: FileHeader>(
     None
 }
 
+
+#[cfg(target_os = "linux")]
+fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
+    endian: Elf::Endian,
+    elf: &Elf,
+    dynstr: &mut String) {
+    let libdir = system_dirs::get_slibdir(elf.e_machine(endian), elf.e_ident().class).unwrap();
+    *dynstr = dynstr.replace("$LIB", libdir);
+}
+
+#[cfg(target_os = "freebsd")]
+fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
+    _endian: Elf::Endian,
+    _elf: &Elf,
+    _dynstr: &mut String) {
+}
+
 fn parse_elf_dyn_searchpath<Elf: FileHeader>(
     endian: Elf::Endian,
     elf: &Elf,
@@ -342,10 +360,9 @@ fn parse_elf_dyn_searchpath<Elf: FileHeader>(
 ) -> search_path::SearchPathVec {
     if let Some(dynstr) = parse_elf_dyn_str::<Elf>(endian, tag, dynamic, dynstr) {
         // EXpand $ORIGIN, $LIB, and $PLATFORM.
-        let newdynstr = dynstr.replace("$ORIGIN", origin);
+        let mut newdynstr = dynstr.replace("$ORIGIN", origin);
 
-        let libdir = system_dirs::get_slibdir(elf.e_machine(endian), elf.e_ident().class).unwrap();
-        let newdynstr = newdynstr.replace("$LIB", libdir);
+        parse_elf_dyn_searchpath_lib(endian, elf, &mut newdynstr);
 
         let platform = match platform {
             Some(platform) => platform.to_string(),
@@ -642,9 +659,15 @@ fn match_elf_name(melc: &ElfInfo, dtneeded: Option<&String>, elc: &ElfInfo) -> b
     true
 }
 
+#[cfg(target_os = "linux")]
 fn check_elf_header(elc: &ElfInfo) -> bool {
     // TODO: ARM also accepts ELFOSABI_SYSV
     elc.ei_osabi == ELFOSABI_SYSV || elc.ei_osabi == ELFOSABI_GNU
+}
+
+#[cfg(target_os = "freebsd")]
+fn check_elf_header(elc: &ElfInfo) -> bool {
+    elc.ei_osabi == ELFOSABI_FREEBSD
 }
 
 fn match_elf_header(a1: &ElfInfo, a2: &ElfInfo) -> bool {

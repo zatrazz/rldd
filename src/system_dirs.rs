@@ -1,6 +1,8 @@
+#[cfg(target_os = "linux")]
 use object::elf::*;
 
 /* Not all machines are supported by object crate.  */
+#[cfg(target_os = "linux")]
 const EM_ARCV2: u16 = 195;
 
 use crate::search_path;
@@ -54,5 +56,24 @@ pub fn get_system_dirs(
         ino: 0,
     });
 
+    Some(r)
+}
+
+#[cfg(target_os = "freebsd")]
+pub fn get_system_dirs(
+    _e_machine: u16,
+    _ei_class: u8,
+) -> Option<search_path::SearchPathVec> {
+    let mut r = search_path::SearchPathVec::new();
+    r.push(search_path::SearchPath {
+        path: "/lib".to_string(),
+        dev: 0,
+        ino: 0
+    });
+    r.push(search_path::SearchPath {
+        path: "/usr/lib".to_string(),
+        dev: 0,
+        ino: 0
+    });
     Some(r)
 }
