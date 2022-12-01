@@ -67,7 +67,6 @@ pub fn from_preload(string: &str) -> SearchPathVec {
             Err(_) => continue,
         };
         if let Some(path) = path.to_str() {
-            println!("from_preload={}", path);
             r.add_path(path);
         }
     }

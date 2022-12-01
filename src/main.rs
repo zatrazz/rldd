@@ -13,6 +13,8 @@ mod arenatree;
 mod interp;
 #[cfg(target_os = "linux")]
 mod ld_conf;
+#[cfg(target_os = "freebsd")]
+mod ld_hints;
 mod platform;
 mod printer;
 mod search_path;
@@ -79,7 +81,10 @@ impl fmt::Display for DepMode {
             DepMode::DtRpath => write!(f, "[rpath]"),
             DepMode::LdLibraryPath => write!(f, "[LD_LIBRARY_PATH]"),
             DepMode::DtRunpath => write!(f, "[runpath]"),
+            #[cfg(target_os = "linux")]
             DepMode::LdSoConf => write!(f, "[ld.so.conf]"),
+            #[cfg(target_os = "freebsd")]
+            DepMode::LdSoConf => write!(f, "[ld-elf.so.hints]"),
             DepMode::SystemDirs => write!(f, "[system default paths]"),
             DepMode::Executable => write!(f, ""),
             DepMode::NotFound => write!(f, "[not found]"),
@@ -699,7 +704,7 @@ fn load_so_conf(interp: &Option<String>) -> Option<search_path::SearchPathVec> {
 }
 #[cfg(target_os = "freebsd")]
 fn load_so_conf(_interp: &Option<String>) -> Option<search_path::SearchPathVec> {
-    None
+    ld_hints::parse_ld_so_hints(&Path::new("/var/run/ld-elf.so.hints")).ok()
 }
 
 #[cfg(target_os = "linux")]
