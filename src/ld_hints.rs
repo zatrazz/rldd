@@ -21,6 +21,7 @@ struct elfhints_hdr {
     dirlistlen: u32,
     spare: [u32; 26usize],
 }
+const ELFHINTS_HDR_LEN: u32 = size_of::<elfhints_hdr>() as u32;
 
 const ELFHINTS_MAGIC: u32 = 0x746e6845;
 const ELFHINTS_VERSION: u32 = 0x1;
@@ -30,13 +31,14 @@ pub fn parse_ld_so_hints<P: AsRef<Path>>(filename: &P) -> Result<search_path::Se
     let mut file = File::open(filename)?;
 
     if file.metadata()?.len() > ELFHINTS_MAXFILESIZE {
-        return Err(Error::new(ErrorKind::Other,
-                format!("File larger than {}", ELFHINTS_MAXFILESIZE)));
+        return Err(Error::new(
+            ErrorKind::Other,
+            format!("File larger than {}", ELFHINTS_MAXFILESIZE),
+        ));
     }
 
     let hdr: elfhints_hdr = {
-        const HLEN: usize = size_of::<elfhints_hdr>();
-        let mut h = [0u8; HLEN];
+        let mut h = [0u8; ELFHINTS_HDR_LEN as usize];
         file.read_exact(&mut h[..])?;
         unsafe { transmute(h) }
     };
@@ -65,4 +67,130 @@ pub fn parse_ld_so_hints<P: AsRef<Path>>(filename: &P) -> Result<search_path::Se
         ErrorKind::Other,
         "Invalid directory list in hint file",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
+        ::std::slice::from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>())
+    }
+
+    fn write_elf_hints(file: &mut File, dirlist: Option<&Vec<&str>>) -> Result<()> {
+        let mut dirlistlen = 0u32;
+        if let Some(dirlist) = &dirlist {
+            dirlistlen = dirlist.iter().fold(0, |len, s| len + s.len() as u32);
+            // Add the ':' separator.
+            dirlistlen += dirlist.len() as u32 - 1;
+        }
+
+        let hdr = elfhints_hdr {
+            magic: ELFHINTS_MAGIC,
+            version: 1,
+            strtab: 0,
+            strsize: 0,
+            dirlist: ELFHINTS_HDR_LEN,
+            dirlistlen: dirlistlen,
+            spare: [0; 26usize],
+        };
+
+        let hdrbytes = unsafe { any_as_u8_slice(&hdr) };
+        file.write_all(hdrbytes)?;
+        if let Some(dirlist) = dirlist {
+            for dir in dirlist {
+                file.write_all(dir.as_bytes())?;
+                file.write_all(&[b':'; 1])?;
+            }
+        }
+        file.write_all(&[b'\0'; 1])?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn parse_ld_so_hints_empty() -> Result<()> {
+        let tmpdir = TempDir::new()?;
+        let filepath = tmpdir.path().join("ld-elf.so.hints");
+        File::create(&filepath)?;
+
+        match parse_ld_so_hints(&filepath) {
+            Ok(_entries) => Err(Error::new(ErrorKind::Other, "Unexpected entries")),
+            Err(_e) => Ok(()),
+        }
+    }
+
+    #[test]
+    fn parse_ld_so_hints_empty_dir() -> Result<()> {
+        let tmpdir = TempDir::new()?;
+        let filepath = tmpdir.path().join("ld-elf.so.hints");
+        let mut file = File::create(&filepath)?;
+
+        write_elf_hints(&mut file, None)?;
+
+        match parse_ld_so_hints(&filepath) {
+            Ok(entries) => {
+                assert_eq!(entries.len(), 0);
+                Ok(())
+            }
+            Err(e) => Err(Error::new(ErrorKind::Other, e)),
+        }
+    }
+
+    #[test]
+    fn parse_ld_so_hints_one() -> Result<()> {
+        let tmpdir = TempDir::new()?;
+        let filepath = tmpdir.path().join("ld-elf.so.hints");
+        let mut file = File::create(&filepath)?;
+
+        let libdir1 = tmpdir.path().join("lib1");
+        fs::create_dir(&libdir1)?;
+
+        let dirlist = vec![libdir1.to_str().unwrap()];
+        write_elf_hints(&mut file, Some(&dirlist))?;
+
+        match parse_ld_so_hints(&filepath) {
+            Ok(entries) => {
+                assert_eq!(entries.len(), dirlist.len());
+                assert_eq!(entries[0], dirlist[0]);
+                Ok(())
+            }
+            Err(e) => Err(Error::new(ErrorKind::Other, e)),
+        }
+    }
+
+    #[test]
+    fn parse_ld_so_hints_multiple() -> Result<()> {
+        let tmpdir = TempDir::new()?;
+        let filepath = tmpdir.path().join("ld-elf.so.hints");
+        let mut file = File::create(&filepath)?;
+
+        let libdir1 = tmpdir.path().join("lib1");
+        fs::create_dir(&libdir1)?;
+        let libdir2 = tmpdir.path().join("lib2");
+        fs::create_dir(&libdir2)?;
+        let libdir3 = tmpdir.path().join("lib3");
+        fs::create_dir(&libdir3)?;
+
+        let dirlist = vec![
+            libdir1.to_str().unwrap(),
+            libdir2.to_str().unwrap(),
+            libdir3.to_str().unwrap(),
+        ];
+        write_elf_hints(&mut file, Some(&dirlist))?;
+
+        match parse_ld_so_hints(&filepath) {
+            Ok(entries) => {
+                assert_eq!(entries.len(), dirlist.len());
+                assert_eq!(entries[0], dirlist[0]);
+                assert_eq!(entries[1], dirlist[1]);
+                assert_eq!(entries[2], dirlist[2]);
+                Ok(())
+            }
+            Err(e) => Err(Error::new(ErrorKind::Other, e)),
+        }
+    }
 }
