@@ -24,9 +24,15 @@ struct elfhints_hdr {
 
 const ELFHINTS_MAGIC: u32 = 0x746e6845;
 const ELFHINTS_VERSION: u32 = 0x1;
+const ELFHINTS_MAXFILESIZE: u64 = 16 * 1024;
 
 pub fn parse_ld_so_hints<P: AsRef<Path>>(filename: &P) -> Result<search_path::SearchPathVec> {
     let mut file = File::open(filename)?;
+
+    if file.metadata()?.len() > ELFHINTS_MAXFILESIZE {
+        return Err(Error::new(ErrorKind::Other,
+                format!("File larger than {}", ELFHINTS_MAXFILESIZE)));
+    }
 
     let hdr: elfhints_hdr = {
         const HLEN: usize = size_of::<elfhints_hdr>();
