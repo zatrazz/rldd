@@ -739,22 +739,22 @@ fn print_deps_children(
     while let Some(c) = iter.next() {
         let dep = &deps.arena[*c];
         deptrace.push(children.len() > 1);
-        if dep.val.found {
+        if dep.val.mode == DepMode::NotFound {
+            p.print_not_found(&dep.val.name, &deptrace);
+        } else if dep.val.found {
             p.print_already_found(
                 &dep.val.name,
                 dep.val.path.as_ref().unwrap(),
                 &dep.val.mode.to_string(),
                 &deptrace,
             );
-        } else if dep.val.mode != DepMode::NotFound {
+        } else {
             p.print_dependency(
                 &dep.val.name,
                 dep.val.path.as_ref().unwrap(),
                 &dep.val.mode.to_string(),
                 &deptrace,
             );
-        } else {
-            p.print_not_found(&dep.val.name, &deptrace);
         }
         deptrace.pop();
 
