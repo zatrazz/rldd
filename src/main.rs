@@ -55,6 +55,8 @@ struct ElfInfo {
     rpath: search_path::SearchPathVec,
     runpath: search_path::SearchPathVec,
     nodeflibs: bool,
+    #[cfg(target_os = "linux")]
+    is_musl: bool,
 
     deps: DepsVec,
 }
@@ -93,7 +95,7 @@ impl fmt::Display for DepMode {
 }
 
 // A resolved dependency, after ELF parsing.
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, Debug)]
 struct DepNode {
     path: Option<String>,
     name: String,
@@ -194,6 +196,15 @@ fn parse_header_elf<Elf: FileHeader<Endian = Endianness>>(
     }
 }
 
+#[cfg(target_os = "linux")]
+fn handle_loader(interp: &Option<String>) -> bool {
+    interp::is_musl(interp)
+}
+#[cfg(target_os = "freebsd")]
+fn handle_loader(interp: &Option<String>) -> bool {
+    false
+}
+
 fn parse_elf_program_headers<Elf: FileHeader>(
     endian: Elf::Endian,
     data: &[u8],
@@ -205,6 +216,7 @@ fn parse_elf_program_headers<Elf: FileHeader>(
     match parse_elf_dynamic_program_header(endian, data, elf, headers, origin, platform) {
         Ok(mut elc) => {
             elc.interp = parse_elf_interp::<Elf>(endian, data, headers);
+            elc.is_musl = handle_loader(&elc.interp);
             return Ok(elc);
         }
         Err(e) => Err(e),
@@ -293,6 +305,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
                 ),
                 nodeflibs: nodeflibs,
                 deps: dtneeded,
+                is_musl: false,
             }),
             Err(e) => Err(e),
         };
@@ -339,12 +352,12 @@ fn parse_elf_dyn_str<Elf: FileHeader>(
     None
 }
 
-
 #[cfg(target_os = "linux")]
 fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
     endian: Elf::Endian,
     elf: &Elf,
-    dynstr: &mut String) {
+    dynstr: &mut String,
+) {
     let libdir = system_dirs::get_slibdir(elf.e_machine(endian), elf.e_ident().class).unwrap();
     *dynstr = dynstr.replace("$LIB", libdir);
 }
@@ -353,7 +366,8 @@ fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
 fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
     _endian: Elf::Endian,
     _elf: &Elf,
-    _dynstr: &mut String) {
+    _dynstr: &mut String,
+) {
 }
 
 fn parse_elf_dyn_searchpath<Elf: FileHeader>(
@@ -450,6 +464,21 @@ fn resolve_binary(filename: &Path, config: &Config, elc: &ElfInfo) -> DepTree {
         found: false,
     });
 
+    // musl loader and libc is on the same shared object, so adds a synthetic dependendy for
+    // the binary so it is also shown and to be returned in case a objects has libc.so
+    // as needed.
+    if elc.is_musl {
+        deptree.addnode(
+            DepNode {
+                path: interp::get_interp_path(&elc.interp),
+                name: interp::get_interp_name(&elc.interp).unwrap().to_string(),
+                mode: DepMode::SystemDirs,
+                found: true,
+            },
+            depp,
+        );
+    }
+
     for ld_preload in config.ld_preload {
         resolve_dependency(&config, &ld_preload.path, &elc, &mut deptree, depp, true);
     }
@@ -476,6 +505,10 @@ fn resolve_dependency(
     depp: usize,
     preload: bool,
 ) {
+    if elc.is_musl && dependency == "libc.so" {
+        return;
+    }
+
     // If DF_1_NODEFLIB is set ignore the search cache in the case a dependency could
     // resolve the library.
     if !elc.nodeflibs {
@@ -710,7 +743,7 @@ fn load_so_conf(_interp: &Option<String>) -> Option<search_path::SearchPathVec> 
 #[cfg(target_os = "linux")]
 fn load_ld_so_preload(interp: &Option<String>) -> search_path::SearchPathVec {
     if interp::is_glibc(interp) {
-        return ld_conf::parse_ld_so_preload(&Path::new("/etc/ld.so.preload"))
+        return ld_conf::parse_ld_so_preload(&Path::new("/etc/ld.so.preload"));
     }
     search_path::SearchPathVec::new()
 }

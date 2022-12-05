@@ -2,6 +2,28 @@
 
 use std::path::Path;
 
+pub fn get_interp_path(interp: &Option<String>) -> Option<String> {
+    if let Some(interp) = interp {
+        // Map any translation error to a non-existent interpreter.
+        return Path::new(interp)
+            .parent()
+            .and_then(|s| s.to_str())
+            .and_then(|s| Some(s.to_string()));
+    }
+    None
+}
+pub fn get_interp_name(interp: &Option<String>) -> Option<&str> {
+    if let Some(interp) = interp {
+        // Map any translation error to a non-existent interpreter.
+        let interp = Path::new(interp)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        return Some(interp);
+    }
+    None
+}
+
 const GLIBC_INTERP: &'static [&'static str] = &[
     "ld-linux-aarch64.so.1",         // AArch64 little-endian.
     "ld-linux-aarch64_be.so.1",      // Aarch64 big-endian.
@@ -30,13 +52,106 @@ const GLIBC_INTERP: &'static [&'static str] = &[
 ];
 
 pub fn is_glibc(interp: &Option<String>) -> bool {
-    if let Some(interp) = interp {
-        // Map any translation error to a non-existent interpreter.
-        let interp = Path::new(interp)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+    if let Some(interp) = get_interp_name(interp) {
         return GLIBC_INTERP.contains(&interp);
+    }
+    false
+}
+
+// musl interp is in the form of ld-musl-$(ARCH)$(SUBARCH).so.1
+const MUSL_SUBARCH_MIPS: &'static [&'static str] =
+    &["r6", "r6el", "el", "r6-sf", "r6el-sf", "el-sf"];
+
+const MUSL_SUBARCH_SH: &'static [&'static str] = &[
+    "eb",
+    "-nofpu",
+    "-fdpic",
+    "eb-nofpu",
+    "eb-nofpu",
+    "eb-fdpic",
+    "eb-nofpu-fdpic",
+];
+
+fn check_name_suffix(interp: &str, abi: &str, suffixes: Option<&Vec<&str>>) -> bool {
+    if interp.starts_with(abi) {
+        if interp.len() == abi.len() {
+            return true;
+        }
+        if let Some(interp) = interp.get(abi.len()..) {
+            if let Some(suffixes) = suffixes {
+                for suffix in suffixes {
+                    if interp == *suffix {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+fn is_musl_arch(interp: &str) -> bool {
+    if interp.starts_with("arm") {
+        return check_name_suffix(interp, "arm", Some(&vec!["eb", "hf", "ebhf"]));
+    } else if interp.starts_with("aarch64") {
+        return check_name_suffix(interp, "aarch64", Some(&vec!["_be"]));
+    } else if interp.starts_with("m68k") {
+        return check_name_suffix(interp, "arm", Some(&vec!["-fp64", "-sf"]));
+    } else if interp.starts_with("mips64") {
+        return check_name_suffix(interp, "mips64", Some(&MUSL_SUBARCH_MIPS.to_vec()));
+    } else if interp.starts_with("mipsn32") {
+        return check_name_suffix(interp, "mipsn32", Some(&MUSL_SUBARCH_MIPS.to_vec()));
+    } else if interp.starts_with("mips") {
+        return check_name_suffix(interp, "mips", Some(&MUSL_SUBARCH_MIPS.to_vec()));
+    } else if interp.starts_with("powerpc64") {
+        return check_name_suffix(interp, "powerpc64", Some(&vec!["le"]));
+    } else if interp.starts_with("powerpc") {
+        return check_name_suffix(interp, "powerpc", Some(&vec!["sf"]));
+    } else if interp.starts_with("microblaze") {
+        return check_name_suffix(interp, "microblaze", Some(&vec!["el"]));
+    } else if interp.starts_with("riscv64") {
+        return check_name_suffix(interp, "riscv64", Some(&vec!["sf", "-sf-sp", "-sp"]));
+    } else if interp.starts_with("sh") {
+        return check_name_suffix(interp, "riscv64", Some(&MUSL_SUBARCH_SH.to_vec()));
+    } else if vec!["nt32", "nt64", "or1k", "s390x", "x86_64", "x32", "i386"].contains(&interp) {
+        return true;
+    }
+    false
+}
+
+pub fn is_musl(interp: &Option<String>) -> bool {
+    if let Some(interp) = get_interp_name(interp) {
+        if !interp.starts_with("ld-musl-") {
+            return false;
+        }
+        let v: Vec<&str> = interp.split('.').collect();
+        if v.len() != 3 || v[1] != "so" || v[2] != "1" {
+            return false;
+        }
+        let interp = v[0];
+
+        if let Some(interp) = interp.get("ld-musl-".len()..) {
+            return is_musl_arch(interp);
+        }
     };
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_is_musl() {
+        assert_eq!(is_musl(&None), false);
+        assert_eq!(is_musl(&Some("ld-linux-aarch64.so.1".to_string())), false);
+        assert_eq!(is_musl(&Some("ld-musl-aarch64.so".to_string())), false);
+        assert_eq!(is_musl(&Some("ld-musl-aarch64.so.1".to_string())), true);
+        assert_eq!(is_musl(&Some("ld-musl-aarch64_be.so.1".to_string())), true);
+        assert_eq!(
+            is_musl(&Some("/lib/ld-musl-aarch64.so.1".to_string())),
+            true
+        );
+        assert_eq!(is_musl(&Some("/lib/ld-musl-x86_64.so.1".to_string())), true);
+    }
 }

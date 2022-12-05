@@ -35,10 +35,7 @@ pub fn get_slibdir(e_machine: u16, ei_class: u8) -> Option<&'static str> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn get_system_dirs(
-    e_machine: u16,
-    ei_class: u8,
-) -> Option<search_path::SearchPathVec> {
+pub fn get_system_dirs(e_machine: u16, ei_class: u8) -> Option<search_path::SearchPathVec> {
     let mut r = search_path::SearchPathVec::new();
 
     let path = get_slibdir(e_machine, ei_class)?;
@@ -60,20 +57,17 @@ pub fn get_system_dirs(
 }
 
 #[cfg(target_os = "freebsd")]
-pub fn get_system_dirs(
-    _e_machine: u16,
-    _ei_class: u8,
-) -> Option<search_path::SearchPathVec> {
+pub fn get_system_dirs(_e_machine: u16, _ei_class: u8) -> Option<search_path::SearchPathVec> {
     let mut r = search_path::SearchPathVec::new();
     r.push(search_path::SearchPath {
         path: "/lib".to_string(),
         dev: 0,
-        ino: 0
+        ino: 0,
     });
     r.push(search_path::SearchPath {
         path: "/usr/lib".to_string(),
         dev: 0,
-        ino: 0
+        ino: 0,
     });
     Some(r)
 }
