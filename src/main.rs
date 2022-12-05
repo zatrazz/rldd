@@ -55,7 +55,6 @@ struct ElfInfo {
     rpath: search_path::SearchPathVec,
     runpath: search_path::SearchPathVec,
     nodeflibs: bool,
-    #[cfg(target_os = "linux")]
     is_musl: bool,
 
     deps: DepsVec,
@@ -197,12 +196,11 @@ fn parse_header_elf<Elf: FileHeader<Endian = Endianness>>(
 }
 
 #[cfg(target_os = "linux")]
-fn handle_loader(interp: &Option<String>) -> bool {
-    interp::is_musl(interp)
+fn handle_loader(elc: &mut ElfInfo) {
+    elc.is_musl = interp::is_musl(&elc.interp)
 }
 #[cfg(target_os = "freebsd")]
-fn handle_loader(interp: &Option<String>) -> bool {
-    false
+fn handle_loader(_elc: &mut ElfInfo) {
 }
 
 fn parse_elf_program_headers<Elf: FileHeader>(
@@ -216,7 +214,7 @@ fn parse_elf_program_headers<Elf: FileHeader>(
     match parse_elf_dynamic_program_header(endian, data, elf, headers, origin, platform) {
         Ok(mut elc) => {
             elc.interp = parse_elf_interp::<Elf>(endian, data, headers);
-            elc.is_musl = handle_loader(&elc.interp);
+            handle_loader(&mut elc);
             return Ok(elc);
         }
         Err(e) => Err(e),
@@ -446,6 +444,27 @@ fn parse_elf_dyn_flags<Elf: FileHeader>(
 }
 
 // Function that mimic the dynamic loader resolution.
+#[cfg(target_os = "linux")]
+fn resolve_binary_arch(elc: &ElfInfo, deptree: &mut DepTree, depp: usize) {
+    // musl loader and libc is on the same shared object, so adds a synthetic dependendy for
+    // the binary so it is also shown and to be returned in case a objects has libc.so
+    // as needed.
+    if elc.is_musl {
+        deptree.addnode(
+            DepNode {
+                path: interp::get_interp_path(&elc.interp),
+                name: interp::get_interp_name(&elc.interp).unwrap().to_string(),
+                mode: DepMode::SystemDirs,
+                found: true,
+            },
+            depp,
+        );
+    }
+
+}
+#[cfg(target_os = "freebsd")]
+fn resolve_binary_arch(_elc: &ElfInfo, _deptree: &mut DepTree, _depp: usize) {
+}
 
 fn resolve_binary(filename: &Path, config: &Config, elc: &ElfInfo) -> DepTree {
     let mut deptree = DepTree::new();
@@ -464,20 +483,7 @@ fn resolve_binary(filename: &Path, config: &Config, elc: &ElfInfo) -> DepTree {
         found: false,
     });
 
-    // musl loader and libc is on the same shared object, so adds a synthetic dependendy for
-    // the binary so it is also shown and to be returned in case a objects has libc.so
-    // as needed.
-    if elc.is_musl {
-        deptree.addnode(
-            DepNode {
-                path: interp::get_interp_path(&elc.interp),
-                name: interp::get_interp_name(&elc.interp).unwrap().to_string(),
-                mode: DepMode::SystemDirs,
-                found: true,
-            },
-            depp,
-        );
-    }
+    resolve_binary_arch(&elc, &mut deptree, depp);
 
     for ld_preload in config.ld_preload {
         resolve_dependency(&config, &ld_preload.path, &elc, &mut deptree, depp, true);
