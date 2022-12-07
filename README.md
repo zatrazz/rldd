@@ -8,7 +8,7 @@ The rldd tool mimics the ldd shared libraries resolution and also adds some visu
 
 The default visualization option prints all dependencies, including loader, libc, and duplicated entries in a tree format.
 
-Use the '-u' option filters out the duplicated entries, and the '-p' option to print full resolved paths instead of just the soname.
+Use the '-a' option prints all dependencies (including already resolved ones), and the '-p' option to print full resolved paths instead of just the soname.
 
 The option '-l' mimics the ldd output, with unique libraries one per line.
 
