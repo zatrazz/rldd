@@ -60,7 +60,7 @@ pub fn parse_ld_so_hints<P: AsRef<Path>>(filename: &P) -> Result<search_path::Se
         .ok()
         .map(|s| s.trim_matches(char::from(0)).to_string())
     {
-        return Ok(search_path::from_string(&dirlist));
+        return Ok(search_path::from_string(&dirlist, &[':']));
     }
 
     Err(Error::new(

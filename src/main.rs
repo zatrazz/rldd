@@ -14,7 +14,9 @@ mod interp;
 #[cfg(target_os = "linux")]
 mod ld_conf;
 #[cfg(target_os = "freebsd")]
-mod ld_hints;
+mod ld_hints_freebsd;
+#[cfg(target_os = "openbsd")]
+mod ld_hints_openbsd;
 mod platform;
 mod printer;
 mod search_path;
@@ -86,6 +88,8 @@ impl fmt::Display for DepMode {
             DepMode::LdSoConf => write!(f, "[ld.so.conf]"),
             #[cfg(target_os = "freebsd")]
             DepMode::LdSoConf => write!(f, "[ld-elf.so.hints]"),
+            #[cfg(target_os = "openbsd")]
+            DepMode::LdSoConf => write!(f, "[ld-so.hints]"),
             DepMode::SystemDirs => write!(f, "[system default paths]"),
             DepMode::Executable => write!(f, ""),
             DepMode::NotFound => write!(f, "[not found]"),
@@ -200,6 +204,9 @@ fn handle_loader(elc: &mut ElfInfo) {
     elc.is_musl = interp::is_musl(&elc.interp)
 }
 #[cfg(target_os = "freebsd")]
+fn handle_loader(_elc: &mut ElfInfo) {
+}
+#[cfg(target_os = "openbsd")]
 fn handle_loader(_elc: &mut ElfInfo) {
 }
 
@@ -368,6 +375,14 @@ fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
 ) {
 }
 
+#[cfg(target_os = "openbsd")]
+fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
+    _endian: Elf::Endian,
+    _elf: &Elf,
+    _dynstr: &mut String,
+) {
+}
+
 fn parse_elf_dyn_searchpath<Elf: FileHeader>(
     endian: Elf::Endian,
     elf: &Elf,
@@ -389,7 +404,7 @@ fn parse_elf_dyn_searchpath<Elf: FileHeader>(
         };
         let newdynstr = newdynstr.replace("$PLATFORM", platform.as_str());
 
-        return search_path::from_string(newdynstr.as_str());
+        return search_path::from_string(newdynstr.as_str(), &[':']);
     }
     search_path::SearchPathVec::new()
 }
@@ -463,6 +478,9 @@ fn resolve_binary_arch(elc: &ElfInfo, deptree: &mut DepTree, depp: usize) {
 
 }
 #[cfg(target_os = "freebsd")]
+fn resolve_binary_arch(_elc: &ElfInfo, _deptree: &mut DepTree, _depp: usize) {
+}
+#[cfg(target_os = "openbsd")]
 fn resolve_binary_arch(_elc: &ElfInfo, _deptree: &mut DepTree, _depp: usize) {
 }
 
@@ -710,10 +728,13 @@ fn check_elf_header(elc: &ElfInfo) -> bool {
     // TODO: ARM also accepts ELFOSABI_SYSV
     elc.ei_osabi == ELFOSABI_SYSV || elc.ei_osabi == ELFOSABI_GNU
 }
-
 #[cfg(target_os = "freebsd")]
 fn check_elf_header(elc: &ElfInfo) -> bool {
     elc.ei_osabi == ELFOSABI_FREEBSD
+}
+#[cfg(target_os = "openbsd")]
+fn check_elf_header(elc: &ElfInfo) -> bool {
+    elc.ei_osabi == ELFOSABI_SYSV || elc.ei_osabi == ELFOSABI_OPENBSD
 }
 
 fn match_elf_header(a1: &ElfInfo, a2: &ElfInfo) -> bool {
@@ -743,7 +764,11 @@ fn load_so_conf(interp: &Option<String>) -> Option<search_path::SearchPathVec> {
 }
 #[cfg(target_os = "freebsd")]
 fn load_so_conf(_interp: &Option<String>) -> Option<search_path::SearchPathVec> {
-    ld_hints::parse_ld_so_hints(&Path::new("/var/run/ld-elf.so.hints")).ok()
+    ld_hints_freebsd::parse_ld_so_hints(&Path::new("/var/run/ld-elf.so.hints")).ok()
+}
+#[cfg(target_os = "openbsd")]
+fn load_so_conf(_interp: &Option<String>) -> Option<search_path::SearchPathVec> {
+    ld_hints_openbsd::parse_ld_so_hints(&Path::new("/var/run/ld.so.hints")).ok()
 }
 
 #[cfg(target_os = "linux")]
@@ -754,6 +779,10 @@ fn load_ld_so_preload(interp: &Option<String>) -> search_path::SearchPathVec {
     search_path::SearchPathVec::new()
 }
 #[cfg(target_os = "freebsd")]
+fn load_ld_so_preload(_interp: &Option<String>) -> search_path::SearchPathVec {
+    search_path::SearchPathVec::new()
+}
+#[cfg(target_os = "openbsd")]
 fn load_ld_so_preload(_interp: &Option<String>) -> search_path::SearchPathVec {
     search_path::SearchPathVec::new()
 }
@@ -919,7 +948,7 @@ fn main() {
         unique = true;
     }
 
-    let ld_library_path = search_path::from_string(&ld_library_path.as_str());
+    let ld_library_path = search_path::from_string(&ld_library_path.as_str(), &[':']);
     let ld_preload = search_path::from_preload(&ld_preload.as_str());
 
     // The loader search cache is lazy loaded if the binary has a loader that
