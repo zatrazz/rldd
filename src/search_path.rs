@@ -50,9 +50,9 @@ impl SearchPathVecExt for SearchPathVec {
     }
 }
 
-pub fn from_string(string: &str) -> SearchPathVec {
+pub fn from_string(string: &str, delim: &[char]) -> SearchPathVec {
     let mut r = SearchPathVec::new();
-    for path in string.split(":") {
+    for path in string.split(delim) {
         r.add_path(path);
     }
     r
