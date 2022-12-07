@@ -34,7 +34,7 @@ struct Config<'a> {
     ld_so_conf: &'a Option<search_path::SearchPathVec>,
     system_dirs: search_path::SearchPathVec,
     platform: Option<&'a String>,
-    unique: bool,
+    all: bool,
 }
 
 type DepsVec = Vec<String>;
@@ -537,7 +537,7 @@ fn resolve_dependency(
     // resolve the library.
     if !elc.nodeflibs {
         if let Some(entry) = deptree.get(dependency) {
-            if !config.unique {
+            if config.all {
                 deptree.addnode(
                     DepNode {
                         path: entry.path,
@@ -838,7 +838,7 @@ fn print_binary_dependencies(
     ld_so_conf: &mut Option<search_path::SearchPathVec>,
     ld_library_path: &search_path::SearchPathVec,
     platform: Option<&String>,
-    unique: bool,
+    all: bool,
     arg: &str,
 ) {
     // On glibc/Linux the RTLD_DI_ORIGIN for the executable itself (used for $ORIGIN
@@ -888,7 +888,7 @@ fn print_binary_dependencies(
         ld_so_conf: ld_so_conf,
         system_dirs: system_dirs,
         platform: platform,
-        unique: unique,
+        all: all,
     };
 
     let mut deptree = resolve_binary(&filename, &config, &elc);
@@ -901,7 +901,7 @@ fn main() {
     let mut ld_library_path = String::new();
     let mut ld_preload = String::new();
     let mut platform = String::new();
-    let mut unique = false;
+    let mut all = false;
     let mut ldd = false;
     let mut args: Vec<String> = vec![];
 
@@ -927,10 +927,10 @@ fn main() {
             Store,
             "Set the value of $PLATFORM in rpath/runpath expansion",
         );
-        ap.refer(&mut unique).add_option(
-            &["-u", "--unique"],
+        ap.refer(&mut all).add_option(
+            &["-a", "--all"],
             StoreTrue,
-            "Do not print already resolved dependencies",
+            "Print already resolved dependencies",
         );
         ap.refer(&mut ldd).add_option(
             &["-l", "--ldd"],
@@ -944,9 +944,6 @@ fn main() {
     }
 
     let mut printer = printer::create(showpath, ldd, args.len() == 1);
-    if ldd {
-        unique = true;
-    }
 
     let ld_library_path = search_path::from_string(&ld_library_path.as_str(), &[':']);
     let ld_preload = search_path::from_preload(&ld_preload.as_str());
@@ -967,7 +964,7 @@ fn main() {
             &mut ld_so_conf,
             &ld_library_path,
             plat,
-            unique,
+            all,
             arg.as_str(),
         )
     }
