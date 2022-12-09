@@ -2,6 +2,8 @@
 
 The rldd tool mimics the ldd shared libraries resolution and also adds some visualization options.  It is not a direct replacement, since ldd invokes the system loader and provides some extra options that are only possible at program loading (such as --unused).
 
+Currently it only supports Linux, FreeBSD, and OpenBSD.
+
 ![screenshot](doc/screenshot.png)
 
 ## Output
