@@ -1,7 +1,7 @@
 // Run-time link-editor configuration file parsing function.  OpenBSD version.
 
 use std::fs::File;
-use std::io::{Error, ErrorKind, Read, Result, Seek, SeekFrom, BufRead, BufReader};
+use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Result, Seek, SeekFrom};
 use std::mem::{size_of, transmute};
 use std::path::Path;
 use std::str;
