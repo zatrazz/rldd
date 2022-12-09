@@ -60,7 +60,9 @@ impl Printer {
             }
         } else {
             color_path.set_fg(Some(termcolor::Color::Cyan));
-            color_name.set_fg(Some(termcolor::Color::Cyan)).set_bold(true);
+            color_name
+                .set_fg(Some(termcolor::Color::Cyan))
+                .set_bold(true);
         }
 
         if self.pp {
