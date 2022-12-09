@@ -204,11 +204,9 @@ fn handle_loader(elc: &mut ElfInfo) {
     elc.is_musl = interp::is_musl(&elc.interp)
 }
 #[cfg(target_os = "freebsd")]
-fn handle_loader(_elc: &mut ElfInfo) {
-}
+fn handle_loader(_elc: &mut ElfInfo) {}
 #[cfg(target_os = "openbsd")]
-fn handle_loader(_elc: &mut ElfInfo) {
-}
+fn handle_loader(_elc: &mut ElfInfo) {}
 
 fn parse_elf_program_headers<Elf: FileHeader>(
     endian: Elf::Endian,
@@ -475,14 +473,11 @@ fn resolve_binary_arch(elc: &ElfInfo, deptree: &mut DepTree, depp: usize) {
             depp,
         );
     }
-
 }
 #[cfg(target_os = "freebsd")]
-fn resolve_binary_arch(_elc: &ElfInfo, _deptree: &mut DepTree, _depp: usize) {
-}
+fn resolve_binary_arch(_elc: &ElfInfo, _deptree: &mut DepTree, _depp: usize) {}
 #[cfg(target_os = "openbsd")]
-fn resolve_binary_arch(_elc: &ElfInfo, _deptree: &mut DepTree, _depp: usize) {
-}
+fn resolve_binary_arch(_elc: &ElfInfo, _deptree: &mut DepTree, _depp: usize) {}
 
 fn resolve_binary(filename: &Path, config: &Config, elc: &ElfInfo) -> DepTree {
     let mut deptree = DepTree::new();
@@ -501,14 +496,14 @@ fn resolve_binary(filename: &Path, config: &Config, elc: &ElfInfo) -> DepTree {
         found: false,
     });
 
-    resolve_binary_arch(&elc, &mut deptree, depp);
+    resolve_binary_arch(elc, &mut deptree, depp);
 
     for ld_preload in config.ld_preload {
-        resolve_dependency(&config, &ld_preload.path, &elc, &mut deptree, depp, true);
+        resolve_dependency(&config, &ld_preload.path, elc, &mut deptree, depp, true);
     }
 
     for dep in &elc.deps {
-        resolve_dependency(&config, &dep, &elc, &mut deptree, depp, false);
+        resolve_dependency(&config, &dep, elc, &mut deptree, depp, false);
     }
 
     deptree
@@ -552,7 +547,7 @@ fn resolve_dependency(
         }
     }
 
-    if let Some(dep) = resolve_dependency_1(dependency, config, elc, preload) {
+    if let Some(mut dep) = resolve_dependency_1(dependency, config, elc, preload) {
         let c = deptree.addnode(
             DepNode {
                 path: Some(dep.path.to_string()),
@@ -563,9 +558,13 @@ fn resolve_dependency(
             depp,
         );
 
-        let elc = &dep.elc;
-        for dep in &elc.deps {
-            resolve_dependency(&config, &dep, &elc, deptree, c, preload);
+        // Use parent R_PATH if dependency does not define it.
+        if dep.elc.rpath.is_empty() {
+            dep.elc.rpath.extend(elc.rpath.clone());
+        }
+
+        for sdep in &dep.elc.deps {
+            resolve_dependency(&config, &sdep, &dep.elc, deptree, c, preload);
         }
     } else {
         deptree.addnode(
