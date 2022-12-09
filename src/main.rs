@@ -204,9 +204,11 @@ fn handle_loader(elc: &mut ElfInfo) {
     elc.is_musl = interp::is_musl(&elc.interp)
 }
 #[cfg(target_os = "freebsd")]
-fn handle_loader(_elc: &mut ElfInfo) {}
+fn handle_loader(_elc: &mut ElfInfo) {
+}
 #[cfg(target_os = "openbsd")]
-fn handle_loader(_elc: &mut ElfInfo) {}
+fn handle_loader(_elc: &mut ElfInfo) {
+}
 
 fn parse_elf_program_headers<Elf: FileHeader>(
     endian: Elf::Endian,
@@ -473,11 +475,14 @@ fn resolve_binary_arch(elc: &ElfInfo, deptree: &mut DepTree, depp: usize) {
             depp,
         );
     }
+
 }
 #[cfg(target_os = "freebsd")]
-fn resolve_binary_arch(_elc: &ElfInfo, _deptree: &mut DepTree, _depp: usize) {}
+fn resolve_binary_arch(_elc: &ElfInfo, _deptree: &mut DepTree, _depp: usize) {
+}
 #[cfg(target_os = "openbsd")]
-fn resolve_binary_arch(_elc: &ElfInfo, _deptree: &mut DepTree, _depp: usize) {}
+fn resolve_binary_arch(_elc: &ElfInfo, _deptree: &mut DepTree, _depp: usize) {
+}
 
 fn resolve_binary(filename: &Path, config: &Config, elc: &ElfInfo) -> DepTree {
     let mut deptree = DepTree::new();
@@ -548,10 +553,19 @@ fn resolve_dependency(
     }
 
     if let Some(mut dep) = resolve_dependency_1(dependency, config, elc, preload) {
+        let r = if dep.mode == DepMode::Direct {
+            // Decompose the direct object path in path and filename so when print the dependencies
+            // only the file name is showed in default mode.
+            let p = Path::new(dependency);
+            (p.parent().and_then(|s| s.to_str()).and_then(|s| Some(s.to_string())),
+             p.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string())
+        } else {
+            (Some(dep.path.to_string()), dependency.to_string())
+        };
         let c = deptree.addnode(
             DepNode {
-                path: Some(dep.path.to_string()),
-                name: dependency.to_string(),
+                path: r.0,
+                name: r.1,
                 mode: dep.mode,
                 found: false,
             },
@@ -559,8 +573,8 @@ fn resolve_dependency(
         );
 
         // Use parent R_PATH if dependency does not define it.
-        if dep.elc.rpath.is_empty() {
-            dep.elc.rpath.extend(elc.rpath.clone());
+        if dep.elc.rpath.is_empty () {
+            dep.elc.rpath.extend (elc.rpath.clone());
         }
 
         for sdep in &dep.elc.deps {
