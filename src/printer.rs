@@ -60,12 +60,14 @@ impl Printer {
             }
         } else {
             color_path.set_fg(Some(termcolor::Color::Cyan));
-            color_name.set_fg(Some(termcolor::Color::Cyan));
+            color_name.set_fg(Some(termcolor::Color::Cyan)).set_bold(true);
         }
 
-        if let Some(path) = path {
-            let delim = std::path::MAIN_SEPARATOR.to_string();
-            self.write_colorized(&mut buffer, &color_path, &format!("{}{}", path, delim));
+        if self.pp {
+            if let Some(path) = path {
+                let delim = std::path::MAIN_SEPARATOR.to_string();
+                self.write_colorized(&mut buffer, &color_path, &format!("{}{}", path, delim));
+            }
         }
 
         if self.ldd {
