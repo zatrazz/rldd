@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::arenatree;
+mod arenatree;
 
 // A resolved dependency
 #[derive(PartialEq, Clone, Debug)]

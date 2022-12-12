@@ -7,18 +7,18 @@ use object::read::elf::*;
 use object::read::StringTable;
 use object::Endianness;
 
+#[cfg(target_os = "linux")]
+mod interp;
 use crate::deptree::*;
 #[cfg(target_os = "linux")]
-use crate::interp;
-#[cfg(target_os = "linux")]
-use crate::ld_conf;
-use crate::platform;
+mod ld_conf;
+mod platform;
 use crate::search_path;
-use crate::system_dirs;
+mod system_dirs;
 #[cfg(target_os = "openbsd")]
-use crate::ld_hints_openbsd;
+mod ld_hints_openbsd;
 #[cfg(target_os = "freebsd")]
-use crate::ld_hints_freebsd;
+mod ld_hints_freebsd;
 
 type DepsVec = Vec<String>;
 
