@@ -29,20 +29,20 @@ type DepsVec = Vec<String>;
 // - runpatch: DT_RUNPATH search list paths, if present.
 // - nodeflibs: set if DF_1_NODEFLIB from DT_FLAGS_1 is set.
 #[derive(Debug)]
-pub struct ElfInfo {
-    pub ei_class: u8,
-    pub ei_data: u8,
-    pub ei_osabi: u8,
-    pub e_machine: u16,
+struct ElfInfo {
+    ei_class: u8,
+    ei_data: u8,
+    ei_osabi: u8,
+    e_machine: u16,
 
-    pub interp: Option<String>,
-    pub soname: Option<String>,
-    pub rpath: search_path::SearchPathVec,
-    pub runpath: search_path::SearchPathVec,
-    pub nodeflibs: bool,
-    pub is_musl: bool,
+    interp: Option<String>,
+    soname: Option<String>,
+    rpath: search_path::SearchPathVec,
+    runpath: search_path::SearchPathVec,
+    nodeflibs: bool,
+    is_musl: bool,
 
-    pub deps: DepsVec,
+    deps: DepsVec,
 }
 
 // ELF Parsing routines.
@@ -382,7 +382,7 @@ fn parse_elf_dyn_flags<Elf: FileHeader>(
     0
 }
 
-pub fn open_elf_file<'a, P: AsRef<Path>>(
+fn open_elf_file<'a, P: AsRef<Path>>(
     filename: &P,
     melc: Option<&ElfInfo>,
     dtneeded: Option<&String>,
