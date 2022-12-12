@@ -1,5 +1,25 @@
 use std::fmt;
 
+use crate::arenatree;
+
+// A resolved dependency
+#[derive(PartialEq, Clone, Debug)]
+pub struct DepNode {
+    pub path: Option<String>,
+    pub name: String,
+    pub mode: DepMode,
+    pub found: bool,
+}
+
+impl arenatree::EqualString for DepNode {
+    fn eqstr(&self, other: &String) -> bool {
+        self.name == *other
+    }
+}
+
+// The resolved binary dependency tree.
+pub type DepTree = arenatree::ArenaTree<DepNode>;
+
 // The resolution mode for a dependency, used mostly for printing.
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum DepMode {
