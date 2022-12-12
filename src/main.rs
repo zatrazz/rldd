@@ -1,21 +1,10 @@
 use argparse::{ArgumentParser, List, Store, StoreTrue};
 
-mod arenatree;
-mod deptree;
-use deptree::*;
-#[cfg(target_os = "linux")]
-mod interp;
-#[cfg(target_os = "linux")]
-mod ld_conf;
-#[cfg(target_os = "freebsd")]
-mod ld_hints_freebsd;
-#[cfg(target_os = "openbsd")]
-mod ld_hints_openbsd;
-mod platform;
 mod printer;
-mod search_path;
-mod system_dirs;
 use printer::*;
+mod deptree;
+mod search_path;
+use deptree::*;
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
 mod elf;
 
