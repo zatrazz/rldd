@@ -203,10 +203,7 @@ fn parse_header_elf<Elf: FileHeader<Endian = Endianness>>(
 fn handle_loader(elc: &mut ElfInfo) {
     elc.is_musl = interp::is_musl(&elc.interp)
 }
-#[cfg(target_os = "freebsd")]
-fn handle_loader(_elc: &mut ElfInfo) {
-}
-#[cfg(target_os = "openbsd")]
+#[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
 fn handle_loader(_elc: &mut ElfInfo) {
 }
 
@@ -373,15 +370,7 @@ fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
     *dynstr = replace_dyn_str(dynstr, "LIB", libdir);
 }
 
-#[cfg(target_os = "freebsd")]
-fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
-    _endian: Elf::Endian,
-    _elf: &Elf,
-    _dynstr: &mut String,
-) {
-}
-
-#[cfg(target_os = "openbsd")]
+#[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
 fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
     _endian: Elf::Endian,
     _elf: &Elf,
@@ -483,10 +472,7 @@ fn resolve_binary_arch(elc: &ElfInfo, deptree: &mut DepTree, depp: usize) {
     }
 
 }
-#[cfg(target_os = "freebsd")]
-fn resolve_binary_arch(_elc: &ElfInfo, _deptree: &mut DepTree, _depp: usize) {
-}
-#[cfg(target_os = "openbsd")]
+#[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
 fn resolve_binary_arch(_elc: &ElfInfo, _deptree: &mut DepTree, _depp: usize) {
 }
 
