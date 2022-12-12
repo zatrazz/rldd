@@ -1,3 +1,4 @@
+use std::io::{Error, ErrorKind};
 use std::path::Path;
 use std::{fmt, fs, str};
 
@@ -6,14 +7,18 @@ use object::read::elf::*;
 use object::read::StringTable;
 use object::Endianness;
 
-use crate::arenatree;
-use crate::depmode::*;
+use crate::deptree::*;
 #[cfg(target_os = "linux")]
 use crate::interp;
+#[cfg(target_os = "linux")]
+use crate::ld_conf;
 use crate::platform;
 use crate::search_path;
-#[cfg(target_os = "linux")]
 use crate::system_dirs;
+#[cfg(target_os = "openbsd")]
+use crate::ld_hints_openbsd;
+#[cfg(target_os = "freebsd")]
+use crate::ld_hints_freebsd;
 
 type DepsVec = Vec<String>;
 
@@ -39,24 +44,6 @@ pub struct ElfInfo {
 
     pub deps: DepsVec,
 }
-
-// A resolved dependency, after ELF parsing.
-#[derive(PartialEq, Clone, Debug)]
-pub struct DepNode {
-    pub path: Option<String>,
-    pub name: String,
-    pub mode: DepMode,
-    pub found: bool,
-}
-
-impl arenatree::EqualString for DepNode {
-    fn eqstr(&self, other: &String) -> bool {
-        self.name == *other
-    }
-}
-
-// The resolved binary dependency tree.
-pub type DepTree = arenatree::ArenaTree<DepNode>;
 
 // ELF Parsing routines.
 
@@ -400,15 +387,15 @@ pub fn open_elf_file<'a, P: AsRef<Path>>(
     melc: Option<&ElfInfo>,
     dtneeded: Option<&String>,
     platform: Option<&String>,
-) -> Result<ElfInfo, &'static str> {
+) -> Result<ElfInfo, std::io::Error> {
     let file = match fs::File::open(&filename) {
         Ok(file) => file,
-        Err(_) => return Err("Failed to open file"),
+        Err(_) => return Err(Error::new(ErrorKind::Other, "Failed to open file")),
     };
 
     let mmap = match unsafe { memmap2::Mmap::map(&file) } {
         Ok(mmap) => mmap,
-        Err(_) => return Err("Failed to map file"),
+        Err(_) => return Err(Error::new(ErrorKind::Other, "Failed to map file")),
     };
 
     let parent = match filename.as_ref().parent().and_then(Path::to_str) {
@@ -420,12 +407,12 @@ pub fn open_elf_file<'a, P: AsRef<Path>>(
         Ok(elc) => {
             if let Some(melc) = melc {
                 if !match_elf_name(melc, dtneeded, &elc) {
-                    return Err("Error parsing ELF object");
+                    return Err(Error::new(ErrorKind::Other, "Error parsing ELF object"));
                 }
             }
             Ok(elc)
         }
-        Err(e) => Err(e),
+        Err(e) => return Err(Error::new(ErrorKind::Other, e)),
     }
 }
 
@@ -466,4 +453,341 @@ fn match_elf_soname(dtneeded: &String, elc: &ElfInfo) -> bool {
         return dtneeded == soname;
     }
     true
+}
+
+// Global configuration used on program dynamic resolution:
+// - ld_preload: Search path parser from ld.so.preload
+// - ld_library_path: Search path parsed from --ld-library-path.
+// - ld_so_conf: paths parsed from the ld.so.conf in the system.
+// - system_dirs: system defaults deirectories based on binary architecture.
+struct Config<'a> {
+    ld_preload: &'a search_path::SearchPathVec,
+    ld_library_path: &'a search_path::SearchPathVec,
+    ld_so_conf: &'a Option<search_path::SearchPathVec>,
+    system_dirs: search_path::SearchPathVec,
+    platform: Option<&'a String>,
+    all: bool,
+}
+
+// Function that mimic the dynamic loader resolution.
+#[cfg(target_os = "linux")]
+fn resolve_binary_arch(elc: &ElfInfo, deptree: &mut DepTree, depp: usize) {
+    // musl loader and libc is on the same shared object, so adds a synthetic dependendy for
+    // the binary so it is also shown and to be returned in case a objects has libc.so
+    // as needed.
+    if elc.is_musl {
+        deptree.addnode(
+            DepNode {
+                path: interp::get_interp_path(&elc.interp),
+                name: interp::get_interp_name(&elc.interp).unwrap().to_string(),
+                mode: DepMode::SystemDirs,
+                found: true,
+            },
+            depp,
+        );
+    }
+}
+#[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
+fn resolve_binary_arch(_elc: &ElfInfo, _deptree: &mut DepTree, _depp: usize) {}
+
+pub fn resolve_binary(
+    ld_preload: &search_path::SearchPathVec,
+    ld_so_conf: &mut Option<search_path::SearchPathVec>,
+    ld_library_path: &search_path::SearchPathVec,
+    platform: Option<&String>,
+    all: bool,
+    arg: &str,
+) -> Result<DepTree, std::io::Error> {
+    // On glibc/Linux the RTLD_DI_ORIGIN for the executable itself (used for $ORIGIN
+    // expansion) is obtained by first following the '/proc/self/exe' symlink and if
+    // it is not available the loader also checks the 'LD_ORIGIN_PATH' environment
+    // variable.
+    // The '/proc/self/exec' is an absolute path and to mimic loader behavior we first
+    // try to canocalize the input filename to remove any symlinks.  There is not much
+    // sense in trying LD_ORIGIN_PATH, since it is only checked by the loader if
+    // the binary can not dereference the procfs entry.
+    let filename = match Path::new(arg).canonicalize() {
+        Ok(filename) => filename,
+        Err(err) => {
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!("Failed to read file {}: {}", arg, err),
+            ))
+        }
+    };
+
+    let elc = match open_elf_file(&filename, None, None, platform) {
+        Ok(elc) => elc,
+        Err(err) => {
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!("Failed to parse file {}: {}", arg, err),
+            ))
+        }
+    };
+
+    if ld_so_conf.is_none() {
+        *ld_so_conf = load_so_conf(&elc.interp);
+    }
+
+    let mut preload = ld_preload.to_vec();
+    // glibc first parses LD_PRELOAD and then ld.so.preload.
+    // We need a new vector for the case of binaries with different interpreters.
+    preload.extend(load_ld_so_preload(&elc.interp));
+
+    let system_dirs = match system_dirs::get_system_dirs(elc.e_machine, elc.ei_class) {
+        Some(r) => r,
+        None => return Err(Error::new(ErrorKind::Other, "Invalid ELF architcture")),
+    };
+
+    let config = Config {
+        ld_preload: &preload,
+        ld_library_path: ld_library_path,
+        ld_so_conf: ld_so_conf,
+        system_dirs: system_dirs,
+        platform: platform,
+        all: all,
+    };
+
+    let mut deptree = DepTree::new();
+
+    let depp = deptree.addroot(DepNode {
+        path: filename
+            .parent()
+            .and_then(|s| s.to_str())
+            .and_then(|s| Some(s.to_string())),
+        name: filename
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string(),
+        mode: DepMode::Executable,
+        found: false,
+    });
+
+    resolve_binary_arch(&elc, &mut deptree, depp);
+
+    for ld_preload in config.ld_preload {
+        resolve_dependency(&config, &ld_preload.path, &elc, &mut deptree, depp, true);
+    }
+
+    for dep in &elc.deps {
+        resolve_dependency(&config, &dep, &elc, &mut deptree, depp, false);
+    }
+
+    Ok(deptree)
+}
+
+// Returned from resolve_dependency_1 with resolved information.
+struct ResolvedDependency<'a> {
+    elc: ElfInfo,
+    path: &'a String,
+    mode: DepMode,
+}
+
+fn resolve_dependency(
+    config: &Config,
+    dependency: &String,
+    elc: &ElfInfo,
+    deptree: &mut DepTree,
+    depp: usize,
+    preload: bool,
+) {
+    if elc.is_musl && dependency == "libc.so" {
+        return;
+    }
+
+    // If DF_1_NODEFLIB is set ignore the search cache in the case a dependency could
+    // resolve the library.
+    if !elc.nodeflibs {
+        if let Some(entry) = deptree.get(dependency) {
+            if config.all {
+                deptree.addnode(
+                    DepNode {
+                        path: entry.path,
+                        name: dependency.to_string(),
+                        mode: entry.mode.clone(),
+                        found: true,
+                    },
+                    depp,
+                );
+            }
+            return;
+        }
+    }
+
+    if let Some(mut dep) = resolve_dependency_1(dependency, config, elc, preload) {
+        let r = if dep.mode == DepMode::Direct {
+            // Decompose the direct object path in path and filename so when print the dependencies
+            // only the file name is showed in default mode.
+            let p = Path::new(dependency);
+            (
+                p.parent()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| Some(s.to_string())),
+                p.file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string(),
+            )
+        } else {
+            (Some(dep.path.to_string()), dependency.to_string())
+        };
+        let c = deptree.addnode(
+            DepNode {
+                path: r.0,
+                name: r.1,
+                mode: dep.mode,
+                found: false,
+            },
+            depp,
+        );
+
+        // Use parent R_PATH if dependency does not define it.
+        if dep.elc.rpath.is_empty() {
+            dep.elc.rpath.extend(elc.rpath.clone());
+        }
+
+        for sdep in &dep.elc.deps {
+            resolve_dependency(&config, &sdep, &dep.elc, deptree, c, preload);
+        }
+    } else {
+        deptree.addnode(
+            DepNode {
+                path: None,
+                name: dependency.to_string(),
+                mode: DepMode::NotFound,
+                found: false,
+            },
+            depp,
+        );
+    }
+}
+
+fn resolve_dependency_1<'a>(
+    dtneeded: &'a String,
+    config: &'a Config,
+    elc: &'a ElfInfo,
+    preload: bool,
+) -> Option<ResolvedDependency<'a>> {
+    let path = Path::new(&dtneeded);
+
+    // If the path is absolute skip the other modes.
+    if path.is_absolute() {
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
+            return Some(ResolvedDependency {
+                elc: elc,
+                path: dtneeded,
+                mode: if preload {
+                    DepMode::Preload
+                } else {
+                    DepMode::Direct
+                },
+            });
+        }
+        return None;
+    }
+
+    // Consider DT_RPATH iff DT_RUNPATH is not set.
+    if elc.runpath.is_empty() {
+        for searchpath in &elc.rpath {
+            let path = Path::new(&searchpath.path).join(dtneeded);
+            if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
+                return Some(ResolvedDependency {
+                    elc: elc,
+                    path: &searchpath.path,
+                    mode: DepMode::DtRpath,
+                });
+            }
+        }
+    }
+
+    // Check LD_LIBRARY_PATH paths.
+    for searchpath in config.ld_library_path {
+        let path = Path::new(&searchpath.path).join(dtneeded);
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
+            return Some(ResolvedDependency {
+                elc: elc,
+                path: &searchpath.path,
+                mode: DepMode::LdLibraryPath,
+            });
+        }
+    }
+
+    // Check DT_RUNPATH.
+    for searchpath in &elc.runpath {
+        let path = Path::new(&searchpath.path).join(dtneeded);
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
+            return Some(ResolvedDependency {
+                elc: elc,
+                path: &searchpath.path,
+                mode: DepMode::DtRunpath,
+            });
+        }
+    }
+
+    // Skip system paths if DF_1_NODEFLIB is set.
+    if elc.nodeflibs {
+        return None;
+    }
+
+    // Check the cached search paths from ld.so.conf
+    if let Some(ld_so_conf) = config.ld_so_conf {
+        for searchpath in ld_so_conf {
+            let path = Path::new(&searchpath.path).join(dtneeded);
+            if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
+                return Some(ResolvedDependency {
+                    elc: elc,
+                    path: &searchpath.path,
+                    mode: DepMode::LdSoConf,
+                });
+            }
+        }
+    }
+
+    // Finally the system directories.
+    for searchpath in &config.system_dirs {
+        let path = Path::new(&searchpath.path).join(dtneeded);
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
+            return Some(ResolvedDependency {
+                elc: elc,
+                path: &searchpath.path,
+                mode: DepMode::SystemDirs,
+            });
+        }
+    }
+
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn load_so_conf(interp: &Option<String>) -> Option<search_path::SearchPathVec> {
+    if interp::is_glibc(interp) {
+        return ld_conf::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")).ok();
+    };
+    None
+}
+#[cfg(target_os = "freebsd")]
+fn load_so_conf(_interp: &Option<String>) -> Option<search_path::SearchPathVec> {
+    ld_hints_freebsd::parse_ld_so_hints(&Path::new("/var/run/ld-elf.so.hints")).ok()
+}
+#[cfg(target_os = "openbsd")]
+fn load_so_conf(_interp: &Option<String>) -> Option<search_path::SearchPathVec> {
+    ld_hints_openbsd::parse_ld_so_hints(&Path::new("/var/run/ld.so.hints")).ok()
+}
+
+#[cfg(target_os = "linux")]
+fn load_ld_so_preload(interp: &Option<String>) -> search_path::SearchPathVec {
+    if interp::is_glibc(interp) {
+        return ld_conf::parse_ld_so_preload(&Path::new("/etc/ld.so.preload"));
+    }
+    search_path::SearchPathVec::new()
+}
+#[cfg(target_os = "freebsd")]
+fn load_ld_so_preload(_interp: &Option<String>) -> search_path::SearchPathVec {
+    search_path::SearchPathVec::new()
+}
+#[cfg(target_os = "openbsd")]
+fn load_ld_so_preload(_interp: &Option<String>) -> search_path::SearchPathVec {
+    search_path::SearchPathVec::new()
 }
