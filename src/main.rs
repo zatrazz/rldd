@@ -4,6 +4,7 @@ use std::{process, str};
 use argparse::{ArgumentParser, List, Store, StoreTrue};
 
 mod arenatree;
+mod depmode;
 #[cfg(target_os = "linux")]
 mod interp;
 #[cfg(target_os = "linux")]
@@ -16,6 +17,7 @@ mod platform;
 mod printer;
 mod search_path;
 mod system_dirs;
+use depmode::*;
 use printer::*;
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
 mod elf;
@@ -45,7 +47,7 @@ fn resolve_binary_arch(elc: &elf::ElfInfo, deptree: &mut elf::DepTree, depp: usi
             elf::DepNode {
                 path: interp::get_interp_path(&elc.interp),
                 name: interp::get_interp_name(&elc.interp).unwrap().to_string(),
-                mode: elf::DepMode::SystemDirs,
+                mode: DepMode::SystemDirs,
                 found: true,
             },
             depp,
@@ -68,7 +70,7 @@ fn resolve_binary(filename: &Path, config: &Config, elc: &elf::ElfInfo) -> elf::
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_string(),
-        mode: elf::DepMode::Executable,
+        mode: DepMode::Executable,
         found: false,
     });
 
@@ -89,7 +91,7 @@ fn resolve_binary(filename: &Path, config: &Config, elc: &elf::ElfInfo) -> elf::
 struct ResolvedDependency<'a> {
     elc: elf::ElfInfo,
     path: &'a String,
-    mode: elf::DepMode,
+    mode: DepMode,
 }
 
 fn resolve_dependency(
@@ -124,7 +126,7 @@ fn resolve_dependency(
     }
 
     if let Some(mut dep) = resolve_dependency_1(dependency, config, elc, preload) {
-        let r = if dep.mode == elf::DepMode::Direct {
+        let r = if dep.mode == DepMode::Direct {
             // Decompose the direct object path in path and filename so when print the dependencies
             // only the file name is showed in default mode.
             let p = Path::new(dependency);
@@ -163,7 +165,7 @@ fn resolve_dependency(
             elf::DepNode {
                 path: None,
                 name: dependency.to_string(),
-                mode: elf::DepMode::NotFound,
+                mode: DepMode::NotFound,
                 found: false,
             },
             depp,
@@ -186,9 +188,9 @@ fn resolve_dependency_1<'a>(
                 elc: elc,
                 path: dtneeded,
                 mode: if preload {
-                    elf::DepMode::Preload
+                    DepMode::Preload
                 } else {
-                    elf::DepMode::Direct
+                    DepMode::Direct
                 },
             });
         }
@@ -203,7 +205,7 @@ fn resolve_dependency_1<'a>(
                 return Some(ResolvedDependency {
                     elc: elc,
                     path: &searchpath.path,
-                    mode: elf::DepMode::DtRpath,
+                    mode: DepMode::DtRpath,
                 });
             }
         }
@@ -216,7 +218,7 @@ fn resolve_dependency_1<'a>(
             return Some(ResolvedDependency {
                 elc: elc,
                 path: &searchpath.path,
-                mode: elf::DepMode::LdLibraryPath,
+                mode: DepMode::LdLibraryPath,
             });
         }
     }
@@ -228,7 +230,7 @@ fn resolve_dependency_1<'a>(
             return Some(ResolvedDependency {
                 elc: elc,
                 path: &searchpath.path,
-                mode: elf::DepMode::DtRunpath,
+                mode: DepMode::DtRunpath,
             });
         }
     }
@@ -246,7 +248,7 @@ fn resolve_dependency_1<'a>(
                 return Some(ResolvedDependency {
                     elc: elc,
                     path: &searchpath.path,
-                    mode: elf::DepMode::LdSoConf,
+                    mode: DepMode::LdSoConf,
                 });
             }
         }
@@ -259,7 +261,7 @@ fn resolve_dependency_1<'a>(
             return Some(ResolvedDependency {
                 elc: elc,
                 path: &searchpath.path,
-                mode: elf::DepMode::SystemDirs,
+                mode: DepMode::SystemDirs,
             });
         }
     }
@@ -325,7 +327,7 @@ fn print_deps_children(
     while let Some(c) = iter.next() {
         let dep = &deps.arena[*c];
         deptrace.push(children.len() > 1);
-        if dep.val.mode == elf::DepMode::NotFound {
+        if dep.val.mode == DepMode::NotFound {
             p.print_not_found(&dep.val.name, &deptrace);
         } else if dep.val.found {
             p.print_already_found(
