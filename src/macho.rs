@@ -8,6 +8,7 @@ use object::read::macho::*;
 use object::Endianness;
 
 use crate::deptree::*;
+use crate::pathutils;
 use crate::search_path;
 
 static MACOS_BIG_SUR_CACHE_PATH_ARM64: &str =
@@ -41,20 +42,22 @@ pub fn resolve_binary(
     _ld_preload: &search_path::SearchPathVec,
     _ld_library_path: &search_path::SearchPathVec,
     _platform: Option<&String>,
-    _all: bool,
+    all: bool,
     arg: &str,
 ) -> Result<DepTree, std::io::Error> {
     let filename = Path::new(arg).canonicalize()?;
+    let executable_path: String = filename
+        .parent()
+        .and_then(|s| s.to_str())
+        .and_then(|s| Some(s.to_string()))
+        .unwrap_or(String::new());
 
     let elc = open_macho_file(&filename)?;
 
     let mut deptree = DepTree::new();
 
     let depp = deptree.addroot(DepNode {
-        path: filename
-            .parent()
-            .and_then(|s| s.to_str())
-            .and_then(|s| Some(s.to_string())),
+        path: Some(executable_path.clone()),
         name: filename
             .file_name()
             .and_then(|s| s.to_str())
@@ -65,7 +68,7 @@ pub fn resolve_binary(
     });
 
     for dep in &elc.deps {
-        resolve_dependency(cache, &dep, &mut deptree, depp);
+        resolve_dependency(cache, &executable_path, &dep, &mut deptree, depp, all);
     }
 
     Ok(deptree)
@@ -78,94 +81,78 @@ struct MachOInfo {
 }
 type DepsVec = Vec<String>;
 
-// Returned from resolve_dependency_1 with resolved information.
-struct ResolvedDependency<'a> {
-    elc: MachOInfo,
-    path: &'a String,
-    mode: DepMode,
-}
-
 fn resolve_dependency(
     cache: &HashSet<String>,
+    executable_path: &String,
     dependency: &String,
     deptree: &mut DepTree,
     depp: usize,
+    all: bool,
 ) {
-    if let Some(dep) = resolve_dependency_1(cache, dependency) {
-        let r = if dep.mode == DepMode::Direct {
-            // Decompose the direct object path in path and filename so when print the dependencies
-            // only the file name is showed in default mode.
-            let p = Path::new(dependency);
-            (
-                p.parent()
-                    .and_then(|s| s.to_str())
-                    .and_then(|s| Some(s.to_string())),
-                p.file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string(),
-            )
-        } else {
-            (Some(dep.path.to_string()), dependency.to_string())
-        };
-        let c = deptree.addnode(
-            DepNode {
-                path: r.0,
-                name: r.1,
-                mode: dep.mode,
-                found: false,
-            },
-            depp,
-        );
-        for sdep in &dep.elc.deps {
-            resolve_dependency(cache, &sdep, deptree, c);
-        }
-    } else {
-        deptree.addnode(
-            DepNode {
-                path: None,
-                name: dependency.to_string(),
-                mode: DepMode::NotFound,
-                found: false,
-            },
-            depp,
-        );
-    }
-}
-
-fn resolve_dependency_1<'a>(
-    cache: &HashSet<String>,
-    dep: &'a String,
-) -> Option<ResolvedDependency<'a>> {
-    let path = Path::new(&dep);
-
-    // If the path is absolute skip the other modes.
-    if path.is_absolute() {
-        if let Ok(elc) = open_macho_file(&path) {
-            return Some(ResolvedDependency {
-                elc: elc,
-                path: dep,
-                mode: DepMode::Direct,
-            });
-        }
-    }
-
-    // TODO: handle @executable_path
+    let dependency = dependency.replace("@executable_path", executable_path);
     // TODO: @loader_path/
     // TODO: @rpath/
 
-    if !cache.contains(dep) {
-        return None;
+    // Try to read the library file contents.
+    let path = Path::new(&dependency);
+    let elc = if path.is_absolute() {
+        open_macho_file(&path).handle_err()
+    } else {
+        None
+    };
+
+    // The dependency library does not exist on filesystem, check the dydl cache.
+    let dependency = if elc.is_none() {
+        let mode = if !cache.contains(&dependency) {
+            DepMode::NotFound
+        } else {
+            DepMode::LdSoConf
+        };
+        deptree.addnode(
+            DepNode {
+                path: pathutils::get_path(&path),
+                name: pathutils::get_name(&path),
+                mode: mode,
+                found: false,
+            },
+            depp,
+        );
+        return;
+    } else {
+        path.canonicalize().unwrap()
+    };
+
+    let name = pathutils::get_name(&dependency);
+
+    // Check if dependency is already found.
+    if let Some(entry) = deptree.get(&dependency.to_string_lossy().to_string()) {
+        if all {
+            deptree.addnode(
+                DepNode {
+                    path: entry.path,
+                    name: name,
+                    mode: entry.mode.clone(),
+                    found: true,
+                },
+                depp,
+            );
+        }
+        return;
     }
 
-    Some(ResolvedDependency {
-        elc: MachOInfo {
-            deps: DepsVec::new(),
-            cache: None,
+    let c = deptree.addnode(
+        DepNode {
+            path: pathutils::get_path(&dependency),
+            name: name,
+            mode: DepMode::Direct,
+            found: false,
         },
-        path: dep,
-        mode: DepMode::LdSoConf,
-    })
+        depp,
+    );
+
+    for dep in &elc.unwrap().deps {
+        resolve_dependency(cache, executable_path, &dep, deptree, c, all);
+    }
 }
 
 fn open_macho_file<'a, P: AsRef<Path>>(filename: &P) -> Result<MachOInfo, std::io::Error> {

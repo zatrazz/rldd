@@ -1,4 +1,5 @@
 use std::fmt;
+use std::path::Path;
 
 mod arenatree;
 
@@ -13,7 +14,17 @@ pub struct DepNode {
 
 impl arenatree::EqualString for DepNode {
     fn eqstr(&self, other: &String) -> bool {
-        self.name == *other
+        if self.path.is_none() || !Path::new(other).is_absolute() {
+            *other == self.name
+        } else {
+            *other
+                == format!(
+                    "{}{}{}",
+                    &self.path.as_ref().unwrap(),
+                    std::path::MAIN_SEPARATOR,
+                    self.name
+                )
+        }
     }
 }
 
