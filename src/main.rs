@@ -8,11 +8,11 @@ use deptree::*;
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
 mod elf;
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
-use elf::resolve_binary;
+use elf::*;
 #[cfg(any(target_os = "macos"))]
 mod macho;
 #[cfg(any(target_os = "macos"))]
-use macho::resolve_binary;
+use macho::*;
 
 fn print_deps(p: &Printer, deps: &DepTree) {
     let bin = deps.arena.first().unwrap();
@@ -118,8 +118,11 @@ fn main() {
         Some(&platform)
     };
 
+    let ctx = create_context();
+
     for arg in args {
         if let Ok(mut deptree) = resolve_binary(
+            &ctx,
             &ld_preload,
             &mut ld_so_conf,
             &ld_library_path,

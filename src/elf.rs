@@ -490,7 +490,14 @@ fn resolve_binary_arch(elc: &ElfInfo, deptree: &mut DepTree, depp: usize) {
 #[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
 fn resolve_binary_arch(_elc: &ElfInfo, _deptree: &mut DepTree, _depp: usize) {}
 
+pub struct ElfCtx {}
+
+pub fn create_context() -> ElfCtx {
+    ElfCtx {}
+}
+
 pub fn resolve_binary(
+    _ctx: &ElfCtx,
     ld_preload: &search_path::SearchPathVec,
     ld_so_conf: &mut Option<search_path::SearchPathVec>,
     ld_library_path: &search_path::SearchPathVec,
