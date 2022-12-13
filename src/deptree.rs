@@ -22,6 +22,7 @@ pub type DepTree = arenatree::ArenaTree<DepNode>;
 
 // The resolution mode for a dependency, used mostly for printing.
 #[derive(PartialEq, Clone, Copy, Debug)]
+#[allow(dead_code)]
 pub enum DepMode {
     Preload,       // Preload library.
     Direct,        // DT_SONAME refers to an aboslute path.
