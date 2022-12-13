@@ -48,6 +48,8 @@ impl fmt::Display for DepMode {
             DepMode::LdSoConf => write!(f, "[ld-elf.so.hints]"),
             #[cfg(target_os = "openbsd")]
             DepMode::LdSoConf => write!(f, "[ld-so.hints]"),
+            #[cfg(target_os = "macos")]
+            DepMode::LdSoConf => write!(f, "[not supported]"),
             DepMode::SystemDirs => write!(f, "[system default paths]"),
             DepMode::Executable => write!(f, ""),
             DepMode::NotFound => write!(f, "[not found]"),

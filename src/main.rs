@@ -7,6 +7,12 @@ mod search_path;
 use deptree::*;
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
 mod elf;
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
+use elf::resolve_binary;
+#[cfg(any(target_os = "macos"))]
+mod macho;
+#[cfg(any(target_os = "macos"))]
+use macho::resolve_binary;
 
 fn print_deps(p: &Printer, deps: &DepTree) {
     let bin = deps.arena.first().unwrap();
@@ -113,7 +119,7 @@ fn main() {
     };
 
     for arg in args {
-        if let Ok(mut deptree) = elf::resolve_binary(
+        if let Ok(mut deptree) = resolve_binary(
             &ld_preload,
             &mut ld_so_conf,
             &ld_library_path,
