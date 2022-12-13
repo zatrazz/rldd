@@ -109,22 +109,18 @@ fn main() {
     let ld_library_path = search_path::from_string(&ld_library_path.as_str(), &[':']);
     let ld_preload = search_path::from_preload(&ld_preload.as_str());
 
-    // The loader search cache is lazy loaded if the binary has a loader that
-    // actually supports it.
-    let mut ld_so_conf: Option<search_path::SearchPathVec> = None;
     let plat = if platform.is_empty() {
         None
     } else {
         Some(&platform)
     };
 
-    let ctx = create_context();
+    let mut ctx = create_context();
 
     for arg in args {
         if let Ok(mut deptree) = resolve_binary(
-            &ctx,
+            &mut ctx,
             &ld_preload,
-            &mut ld_so_conf,
             &ld_library_path,
             plat,
             all,

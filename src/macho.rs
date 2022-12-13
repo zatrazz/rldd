@@ -39,7 +39,6 @@ pub fn create_context() -> DyldCache {
 pub fn resolve_binary(
     cache: &HashSet<String>,
     _ld_preload: &search_path::SearchPathVec,
-    _ld_so_conf: &mut Option<search_path::SearchPathVec>,
     _ld_library_path: &search_path::SearchPathVec,
     _platform: Option<&String>,
     _all: bool,

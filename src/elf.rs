@@ -490,16 +490,17 @@ fn resolve_binary_arch(elc: &ElfInfo, deptree: &mut DepTree, depp: usize) {
 #[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
 fn resolve_binary_arch(_elc: &ElfInfo, _deptree: &mut DepTree, _depp: usize) {}
 
-pub struct ElfCtx {}
+pub type ElfCtx = Option<search_path::SearchPathVec>;
 
+// The loader search cache is lazy loaded if the binary has a loader that actually
+// supports it.
 pub fn create_context() -> ElfCtx {
-    ElfCtx {}
+    None
 }
 
 pub fn resolve_binary(
-    _ctx: &ElfCtx,
+    ld_so_conf: &mut ElfCtx,
     ld_preload: &search_path::SearchPathVec,
-    ld_so_conf: &mut Option<search_path::SearchPathVec>,
     ld_library_path: &search_path::SearchPathVec,
     platform: Option<&String>,
     all: bool,
