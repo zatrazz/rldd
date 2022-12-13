@@ -9,6 +9,19 @@ use object::Endianness;
 use crate::deptree::*;
 use crate::search_path;
 
+fn check_current_arch(arch: object::Architecture) -> bool {
+    std::env::consts::ARCH
+        == match arch {
+            object::Architecture::Aarch64 => "aarch64",
+            object::Architecture::Arm => "arm",
+            object::Architecture::X86_64 => "x86_64",
+            object::Architecture::I386 => "x86",
+            object::Architecture::PowerPc64 => "powerpc64",
+            object::Architecture::PowerPc => "powerpc",
+            _ => "",
+        }
+}
+
 type DepsVec = Vec<String>;
 
 #[derive(Debug)]
@@ -151,11 +164,11 @@ fn parse_object(data: &[u8], _origin: &str) -> Result<MachOInfo, &'static str> {
         Err(_err) => return Err("Failed to parse file"),
     };
 
-    println!("kind={:?}", kind);
-
     match kind {
         object::FileKind::MachO32 => parse_macho32(data, 0),
         object::FileKind::MachO64 => parse_macho64(data, 0),
+        object::FileKind::MachOFat32 => parse_macho_fat32(data, 0),
+        object::FileKind::MachOFat64 => parse_macho_fat64(data, 0),
         _ => Err("Invalid object"),
     }
 }
@@ -185,6 +198,34 @@ fn parse_macho64(data: &[u8], offset: u64) -> Result<MachOInfo, &'static str> {
         return parse_macho(macho, data, 0);
     }
     Err("Invalid Mach-O 64 object")
+}
+
+fn parse_macho_fat32(data: &[u8], offset: u64) -> Result<MachOInfo, &'static str> {
+    if let Some(arches) = FatHeader::parse_arch32(data).handle_err() {
+        return parse_macho_fat(data, arches);
+    }
+    Err("Invalid FAT Mach-O 32 object")
+}
+
+fn parse_macho_fat64(data: &[u8], offset: u64) -> Result<MachOInfo, &'static str> {
+    if let Some(arches) = FatHeader::parse_arch64(data).handle_err() {
+        return parse_macho_fat(data, arches);
+    }
+    Err("Invalid FAT Mach-O 64 object")
+}
+
+fn parse_macho_fat<FatArch: object::read::macho::FatArch>(
+    data: &[u8],
+    arches: &[FatArch],
+) -> Result<MachOInfo, &'static str> {
+    for arch in arches {
+        if check_current_arch(arch.architecture()) {
+            if let Some(fatdata) = arch.data(data).handle_err() {
+                return parse_object(fatdata, "");
+            }
+        }
+    }
+    Err("Invalid FAT Mach-O architecture")
 }
 
 #[derive(Default)]
