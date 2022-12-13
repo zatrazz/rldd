@@ -65,7 +65,7 @@ pub fn resolve_binary(
     });
 
     for dep in &elc.deps {
-        resolve_dependency(cache, &dep, &elc, &mut deptree, depp);
+        resolve_dependency(cache, &dep, &mut deptree, depp);
     }
 
     Ok(deptree)
@@ -88,11 +88,10 @@ struct ResolvedDependency<'a> {
 fn resolve_dependency(
     cache: &HashSet<String>,
     dependency: &String,
-    elc: &MachOInfo,
     deptree: &mut DepTree,
     depp: usize,
 ) {
-    if let Some(mut dep) = resolve_dependency_1(cache, dependency) {
+    if let Some(dep) = resolve_dependency_1(cache, dependency) {
         let r = if dep.mode == DepMode::Direct {
             // Decompose the direct object path in path and filename so when print the dependencies
             // only the file name is showed in default mode.
@@ -119,7 +118,7 @@ fn resolve_dependency(
             depp,
         );
         for sdep in &dep.elc.deps {
-            resolve_dependency(cache, &sdep, &dep.elc, deptree, c);
+            resolve_dependency(cache, &sdep, deptree, c);
         }
     } else {
         deptree.addnode(
@@ -198,10 +197,10 @@ fn parse_object(data: &[u8], _origin: &str) -> Result<MachOInfo, &'static str> {
     };
 
     match kind {
-        object::FileKind::MachO32 => parse_macho32(data, 0),
-        object::FileKind::MachO64 => parse_macho64(data, 0),
-        object::FileKind::MachOFat32 => parse_macho_fat32(data, 0),
-        object::FileKind::MachOFat64 => parse_macho_fat64(data, 0),
+        object::FileKind::MachO32 => parse_macho32(data),
+        object::FileKind::MachO64 => parse_macho64(data),
+        object::FileKind::MachOFat32 => parse_macho_fat32(data),
+        object::FileKind::MachOFat64 => parse_macho_fat64(data),
         object::FileKind::DyldCache => parse_dyld_cache(data),
         _ => Err("Invalid object"),
     }
@@ -220,28 +219,28 @@ impl<T, E: fmt::Display> HandleErr<T> for Result<T, E> {
     }
 }
 
-fn parse_macho32(data: &[u8], offset: u64) -> Result<MachOInfo, &'static str> {
-    if let Some(macho) = MachHeader32::parse(data, offset).handle_err() {
-        return parse_macho(macho, data, 0);
+fn parse_macho32(data: &[u8]) -> Result<MachOInfo, &'static str> {
+    if let Some(macho) = MachHeader32::parse(data, 0).handle_err() {
+        return parse_macho(macho, data);
     }
     Err("Invalid Mach-O 32 object")
 }
 
-fn parse_macho64(data: &[u8], offset: u64) -> Result<MachOInfo, &'static str> {
-    if let Some(macho) = MachHeader64::parse(data, offset).handle_err() {
-        return parse_macho(macho, data, 0);
+fn parse_macho64(data: &[u8]) -> Result<MachOInfo, &'static str> {
+    if let Some(macho) = MachHeader64::parse(data, 0).handle_err() {
+        return parse_macho(macho, data);
     }
     Err("Invalid Mach-O 64 object")
 }
 
-fn parse_macho_fat32(data: &[u8], offset: u64) -> Result<MachOInfo, &'static str> {
+fn parse_macho_fat32(data: &[u8]) -> Result<MachOInfo, &'static str> {
     if let Some(arches) = FatHeader::parse_arch32(data).handle_err() {
         return parse_macho_fat(data, arches);
     }
     Err("Invalid FAT Mach-O 32 object")
 }
 
-fn parse_macho_fat64(data: &[u8], offset: u64) -> Result<MachOInfo, &'static str> {
+fn parse_macho_fat64(data: &[u8]) -> Result<MachOInfo, &'static str> {
     if let Some(arches) = FatHeader::parse_arch64(data).handle_err() {
         return parse_macho_fat(data, arches);
     }
@@ -275,21 +274,14 @@ fn parse_macho_fat<FatArch: object::read::macho::FatArch>(
     Err("Invalid FAT Mach-O architecture")
 }
 
-#[derive(Default)]
-struct MachState {
-    _section_index: usize,
-}
-
 fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
     header: &Mach,
     data: &[u8],
-    offset: u64,
 ) -> Result<MachOInfo, &'static str> {
     let mut deps = DepsVec::new();
 
     if let Ok(endian) = header.endian() {
-        let mut state = MachState::default();
-        if let Ok(mut commands) = header.load_commands(endian, data, offset) {
+        if let Ok(mut commands) = header.load_commands(endian, data, 0) {
             while let Ok(Some(command)) = commands.next() {
                 if let Some(dep) = parse_load_command::<Mach>(endian, command) {
                     deps.push(dep);
@@ -309,7 +301,6 @@ fn parse_dyld_cache(data: &[u8]) -> Result<MachOInfo, &'static str> {
 
     if let Some(header) = DyldCacheHeader::<Endianness>::parse(data).handle_err() {
         if let Some((_, endian)) = header.parse_magic().handle_err() {
-            let mappings = header.mappings(endian, data);
             if let Some(images) = header.images(endian, data).handle_err() {
                 for image in images {
                     let path = image

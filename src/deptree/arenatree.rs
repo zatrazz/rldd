@@ -59,6 +59,7 @@ where
         idx
     }
 
+    #[allow(dead_code)]
     pub fn get(&mut self, val: &String) -> Option<T> {
         for node in &self.arena {
             if node.val.eqstr(val) {
