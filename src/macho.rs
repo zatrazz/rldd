@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::{Error, ErrorKind};
 use std::path::Path;
 use std::{fmt, fs, str};
@@ -9,32 +10,39 @@ use object::Endianness;
 use crate::deptree::*;
 use crate::search_path;
 
-fn check_current_arch(arch: object::Architecture) -> bool {
-    std::env::consts::ARCH
-        == match arch {
-            object::Architecture::Aarch64 => "aarch64",
-            object::Architecture::Arm => "arm",
-            object::Architecture::X86_64 => "x86_64",
-            object::Architecture::I386 => "x86",
-            object::Architecture::PowerPc64 => "powerpc64",
-            object::Architecture::PowerPc => "powerpc",
-            _ => "",
+static MACOS_BIG_SUR_CACHE_PATH_ARM64: &str =
+    "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e";
+static MACOS_BIG_SUR_CACHE_PATH_X86_64: &str =
+    "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64";
+
+pub type DyldCache = HashSet<String>;
+
+// macOS starting with BigSur only provides a generated cache of all built in dynamic
+// libraries, so file does not exist in the file system it is then checked against the
+// cache.
+pub fn create_context() -> DyldCache {
+    let path = match std::env::consts::ARCH {
+        "aarch64" => MACOS_BIG_SUR_CACHE_PATH_ARM64,
+        "x86_64" => MACOS_BIG_SUR_CACHE_PATH_X86_64,
+        _ => return DyldCache::new(),
+    };
+
+    if let Ok(elc) = open_macho_file(&Path::new(path)) {
+        if let Some(cache) = elc.cache {
+            return cache;
         }
-}
+    }
 
-type DepsVec = Vec<String>;
-
-#[derive(Debug)]
-struct MachOInfo {
-    deps: DepsVec,
+    DyldCache::new()
 }
 
 pub fn resolve_binary(
-    ld_preload: &search_path::SearchPathVec,
-    ld_so_conf: &mut Option<search_path::SearchPathVec>,
-    ld_library_path: &search_path::SearchPathVec,
-    platform: Option<&String>,
-    all: bool,
+    cache: &HashSet<String>,
+    _ld_preload: &search_path::SearchPathVec,
+    _ld_so_conf: &mut Option<search_path::SearchPathVec>,
+    _ld_library_path: &search_path::SearchPathVec,
+    _platform: Option<&String>,
+    _all: bool,
     arg: &str,
 ) -> Result<DepTree, std::io::Error> {
     let filename = Path::new(arg).canonicalize()?;
@@ -58,11 +66,18 @@ pub fn resolve_binary(
     });
 
     for dep in &elc.deps {
-        resolve_dependency(&dep, &elc, &mut deptree, depp);
+        resolve_dependency(cache, &dep, &elc, &mut deptree, depp);
     }
 
     Ok(deptree)
 }
+
+#[derive(Debug)]
+struct MachOInfo {
+    deps: DepsVec,
+    cache: Option<DyldCache>,
+}
+type DepsVec = Vec<String>;
 
 // Returned from resolve_dependency_1 with resolved information.
 struct ResolvedDependency<'a> {
@@ -71,8 +86,14 @@ struct ResolvedDependency<'a> {
     mode: DepMode,
 }
 
-fn resolve_dependency(dependency: &String, elc: &MachOInfo, deptree: &mut DepTree, depp: usize) {
-    if let Some(mut dep) = resolve_dependency_1(dependency) {
+fn resolve_dependency(
+    cache: &HashSet<String>,
+    dependency: &String,
+    elc: &MachOInfo,
+    deptree: &mut DepTree,
+    depp: usize,
+) {
+    if let Some(mut dep) = resolve_dependency_1(cache, dependency) {
         let r = if dep.mode == DepMode::Direct {
             // Decompose the direct object path in path and filename so when print the dependencies
             // only the file name is showed in default mode.
@@ -99,7 +120,7 @@ fn resolve_dependency(dependency: &String, elc: &MachOInfo, deptree: &mut DepTre
             depp,
         );
         for sdep in &dep.elc.deps {
-            resolve_dependency(&sdep, &dep.elc, deptree, c);
+            resolve_dependency(cache, &sdep, &dep.elc, deptree, c);
         }
     } else {
         deptree.addnode(
@@ -114,7 +135,10 @@ fn resolve_dependency(dependency: &String, elc: &MachOInfo, deptree: &mut DepTre
     }
 }
 
-fn resolve_dependency_1<'a>(dep: &'a String) -> Option<ResolvedDependency<'a>> {
+fn resolve_dependency_1<'a>(
+    cache: &HashSet<String>,
+    dep: &'a String,
+) -> Option<ResolvedDependency<'a>> {
     let path = Path::new(&dep);
 
     // If the path is absolute skip the other modes.
@@ -126,14 +150,24 @@ fn resolve_dependency_1<'a>(dep: &'a String) -> Option<ResolvedDependency<'a>> {
                 mode: DepMode::Direct,
             });
         }
-        return None;
     }
 
     // TODO: handle @executable_path
     // TODO: @loader_path/
     // TODO: @rpath/
 
-    None
+    if !cache.contains(dep) {
+        return None;
+    }
+
+    Some(ResolvedDependency {
+        elc: MachOInfo {
+            deps: DepsVec::new(),
+            cache: None,
+        },
+        path: dep,
+        mode: DepMode::LdSoConf,
+    })
 }
 
 fn open_macho_file<'a, P: AsRef<Path>>(filename: &P) -> Result<MachOInfo, std::io::Error> {
@@ -169,6 +203,7 @@ fn parse_object(data: &[u8], _origin: &str) -> Result<MachOInfo, &'static str> {
         object::FileKind::MachO64 => parse_macho64(data, 0),
         object::FileKind::MachOFat32 => parse_macho_fat32(data, 0),
         object::FileKind::MachOFat64 => parse_macho_fat64(data, 0),
+        object::FileKind::DyldCache => parse_dyld_cache(data),
         _ => Err("Invalid object"),
     }
 }
@@ -214,6 +249,19 @@ fn parse_macho_fat64(data: &[u8], offset: u64) -> Result<MachOInfo, &'static str
     Err("Invalid FAT Mach-O 64 object")
 }
 
+fn check_current_arch(arch: object::Architecture) -> bool {
+    std::env::consts::ARCH
+        == match arch {
+            object::Architecture::Aarch64 => "aarch64",
+            object::Architecture::Arm => "arm",
+            object::Architecture::X86_64 => "x86_64",
+            object::Architecture::I386 => "x86",
+            object::Architecture::PowerPc64 => "powerpc64",
+            object::Architecture::PowerPc => "powerpc",
+            _ => "",
+        }
+}
+
 fn parse_macho_fat<FatArch: object::read::macho::FatArch>(
     data: &[u8],
     arches: &[FatArch],
@@ -251,7 +299,36 @@ fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
         }
     }
 
-    Ok(MachOInfo { deps: deps })
+    Ok(MachOInfo {
+        deps: deps,
+        cache: None,
+    })
+}
+
+fn parse_dyld_cache(data: &[u8]) -> Result<MachOInfo, &'static str> {
+    let mut cache = DyldCache::new();
+
+    if let Some(header) = DyldCacheHeader::<Endianness>::parse(data).handle_err() {
+        if let Some((_, endian)) = header.parse_magic().handle_err() {
+            let mappings = header.mappings(endian, data);
+            if let Some(images) = header.images(endian, data).handle_err() {
+                for image in images {
+                    let path = image
+                        .path(endian, data)
+                        .ok()
+                        .and_then(|s| str::from_utf8(s).ok().and_then(|s| Some(s.to_string())));
+                    if let Some(path) = path {
+                        cache.insert(path);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(MachOInfo {
+        deps: DepsVec::new(),
+        cache: Some(cache),
+    })
 }
 
 fn parse_load_command<Mach: MachHeader>(
