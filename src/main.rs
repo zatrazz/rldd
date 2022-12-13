@@ -3,6 +3,7 @@ use argparse::{ArgumentParser, List, Store, StoreTrue};
 mod printer;
 use printer::*;
 mod deptree;
+mod pathutils;
 mod search_path;
 use deptree::*;
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]

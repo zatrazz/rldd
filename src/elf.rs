@@ -13,12 +13,13 @@ use crate::deptree::*;
 #[cfg(target_os = "linux")]
 mod ld_conf;
 mod platform;
+use crate::pathutils;
 use crate::search_path;
-mod system_dirs;
-#[cfg(target_os = "openbsd")]
-mod ld_hints_openbsd;
 #[cfg(target_os = "freebsd")]
 mod ld_hints_freebsd;
+#[cfg(target_os = "openbsd")]
+mod ld_hints_openbsd;
+mod system_dirs;
 
 type DepsVec = Vec<String>;
 
@@ -475,11 +476,18 @@ fn resolve_binary_arch(elc: &ElfInfo, deptree: &mut DepTree, depp: usize) {
     // musl loader and libc is on the same shared object, so adds a synthetic dependendy for
     // the binary so it is also shown and to be returned in case a objects has libc.so
     // as needed.
-    if elc.is_musl {
+    if !elc.is_musl {
+        return;
+    }
+
+    if let Some(interp) = &elc.interp {
+        let path = Path::new(&interp);
         deptree.addnode(
             DepNode {
-                path: interp::get_interp_path(&elc.interp),
-                name: interp::get_interp_name(&elc.interp).unwrap().to_string(),
+                //path: interp::get_interp_path(&elc.interp),
+                path: pathutils::get_path(&path),
+                //name: interp::get_interp_name(&elc.interp).unwrap().to_string(),
+                name: pathutils::get_name(&path),
                 mode: DepMode::SystemDirs,
                 found: true,
             },
@@ -560,15 +568,8 @@ pub fn resolve_binary(
     let mut deptree = DepTree::new();
 
     let depp = deptree.addroot(DepNode {
-        path: filename
-            .parent()
-            .and_then(|s| s.to_str())
-            .and_then(|s| Some(s.to_string())),
-        name: filename
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string(),
+        path: pathutils::get_path(&filename),
+        name: pathutils::get_name(&filename),
         mode: DepMode::Executable,
         found: false,
     });
@@ -613,7 +614,7 @@ fn resolve_dependency(
                 deptree.addnode(
                     DepNode {
                         path: entry.path,
-                        name: dependency.to_string(),
+                        name: pathutils::get_name(&Path::new(dependency)),
                         mode: entry.mode.clone(),
                         found: true,
                     },
@@ -629,17 +630,9 @@ fn resolve_dependency(
             // Decompose the direct object path in path and filename so when print the dependencies
             // only the file name is showed in default mode.
             let p = Path::new(dependency);
-            (
-                p.parent()
-                    .and_then(|s| s.to_str())
-                    .and_then(|s| Some(s.to_string())),
-                p.file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string(),
-            )
+            (pathutils::get_path(&p), pathutils::get_name(&p))
         } else {
-            (Some(dep.path.to_string()), dependency.to_string())
+            (Some(dep.path.to_string()), pathutils::get_name(dependency))
         };
         let c = deptree.addnode(
             DepNode {
@@ -660,10 +653,11 @@ fn resolve_dependency(
             resolve_dependency(&config, &sdep, &dep.elc, deptree, c, preload);
         }
     } else {
+        let path = Path::new(dependency);
         deptree.addnode(
             DepNode {
-                path: None,
-                name: dependency.to_string(),
+                path: pathutils::get_path(&path),
+                name: pathutils::get_name(&path),
                 mode: DepMode::NotFound,
                 found: false,
             },
