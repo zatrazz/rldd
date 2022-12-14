@@ -32,7 +32,7 @@ pub fn create_context() -> DyldCache {
 }
 
 pub fn resolve_binary(
-    cache: &HashSet<String>,
+    cache: &DyldCache,
     _ld_preload: &search_path::SearchPathVec,
     _ld_library_path: &search_path::SearchPathVec,
     _platform: Option<&String>,
@@ -78,7 +78,7 @@ struct MachOInfo {
 type DepsVec = Vec<String>;
 
 fn resolve_dependency(
-    cache: &HashSet<String>,
+    cache: &DyldCache,
     executable_path: &String,
     loader_path: &String,
     rpaths: &search_path::SearchPathVec,
@@ -120,7 +120,7 @@ fn resolve_dependency(
 }
 
 fn resolve_dependency_1(
-    cache: &HashSet<String>,
+    cache: &DyldCache,
     executable_path: &String,
     dependency: &mut String,
     rpath: bool,
@@ -169,7 +169,7 @@ fn resolve_dependency_1(
 }
 
 fn resolve_dependency_2(
-    cache: &HashSet<String>,
+    cache: &DyldCache,
     executable_path: &String,
     dependency: &mut String,
     rpath: bool,
@@ -177,8 +177,25 @@ fn resolve_dependency_2(
     depp: usize,
     all: bool,
 ) -> Option<(MachOInfo, String)> {
-    // Try to read the library file contents.
     let path = Path::new(&dependency);
+
+    if cache.contains(dependency) {
+        if resolve_dependency_check_found(dependency, deptree, depp, all) {
+            return None;
+        }
+        deptree.addnode(
+            DepNode {
+                path: pathutils::get_path(&path),
+                name: pathutils::get_name(&path),
+                mode: DepMode::LdSoConf,
+                found: false,
+            },
+            depp,
+        );
+        return None;
+    }
+
+    // Try to read the library file contents.
     let elc = if path.is_absolute() {
         open_macho_file(&path, executable_path).handle_err()
     } else {
@@ -188,20 +205,11 @@ fn resolve_dependency_2(
     // The dependency library does not exist on filesystem, check the dydl cache.
     let path = if elc.is_none() {
         if !rpath {
-            let mode = if !cache.contains(dependency) {
-                DepMode::NotFound
-            } else {
-                // Check if dependency is already found.
-                if resolve_dependency_check_found(dependency, deptree, depp, all) {
-                    return None;
-                }
-                DepMode::LdSoConf
-            };
             deptree.addnode(
                 DepNode {
                     path: pathutils::get_path(&path),
                     name: pathutils::get_name(&path),
-                    mode: mode,
+                    mode: DepMode::NotFound,
                     found: false,
                 },
                 depp,
