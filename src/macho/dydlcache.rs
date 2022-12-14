@@ -1,6 +1,8 @@
 use std::ffi::CString;
 use std::io::{Error, ErrorKind};
 
+static MACOS_CATALINA_CACHE_PATH_X86_64: &str =
+    "/var/db/dyld/dyld_shared_cache_x86_64h";
 static MACOS_BIG_SUR_CACHE_PATH_ARM64: &str =
     "/System/Library/dyld/dyld_shared_cache_arm64e";
 static MACOS_BIG_SUR_CACHE_PATH_X86_64: &str =
@@ -16,6 +18,7 @@ enum MacOsRelease
   VENTURA,
   MONTEREY,
   BIGSUR,
+  CATALINA,
 }
 
 fn osrelease() -> Result<MacOsRelease, std::io::Error> {
@@ -70,6 +73,7 @@ fn osrelease() -> Result<MacOsRelease, std::io::Error> {
          Some("22") => return Ok(MacOsRelease::VENTURA),
          Some("21") => return Ok(MacOsRelease::MONTEREY),
          Some("20") => return Ok(MacOsRelease::BIGSUR),
+         Some("19") => return Ok(MacOsRelease::CATALINA),
          _ => return Err(Error::new(ErrorKind::Other, "Invalid MacOS release")),
    }
 }
@@ -86,6 +90,11 @@ pub fn path() -> Option<&'static str> {
        match std::env::consts::ARCH {
           "aarch64" => Some(MACOS_BIG_SUR_CACHE_PATH_ARM64),
           "x86_64" => Some(MACOS_BIG_SUR_CACHE_PATH_X86_64),
+          _ => None
+       },
+    Ok(MacOsRelease::CATALINA) =>
+       match std::env::consts::ARCH {
+          "x86_64" => Some(MACOS_CATALINA_CACHE_PATH_X86_64),
           _ => None
        },
     _ => None
