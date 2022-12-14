@@ -1,5 +1,6 @@
 // Tree-like data structure, used while resolving the input binary.
 
+#[derive(Debug)]
 pub struct Node<T>
 where
     T: PartialEq,
@@ -28,6 +29,7 @@ pub trait EqualString {
     fn eqstr(&self, other: &String) -> bool;
 }
 
+#[derive(Debug)]
 pub struct ArenaTree<T>
 where
     T: PartialEq,

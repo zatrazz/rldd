@@ -2,27 +2,7 @@
 
 use std::path::Path;
 
-pub fn get_interp_path(interp: &Option<String>) -> Option<String> {
-    if let Some(interp) = interp {
-        // Map any translation error to a non-existent interpreter.
-        return Path::new(interp)
-            .parent()
-            .and_then(|s| s.to_str())
-            .and_then(|s| Some(s.to_string()));
-    }
-    None
-}
-pub fn get_interp_name(interp: &Option<String>) -> Option<&str> {
-    if let Some(interp) = interp {
-        // Map any translation error to a non-existent interpreter.
-        let interp = Path::new(interp)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-        return Some(interp);
-    }
-    None
-}
+use crate::pathutils;
 
 const GLIBC_INTERP: &'static [&'static str] = &[
     "ld-linux-aarch64.so.1",         // AArch64 little-endian.
@@ -52,8 +32,14 @@ const GLIBC_INTERP: &'static [&'static str] = &[
 ];
 
 pub fn is_glibc(interp: &Option<String>) -> bool {
+    /*
     if let Some(interp) = get_interp_name(interp) {
         return GLIBC_INTERP.contains(&interp);
+    }
+    false
+    */
+    if let Some(interp) = interp {
+        return GLIBC_INTERP.contains(&pathutils::get_name(&Path::new(interp)).as_str());
     }
     false
 }
@@ -120,7 +106,8 @@ fn is_musl_arch(interp: &str) -> bool {
 }
 
 pub fn is_musl(interp: &Option<String>) -> bool {
-    if let Some(interp) = get_interp_name(interp) {
+    if let Some(interp) = interp {
+        let interp = &pathutils::get_name(&Path::new(interp));
         if !interp.starts_with("ld-musl-") {
             return false;
         }
