@@ -10,12 +10,9 @@ use object::Endianness;
 use crate::deptree::*;
 use crate::pathutils;
 use crate::search_path;
-use crate::search_path::SearchPathVecExt;
+use crate::search_path::*;
 
-static MACOS_BIG_SUR_CACHE_PATH_ARM64: &str =
-    "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e";
-static MACOS_BIG_SUR_CACHE_PATH_X86_64: &str =
-    "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64";
+mod dydlcache;
 
 pub type DyldCache = HashSet<String>;
 
@@ -23,15 +20,11 @@ pub type DyldCache = HashSet<String>;
 // libraries, so file does not exist in the file system it is then checked against the
 // cache.
 pub fn create_context() -> DyldCache {
-    let path = match std::env::consts::ARCH {
-        "aarch64" => MACOS_BIG_SUR_CACHE_PATH_ARM64,
-        "x86_64" => MACOS_BIG_SUR_CACHE_PATH_X86_64,
-        _ => return DyldCache::new(),
-    };
-
-    if let Ok(elc) = open_macho_file(&Path::new(path), &String::new()) {
-        if let Some(cache) = elc.cache {
-            return cache;
+    if let Some(path) = dydlcache::path() {
+        if let Ok(elc) = open_macho_file(&Path::new(path), &String::new()) {
+            if let Some(cache) = elc.cache {
+               return cache;
+            }
         }
     }
 
