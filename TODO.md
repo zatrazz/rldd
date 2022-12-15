@@ -15,8 +15,7 @@
 
 ## MachO
 
-- [ ] Resolve the dyld cache dependencies.  It requires not only parsing the cache entries, but the entries itself.
-
 ## Done
 
-- [ X ] Add MacOSX support.
+- [ X ] MachO: Add initial MacOSX support.
+- [ X ] MachO: Resolve the dyld cache dependencies.  It requires not only parsing the cache entries, but the entries itself.
