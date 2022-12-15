@@ -70,6 +70,7 @@ where
         None
     }
 
+    #[allow(dead_code)]
     pub fn contains(&self, val: &String) -> bool {
         for node in &self.arena {
             if node.val.eqstr(val) {
