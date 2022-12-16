@@ -40,7 +40,7 @@ pub enum DepMode {
     DtRpath,       // DT_RPATH.
     LdLibraryPath, // LD_LIBRARY_PATH.
     DtRunpath,     // DT_RUNPATH.
-    LdSoConf,      // ld.so.conf.
+    LdCache,       // Loader cache (ld.so.cache, etc.).
     SystemDirs,    // Default system directory (i.e '/lib64').
     Executable,    // The root executable/library.
     NotFound,
@@ -55,11 +55,11 @@ impl fmt::Display for DepMode {
             DepMode::LdLibraryPath => write!(f, "[LD_LIBRARY_PATH]"),
             DepMode::DtRunpath => write!(f, "[runpath]"),
             #[cfg(target_os = "linux")]
-            DepMode::LdSoConf => write!(f, "[ld.so.conf]"),
+            DepMode::LdCache => write!(f, "[ld.so.cache]"),
             #[cfg(target_os = "freebsd")]
-            DepMode::LdSoConf => write!(f, "[ld-elf.so.hints]"),
+            DepMode::LdCache => write!(f, "[ld-elf.so.hints]"),
             #[cfg(target_os = "openbsd")]
-            DepMode::LdSoConf => write!(f, "[ld-so.hints]"),
+            DepMode::LdCache => write!(f, "[ld-so.hints]"),
             #[cfg(target_os = "macos")]
             DepMode::LdSoConf => write!(f, "[dyld cache]"),
             DepMode::SystemDirs => write!(f, "[system default paths]"),
