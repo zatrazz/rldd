@@ -7,19 +7,28 @@ use object::read::elf::*;
 use object::read::StringTable;
 use object::Endianness;
 
-#[cfg(target_os = "linux")]
-mod interp;
 use crate::deptree::*;
-#[cfg(target_os = "linux")]
-mod ld_conf;
 mod platform;
 use crate::pathutils;
 use crate::search_path;
+
+mod system_dirs;
+
+#[cfg(target_os = "linux")]
+mod interp;
 #[cfg(target_os = "freebsd")]
 mod ld_hints_freebsd;
 #[cfg(target_os = "openbsd")]
 mod ld_hints_openbsd;
-mod system_dirs;
+#[cfg(target_os = "linux")]
+mod ld_preload;
+#[cfg(target_os = "linux")]
+mod ld_so_cache;
+
+#[cfg(target_os = "linux")]
+type LoaderCache = ld_so_cache::LdCache;
+#[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
+type LoaderCache = search_path::SearchPathVec;
 
 type DepsVec = Vec<String>;
 
@@ -35,6 +44,8 @@ struct ElfInfo {
     ei_data: u8,
     ei_osabi: u8,
     e_machine: u16,
+    #[allow(dead_code)]
+    e_flags: u32,
 
     interp: Option<String>,
     soname: Option<String>,
@@ -227,6 +238,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
                 ei_data: elf.e_ident().data,
                 ei_osabi: elf.e_ident().os_abi,
                 e_machine: elf.e_machine(endian),
+                e_flags: elf.e_flags(endian),
                 interp: None,
                 soname: parse_elf_dyn_str::<Elf>(endian, DT_SONAME, dynamic, dynstr),
                 rpath: parse_elf_dyn_searchpath(
@@ -464,7 +476,7 @@ fn match_elf_soname(dtneeded: &String, elc: &ElfInfo) -> bool {
 struct Config<'a> {
     ld_preload: &'a search_path::SearchPathVec,
     ld_library_path: &'a search_path::SearchPathVec,
-    ld_so_conf: &'a Option<search_path::SearchPathVec>,
+    ld_cache: &'a Option<LoaderCache>,
     system_dirs: search_path::SearchPathVec,
     platform: Option<&'a String>,
     all: bool,
@@ -498,7 +510,7 @@ fn resolve_binary_arch(elc: &ElfInfo, deptree: &mut DepTree, depp: usize) {
 #[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
 fn resolve_binary_arch(_elc: &ElfInfo, _deptree: &mut DepTree, _depp: usize) {}
 
-pub type ElfCtx = Option<search_path::SearchPathVec>;
+pub type ElfCtx = Option<LoaderCache>;
 
 // The loader search cache is lazy loaded if the binary has a loader that actually
 // supports it.
@@ -507,7 +519,7 @@ pub fn create_context() -> ElfCtx {
 }
 
 pub fn resolve_binary(
-    ld_so_conf: &mut ElfCtx,
+    ld_cache: &mut ElfCtx,
     ld_preload: &search_path::SearchPathVec,
     ld_library_path: &search_path::SearchPathVec,
     platform: Option<&String>,
@@ -542,8 +554,8 @@ pub fn resolve_binary(
         }
     };
 
-    if ld_so_conf.is_none() {
-        *ld_so_conf = load_so_conf(&elc.interp);
+    if ld_cache.is_none() {
+        *ld_cache = load_so_cache(&elc);
     }
 
     let mut preload = ld_preload.to_vec();
@@ -559,7 +571,7 @@ pub fn resolve_binary(
     let config = Config {
         ld_preload: &preload,
         ld_library_path: ld_library_path,
-        ld_so_conf: ld_so_conf,
+        ld_cache: ld_cache,
         system_dirs: system_dirs,
         platform: platform,
         all: all,
@@ -585,6 +597,40 @@ pub fn resolve_binary(
     }
 
     Ok(deptree)
+}
+
+#[cfg(target_os = "linux")]
+fn load_so_cache(elc: &ElfInfo) -> Option<ld_so_cache::LdCache> {
+    if interp::is_glibc(&elc.interp) {
+        return ld_so_cache::parse_ld_so_cache(
+            &Path::new("/etc/ld.so.cache"),
+            elc.ei_class,
+            elc.e_machine,
+            elc.e_flags,
+        )
+        .ok();
+    };
+    None
+}
+#[cfg(target_os = "freebsd")]
+fn load_so_cache(_elc: &ElfInfo) -> Option<LoaderCache> {
+    ld_hints_freebsd::parse_ld_so_hints(&Path::new("/var/run/ld-elf.so.hints")).ok()
+}
+#[cfg(target_os = "openbsd")]
+fn load_so_cache(_ecl: &ElfInfo) -> Option<LoaderCache> {
+    ld_hints_openbsd::parse_ld_so_hints(&Path::new("/var/run/ld.so.hints")).ok()
+}
+
+#[cfg(target_os = "linux")]
+fn load_ld_so_preload(interp: &Option<String>) -> search_path::SearchPathVec {
+    if interp::is_glibc(interp) {
+        return ld_preload::parse_ld_so_preload(&Path::new("/etc/ld.so.preload"));
+    }
+    search_path::SearchPathVec::new()
+}
+#[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
+fn load_ld_so_preload(_interp: &Option<String>) -> search_path::SearchPathVec {
+    search_path::SearchPathVec::new()
 }
 
 // Returned from resolve_dependency_1 with resolved information.
@@ -733,18 +779,9 @@ fn resolve_dependency_1<'a>(
         return None;
     }
 
-    // Check the cached search paths from ld.so.conf
-    if let Some(ld_so_conf) = config.ld_so_conf {
-        for searchpath in ld_so_conf {
-            let path = Path::new(&searchpath.path).join(dtneeded);
-            if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
-                return Some(ResolvedDependency {
-                    elc: elc,
-                    path: &searchpath.path,
-                    mode: DepMode::LdSoConf,
-                });
-            }
-        }
+    // Check the loader cache.
+    if let Some(dep) = resolve_dependency_ld_cache(dtneeded, config, elc) {
+        return Some(dep);
     }
 
     // Finally the system directories.
@@ -763,33 +800,43 @@ fn resolve_dependency_1<'a>(
 }
 
 #[cfg(target_os = "linux")]
-fn load_so_conf(interp: &Option<String>) -> Option<search_path::SearchPathVec> {
-    if interp::is_glibc(interp) {
-        return ld_conf::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")).ok();
-    };
+fn resolve_dependency_ld_cache<'a>(
+    dtneeded: &'a String,
+    config: &'a Config,
+    elc: &'a ElfInfo,
+) -> Option<ResolvedDependency<'a>> {
+    if let Some(ld_cache) = config.ld_cache {
+        if let Some(path) = ld_cache.get(dtneeded) {
+            let pathbuf = Path::new(&path);
+            if let Ok(elc) = open_elf_file(&pathbuf, Some(elc), Some(dtneeded), config.platform) {
+                return Some(ResolvedDependency {
+                    elc: elc,
+                    path: &path,
+                    mode: DepMode::LdCache,
+                });
+            }
+        }
+    }
     None
 }
-#[cfg(target_os = "freebsd")]
-fn load_so_conf(_interp: &Option<String>) -> Option<search_path::SearchPathVec> {
-    ld_hints_freebsd::parse_ld_so_hints(&Path::new("/var/run/ld-elf.so.hints")).ok()
-}
-#[cfg(target_os = "openbsd")]
-fn load_so_conf(_interp: &Option<String>) -> Option<search_path::SearchPathVec> {
-    ld_hints_openbsd::parse_ld_so_hints(&Path::new("/var/run/ld.so.hints")).ok()
-}
 
-#[cfg(target_os = "linux")]
-fn load_ld_so_preload(interp: &Option<String>) -> search_path::SearchPathVec {
-    if interp::is_glibc(interp) {
-        return ld_conf::parse_ld_so_preload(&Path::new("/etc/ld.so.preload"));
+#[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
+fn resolve_dependency_ld_cache<'a>(
+    dtneeded: &'a String,
+    config: &'a Config,
+    elc: &'a ElfInfo,
+) -> Option<ResolvedDependency<'a>> {
+    if let Some(ld_so_conf) = config.ld_cache {
+        for searchpath in ld_so_conf {
+            let path = Path::new(&searchpath.path).join(dtneeded);
+            if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
+                return Some(ResolvedDependency {
+                    elc: elc,
+                    path: &searchpath.path,
+                    mode: DepMode::LdCache,
+                });
+            }
+        }
     }
-    search_path::SearchPathVec::new()
-}
-#[cfg(target_os = "freebsd")]
-fn load_ld_so_preload(_interp: &Option<String>) -> search_path::SearchPathVec {
-    search_path::SearchPathVec::new()
-}
-#[cfg(target_os = "openbsd")]
-fn load_ld_so_preload(_interp: &Option<String>) -> search_path::SearchPathVec {
-    search_path::SearchPathVec::new()
+    None
 }
