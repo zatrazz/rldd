@@ -1,14 +1,32 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Result, Seek, SeekFrom};
-use std::mem::{size_of, transmute};
+use std::mem::{align_of, size_of, transmute};
 use std::path::Path;
 use std::str;
 
 use object::elf::*;
 
+const CACHEMAGIC: &str = "ld.so-1.7.0";
 const CACHEMAGIC_NEW: &str = "glibc-ld.so.cache";
 const CACHE_VERSION: &str = "1.1";
+
+#[derive(Debug)]
+#[repr(C)]
+struct cache_file {
+    magic: [u8; CACHEMAGIC.len()],
+    nlibs: u32,
+}
+const CACHE_FILE_LEN: usize = size_of::<cache_file>();
+
+#[derive(Debug)]
+#[repr(C)]
+struct file_entry {
+    flags: i32,
+    key: u32,
+    value: u32,
+}
+const FILE_ENTRY_LEN: usize = size_of::<file_entry>();
 
 #[derive(Debug)]
 #[repr(C)]
@@ -143,10 +161,14 @@ fn check_cache_new_endian(flags: u8) -> bool {
     flags == 0 || (flags & cache_file_new_flags_endian_big) == cache_file_new_flags_endian_current
 }
 
-fn read_string<R: Read + Seek>(reader: &mut BufReader<R>, offset: u32) -> Result<String> {
+fn read_string<R: Read + Seek>(
+    reader: &mut BufReader<R>,
+    initial: u32,
+    offset: u32,
+) -> Result<String> {
     let pos = reader.stream_position()?;
     let mut value: Vec<u8> = Vec::<u8>::new();
-    reader.seek(SeekFrom::Start(offset as u64))?;
+    reader.seek(SeekFrom::Start(initial as u64 + offset as u64))?;
     reader.read_until(b'\0', &mut value)?;
     let value = str::from_utf8(&value)
         .map_err(|_| Error::new(ErrorKind::Other, "Invalid UTF8 value"))
@@ -155,16 +177,64 @@ fn read_string<R: Read + Seek>(reader: &mut BufReader<R>, offset: u32) -> Result
     Ok(value)
 }
 
-pub type LdCache = HashMap<String, String>;
+fn align_cache(value: usize) -> usize {
+    (value + (align_of::<cache_file_new>() - 1)) & !(align_of::<cache_file_new>() - 1)
+}
 
-pub fn parse_ld_so_cache<P: AsRef<Path>>(
-    filename: &P,
+fn parse_ld_so_cache_old<R: Read + Seek>(
+    reader: &mut BufReader<R>,
+    cache_size: usize,
     ei_class: u8,
     e_machine: u16,
     e_flags: u32,
 ) -> Result<LdCache> {
-    let mut reader = BufReader::new(File::open(filename)?);
+    let hdr: cache_file = {
+        let mut h = [0u8; CACHE_FILE_LEN];
+        reader.read_exact(&mut h[..])?;
+        unsafe { transmute(h) }
+    };
 
+    if (cache_size - CACHE_FILE_LEN) / FILE_ENTRY_LEN < hdr.nlibs as usize {
+        return Err(Error::new(ErrorKind::Other, "Invalid cache file"));
+    }
+
+    let offset = align_cache(CACHE_FILE_LEN + (hdr.nlibs as usize * FILE_ENTRY_LEN));
+    if cache_size > (offset + CACHE_FILE_NEW_LEN) {
+        return parse_ld_so_cache_new(reader, offset, ei_class, e_machine, e_flags);
+    }
+
+    let mut ldsocache = LdCache::new();
+
+    // The new string format starts at a different position than the newer one.
+    let cache_offset = CACHE_FILE_LEN as u32 + hdr.nlibs * FILE_ENTRY_LEN as u32;
+
+    for _i in 0..hdr.nlibs {
+        let entry: file_entry = {
+            let mut e = [0u8; FILE_ENTRY_LEN];
+            reader.read_exact(&mut e[..])?;
+            unsafe { transmute(e) }
+        };
+        if !check_file_entry_flags(entry.flags, ei_class, e_machine, e_flags) {
+            continue;
+        }
+
+        let key = read_string(reader, cache_offset, entry.key)?;
+        let value = read_string(reader, cache_offset, entry.value)?;
+
+        ldsocache.insert(key, value);
+    }
+
+    Ok(ldsocache)
+}
+
+fn parse_ld_so_cache_new<R: Read + Seek>(
+    reader: &mut BufReader<R>,
+    initial: usize,
+    ei_class: u8,
+    e_machine: u16,
+    e_flags: u32,
+) -> Result<LdCache> {
+    reader.seek(SeekFrom::Start(initial as u64))?;
     let hdr: cache_file_new = {
         let mut h = [0u8; CACHE_FILE_NEW_LEN];
         reader.read_exact(&mut h[..])?;
@@ -189,16 +259,40 @@ pub fn parse_ld_so_cache<P: AsRef<Path>>(
             reader.read_exact(&mut e[..])?;
             unsafe { transmute(e) }
         };
-        let key = read_string(&mut reader, entry.key)?;
-        let value = read_string(&mut reader, entry.value)?;
-
         if !check_file_entry_flags(entry.flags, ei_class, e_machine, e_flags) {
             continue;
         }
+
+        let key = read_string(reader, initial as u32, entry.key)?;
+        let value = read_string(reader, initial as u32, entry.value)?;
 
         // For now create a direct map to library map, without taking in consideration hwcaps.
         ldsocache.insert(key, value);
     }
 
     Ok(ldsocache)
+}
+
+pub type LdCache = HashMap<String, String>;
+
+pub fn parse_ld_so_cache<P: AsRef<Path>>(
+    filename: &P,
+    ei_class: u8,
+    e_machine: u16,
+    e_flags: u32,
+) -> Result<LdCache> {
+    let file = File::open(filename)?;
+    let size = file.metadata()?.len() as usize;
+
+    let mut reader = BufReader::new(file);
+
+    let mut magic = [0u8; CACHEMAGIC.len()];
+    reader.read_exact(&mut magic[..])?;
+    reader.rewind()?;
+
+    if magic == CACHEMAGIC.as_bytes() {
+        parse_ld_so_cache_old(&mut reader, size, ei_class, e_machine, e_flags)
+    } else {
+        parse_ld_so_cache_new(&mut reader, 0, ei_class, e_machine, e_flags)
+    }
 }
