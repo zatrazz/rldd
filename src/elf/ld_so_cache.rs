@@ -163,17 +163,16 @@ fn check_cache_new_endian(flags: u8) -> bool {
 
 fn read_string<R: Read + Seek>(
     reader: &mut BufReader<R>,
-    initial: u32,
-    offset: u32,
+    prev_off: &mut i64,
+    cur: i64,
 ) -> Result<String> {
-    let pos = reader.stream_position()?;
     let mut value: Vec<u8> = Vec::<u8>::new();
-    reader.seek(SeekFrom::Start(initial as u64 + offset as u64))?;
-    reader.read_until(b'\0', &mut value)?;
+    reader.seek_relative(cur - *prev_off)?;
+    let size = reader.read_until(b'\0', &mut value)?;
     let value = str::from_utf8(&value)
         .map_err(|_| Error::new(ErrorKind::Other, "Invalid UTF8 value"))
         .map(|s| s.trim_matches(char::from(0)).to_string())?;
-    reader.seek(SeekFrom::Start(pos as u64))?;
+    *prev_off = cur + size as i64;
     Ok(value)
 }
 
@@ -203,11 +202,10 @@ fn parse_ld_so_cache_old<R: Read + Seek>(
         return parse_ld_so_cache_new(reader, offset, ei_class, e_machine, e_flags);
     }
 
-    let mut ldsocache = LdCache::new();
-
     // The new string format starts at a different position than the newer one.
-    let cache_offset = CACHE_FILE_LEN as u32 + hdr.nlibs * FILE_ENTRY_LEN as u32;
+    let cache_off = CACHE_FILE_LEN as u32 + hdr.nlibs * FILE_ENTRY_LEN as u32;
 
+    let mut offsets: Vec<(u32, u32)> = Vec::with_capacity(hdr.nlibs as usize);
     for _i in 0..hdr.nlibs {
         let entry: file_entry = {
             let mut e = [0u8; FILE_ENTRY_LEN];
@@ -217,13 +215,18 @@ fn parse_ld_so_cache_old<R: Read + Seek>(
         if !check_file_entry_flags(entry.flags, ei_class, e_machine, e_flags) {
             continue;
         }
+        offsets.push((entry.key + cache_off, entry.value + cache_off));
+    }
 
-        let key = read_string(reader, cache_offset, entry.key)?;
-        let value = read_string(reader, cache_offset, entry.value)?;
+    let mut prev_off = cache_off as i64;
+
+    let mut ldsocache = LdCache::new();
+    for off in offsets {
+        let key = read_string(reader, &mut prev_off, off.0 as i64)?;
+        let value = read_string(reader, &mut prev_off, off.1 as i64)?;
 
         ldsocache.insert(key, value);
     }
-
     Ok(ldsocache)
 }
 
@@ -251,8 +254,7 @@ fn parse_ld_so_cache_new<R: Read + Seek>(
         return Err(Error::new(ErrorKind::Other, "Invalid cache endianness"));
     }
 
-    let mut ldsocache = LdCache::new();
-
+    let mut offsets: Vec<(u32, u32)> = Vec::with_capacity(hdr.nlibs as usize);
     for _i in 0..hdr.nlibs {
         let entry: file_entry_new = {
             let mut e = [0u8; FILE_ENTRY_NEW_LEN];
@@ -262,14 +264,18 @@ fn parse_ld_so_cache_new<R: Read + Seek>(
         if !check_file_entry_flags(entry.flags, ei_class, e_machine, e_flags) {
             continue;
         }
-
-        let key = read_string(reader, initial as u32, entry.key)?;
-        let value = read_string(reader, initial as u32, entry.value)?;
-
-        // For now create a direct map to library map, without taking in consideration hwcaps.
-        ldsocache.insert(key, value);
+        offsets.push((entry.key, entry.value));
     }
 
+    let mut prev_off = CACHE_FILE_NEW_LEN as i64 + hdr.nlibs as i64 * FILE_ENTRY_NEW_LEN as i64;
+
+    let mut ldsocache = LdCache::new();
+    for off in offsets {
+        let key = read_string(reader, &mut prev_off, off.0 as i64)?;
+        let value = read_string(reader, &mut prev_off, off.1 as i64)?;
+
+        ldsocache.insert(key, value);
+    }
     Ok(ldsocache)
 }
 
