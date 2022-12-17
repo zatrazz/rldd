@@ -67,7 +67,7 @@ pub fn get_system_dirs(_e_machine: u16, _ei_class: u8) -> Option<search_path::Se
     Some(r)
 }
 
-#[cfg(target_os = "openbsd")]
+#[cfg(any(target_os = "openbsd", target_os = "netbsd"))]
 pub fn get_system_dirs(_e_machine: u16, _ei_class: u8) -> Option<search_path::SearchPathVec> {
     let mut r = search_path::SearchPathVec::new();
     r.push(search_path::SearchPath {
