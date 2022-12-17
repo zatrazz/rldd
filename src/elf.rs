@@ -24,6 +24,8 @@ mod ld_hints_openbsd;
 mod ld_preload;
 #[cfg(target_os = "linux")]
 mod ld_so_cache;
+#[cfg(target_os = "netbsd")]
+mod ld_so_conf_netbsd;
 
 #[cfg(target_os = "linux")]
 type LoaderCache = ld_so_cache::LdCache;
@@ -626,7 +628,7 @@ fn load_so_cache(_ecl: &ElfInfo) -> Option<LoaderCache> {
 }
 #[cfg(target_os = "netbsd")]
 fn load_so_cache(_ecl: &ElfInfo) -> Option<LoaderCache> {
-    None
+    ld_so_conf_netbsd::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")).ok()
 }
 
 #[cfg(target_os = "linux")]
