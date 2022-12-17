@@ -231,7 +231,7 @@ fn resolve_dependency_2(
             DepNode {
                 path: pathutils::get_path(&path),
                 name: name.to_string(),
-                mode: DepMode::LdSoConf,
+                mode: DepMode::LdCache,
                 found: false,
             },
             depp,

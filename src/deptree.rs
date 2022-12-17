@@ -61,7 +61,7 @@ impl fmt::Display for DepMode {
             #[cfg(target_os = "openbsd")]
             DepMode::LdCache => write!(f, "[ld-so.hints]"),
             #[cfg(target_os = "macos")]
-            DepMode::LdSoConf => write!(f, "[dyld cache]"),
+            DepMode::LdCache => write!(f, "[dyld cache]"),
             DepMode::SystemDirs => write!(f, "[system default paths]"),
             DepMode::Executable => write!(f, ""),
             DepMode::NotFound => write!(f, "[not found]"),
