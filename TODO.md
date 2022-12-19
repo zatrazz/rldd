@@ -14,6 +14,10 @@
 
 ## MachO
 
+- [ ] Implement DYLD_FRAMEWORK_PATH and DYLD_FALLBACK_FRAMEWORK_PATH.
+- [ ] Implement DYLD_FALLBACK_LIBRARY_PATH.
+- [ ] Implement DYLD_INSERT_LIBRARIES.
+
 ## Done
 
 - [x] MachO: Add initial MacOSX support.
