@@ -16,10 +16,10 @@
 
 - [ ] Implement DYLD_FRAMEWORK_PATH and DYLD_FALLBACK_FRAMEWORK_PATH.
 - [ ] Implement DYLD_FALLBACK_LIBRARY_PATH.
-- [ ] Implement DYLD_INSERT_LIBRARIES.
 
 ## Done
 
 - [x] MachO: Add initial MacOSX support.
 - [x] MachO: Resolve the dyld cache dependencies.  It requires not only parsing the cache entries, but the entries itself.
 - [x] Linux: read /etc/ld.so.cache instead of parsing /etd/ld.so.conf.
+- [x] Implement DYLD_INSERT_LIBRARIES.

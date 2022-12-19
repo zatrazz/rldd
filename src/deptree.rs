@@ -2,6 +2,7 @@ use std::fmt;
 use std::path::Path;
 
 mod arenatree;
+use crate::pathutils;
 
 // A resolved dependency
 #[derive(PartialEq, Clone, Debug)]
@@ -14,7 +15,9 @@ pub struct DepNode {
 
 impl arenatree::EqualString for DepNode {
     fn eqstr(&self, other: &String) -> bool {
-        if self.path.is_none() || !Path::new(other).is_absolute() {
+        if self.mode == DepMode::Preload || self.mode == DepMode::LdLibraryPath {
+            pathutils::get_name(&Path::new(other)) == self.name
+        } else if self.path.is_none() || !Path::new(other).is_absolute() {
             *other == self.name
         } else {
             *other
@@ -52,7 +55,15 @@ impl fmt::Display for DepMode {
             DepMode::Preload => write!(f, "[preload]"),
             DepMode::Direct => write!(f, "[direct]"),
             DepMode::DtRpath => write!(f, "[rpath]"),
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "freebsd",
+                target_os = "openbsd",
+                target_os = "netbsd"
+            ))]
             DepMode::LdLibraryPath => write!(f, "[LD_LIBRARY_PATH]"),
+            #[cfg(target_os = "macos")]
+            DepMode::LdLibraryPath => write!(f, "[DYLD_LIBRARY_PATH]"),
             DepMode::DtRunpath => write!(f, "[runpath]"),
             #[cfg(target_os = "linux")]
             DepMode::LdCache => write!(f, "[ld.so.cache]"),

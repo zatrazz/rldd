@@ -1,4 +1,5 @@
 use argparse::{ArgumentParser, List, Store, StoreTrue};
+use std::ops::Index;
 
 mod printer;
 use printer::*;
@@ -68,6 +69,38 @@ fn print_deps_children(
     }
 }
 
+enum SystemOptions {
+    LibraryPathOption,
+    PreloadPathOption,
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+))]
+const SYSTEM_OPTIONS: &'static [&'static str] = &[
+    "Assume the LD_LIBRARY_PATH is set",
+    "Assume the LD_PRELOAD is set",
+];
+#[cfg(any(target_os = "macos"))]
+const SYSTEM_OPTIONS: &'static [&'static str] = &[
+    "Assume the DYLD_FRAMEWORK_PATH is set",
+    "Assume the DYLD_INSERT_LIBRARIES is set",
+];
+
+impl Index<SystemOptions> for [&'static str] {
+    type Output = &'static str;
+
+    fn index(&self, idx: SystemOptions) -> &Self::Output {
+        match idx {
+            SystemOptions::LibraryPathOption => &self[0],
+            SystemOptions::PreloadPathOption => &self[1],
+        }
+    }
+}
+
 fn main() {
     let mut showpath = false;
     let mut ld_library_path = String::new();
@@ -85,14 +118,14 @@ fn main() {
             "Show the resolved path instead of the library soname",
         );
         ap.refer(&mut ld_library_path).add_option(
-            &["--ld-library-path"],
+            &["--library-path"],
             Store,
-            "Assume the LD_LIBRATY_PATH is set",
+            SYSTEM_OPTIONS[SystemOptions::LibraryPathOption],
         );
         ap.refer(&mut ld_preload).add_option(
-            &["--ld-preload"],
+            &["--preload"],
             Store,
-            "Assume the LD_PRELOAD is set",
+            SYSTEM_OPTIONS[SystemOptions::PreloadPathOption],
         );
         ap.refer(&mut platform).add_option(
             &["--platform"],
