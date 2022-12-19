@@ -402,6 +402,7 @@ fn open_elf_file<'a, P: AsRef<Path>>(
     melc: Option<&ElfInfo>,
     dtneeded: Option<&String>,
     platform: Option<&String>,
+    preload: bool,
 ) -> Result<ElfInfo, std::io::Error> {
     let file = match fs::File::open(&filename) {
         Ok(file) => file,
@@ -421,7 +422,8 @@ fn open_elf_file<'a, P: AsRef<Path>>(
     match parse_object(&*mmap, parent, platform) {
         Ok(elc) => {
             if let Some(melc) = melc {
-                if !match_elf_name(melc, dtneeded, &elc) {
+                // Skip DT_NEEDED and SONAME checks for preload objects.
+                if !preload && !match_elf_name(melc, dtneeded, &elc) {
                     return Err(Error::new(ErrorKind::Other, "Error parsing ELF object"));
                 }
             }
@@ -550,7 +552,7 @@ pub fn resolve_binary(
         }
     };
 
-    let elc = match open_elf_file(&filename, None, None, platform) {
+    let elc = match open_elf_file(&filename, None, None, platform, false) {
         Ok(elc) => elc,
         Err(err) => {
             return Err(Error::new(
@@ -644,6 +646,7 @@ fn load_ld_so_preload(_interp: &Option<String>) -> search_path::SearchPathVec {
 }
 
 // Returned from resolve_dependency_1 with resolved information.
+#[derive(Debug)]
 struct ResolvedDependency<'a> {
     elc: ElfInfo,
     path: &'a String,
@@ -732,7 +735,7 @@ fn resolve_dependency_1<'a>(
 
     // If the path is absolute skip the other modes.
     if path.is_absolute() {
-        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, preload) {
             return Some(ResolvedDependency {
                 elc: elc,
                 path: dtneeded,
@@ -750,7 +753,8 @@ fn resolve_dependency_1<'a>(
     if elc.runpath.is_empty() {
         for searchpath in &elc.rpath {
             let path = Path::new(&searchpath.path).join(dtneeded);
-            if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
+            if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false)
+            {
                 return Some(ResolvedDependency {
                     elc: elc,
                     path: &searchpath.path,
@@ -763,7 +767,7 @@ fn resolve_dependency_1<'a>(
     // Check LD_LIBRARY_PATH paths.
     for searchpath in config.ld_library_path {
         let path = Path::new(&searchpath.path).join(dtneeded);
-        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false) {
             return Some(ResolvedDependency {
                 elc: elc,
                 path: &searchpath.path,
@@ -775,7 +779,7 @@ fn resolve_dependency_1<'a>(
     // Check DT_RUNPATH.
     for searchpath in &elc.runpath {
         let path = Path::new(&searchpath.path).join(dtneeded);
-        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false) {
             return Some(ResolvedDependency {
                 elc: elc,
                 path: &searchpath.path,
@@ -797,7 +801,7 @@ fn resolve_dependency_1<'a>(
     // Finally the system directories.
     for searchpath in &config.system_dirs {
         let path = Path::new(&searchpath.path).join(dtneeded);
-        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false) {
             return Some(ResolvedDependency {
                 elc: elc,
                 path: &searchpath.path,
@@ -818,7 +822,9 @@ fn resolve_dependency_ld_cache<'a>(
     if let Some(ld_cache) = config.ld_cache {
         if let Some(path) = ld_cache.get(dtneeded) {
             let pathbuf = Path::new(&path);
-            if let Ok(elc) = open_elf_file(&pathbuf, Some(elc), Some(dtneeded), config.platform) {
+            if let Ok(elc) =
+                open_elf_file(&pathbuf, Some(elc), Some(dtneeded), config.platform, false)
+            {
                 return Some(ResolvedDependency {
                     elc: elc,
                     path: &path,
@@ -839,7 +845,8 @@ fn resolve_dependency_ld_cache<'a>(
     if let Some(ld_so_conf) = config.ld_cache {
         for searchpath in ld_so_conf {
             let path = Path::new(&searchpath.path).join(dtneeded);
-            if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform) {
+            if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false)
+            {
                 return Some(ResolvedDependency {
                     elc: elc,
                     path: &searchpath.path,

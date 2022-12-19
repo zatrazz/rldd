@@ -2,6 +2,7 @@ use std::fmt;
 use std::path::Path;
 
 mod arenatree;
+use crate::pathutils;
 
 // A resolved dependency
 #[derive(PartialEq, Clone, Debug)]
@@ -14,7 +15,9 @@ pub struct DepNode {
 
 impl arenatree::EqualString for DepNode {
     fn eqstr(&self, other: &String) -> bool {
-        if self.path.is_none() || !Path::new(other).is_absolute() {
+        if self.mode == DepMode::Preload {
+            pathutils::get_name(&Path::new(other)) == self.name
+        } else if self.path.is_none() || !Path::new(other).is_absolute() {
             *other == self.name
         } else {
             *other
