@@ -81,7 +81,7 @@ pub fn create_context() -> DyldCache {
 
 pub fn resolve_binary(
     cache: &DyldCache,
-    _ld_preload: &search_path::SearchPathVec,
+    preload: &search_path::SearchPathVec,
     library_path: &search_path::SearchPathVec,
     _platform: Option<&String>,
     all: bool,
@@ -109,6 +109,21 @@ pub fn resolve_binary(
         found: false,
     });
 
+    for pload in preload {
+        resolve_dependency(
+            cache,
+            library_path,
+            &executable_path,
+            &executable_path,
+            &omf.rpath,
+            &pload.path,
+            &mut deptree,
+            depp,
+            all,
+            true,
+        );
+    }
+
     for dep in &omf.deps {
         resolve_dependency(
             cache,
@@ -120,6 +135,7 @@ pub fn resolve_binary(
             &mut deptree,
             depp,
             all,
+            false,
         );
     }
 
@@ -136,6 +152,7 @@ fn resolve_dependency(
     deptree: &mut DepTree,
     depp: usize,
     all: bool,
+    preload: bool,
 ) {
     let mut dependency = dependency.replace("@executable_path", executable_path);
     dependency = dependency.replace("@loader_path", loader_path);
@@ -152,6 +169,7 @@ fn resolve_dependency(
                 deptree,
                 depp,
                 all,
+                preload,
             ) {
                 return;
             }
@@ -168,6 +186,7 @@ fn resolve_dependency(
         deptree,
         depp,
         all,
+        preload,
     );
 }
 
@@ -180,6 +199,7 @@ fn resolve_dependency_1(
     deptree: &mut DepTree,
     depp: usize,
     all: bool,
+    preload: bool,
 ) -> bool {
     let elc = resolve_dependency_2(
         cache,
@@ -190,6 +210,7 @@ fn resolve_dependency_1(
         deptree,
         depp,
         all,
+        preload,
     );
     if let Some((elc, depd)) = elc {
         let path = pathutils::get_path(&dependency).unwrap_or(String::new());
@@ -204,6 +225,7 @@ fn resolve_dependency_1(
                 deptree,
                 depd,
                 all,
+                preload,
             );
         }
         true
@@ -250,6 +272,7 @@ fn resolve_dependency_2(
     deptree: &mut DepTree,
     depp: usize,
     all: bool,
+    preload: bool,
 ) -> Option<(MachOInfo, usize)> {
     // To avoid circular dependencies, check if deptree already containts the dependency.
     if deptree.contains(dependency) {
@@ -318,7 +341,11 @@ fn resolve_dependency_2(
         DepNode {
             path: pathutils::get_path(&path),
             name: pathutils::get_name(&path),
-            mode: DepMode::Direct,
+            mode: if preload {
+                DepMode::Preload
+            } else {
+                DepMode::Direct
+            },
             found: false,
         },
         depp,
