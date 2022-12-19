@@ -1,4 +1,4 @@
-use argparse::{ArgumentParser, List, Store, StoreTrue};
+use argparse::{ArgumentParser, List, Store, StoreTrue, Print};
 use std::ops::Index;
 
 mod printer;
@@ -142,6 +142,8 @@ fn main() {
             StoreTrue,
             "Output similar to lld (unique dependencies, one per line)",
         );
+        ap.add_option(&["-v", "--version"],
+            Print(env!("CARGO_PKG_VERSION").to_string()), "Show version");
         ap.refer(&mut args)
             .add_argument("binary", List, "binaries to print the dependencies");
         ap.stop_on_first_argument(true);
