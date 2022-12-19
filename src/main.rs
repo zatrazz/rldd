@@ -68,6 +68,16 @@ fn print_deps_children(
     }
 }
 
+#[cfg(any(
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+))]
+const LIBRARY_PATH_OPTION: &str = "Assume the LD_LIBRARY_PATH is set";
+#[cfg(any(target_os = "macos"))]
+const LIBRARY_PATH_OPTION: &str = "Assume the DYLD_FRAMEWORK_PATH is set";
+
 fn main() {
     let mut showpath = false;
     let mut ld_library_path = String::new();
@@ -84,11 +94,8 @@ fn main() {
             StoreTrue,
             "Show the resolved path instead of the library soname",
         );
-        ap.refer(&mut ld_library_path).add_option(
-            &["--ld-library-path"],
-            Store,
-            "Assume the LD_LIBRATY_PATH is set",
-        );
+        ap.refer(&mut ld_library_path)
+            .add_option(&["--library-path"], Store, LIBRARY_PATH_OPTION);
         ap.refer(&mut ld_preload).add_option(
             &["--ld-preload"],
             Store,

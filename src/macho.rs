@@ -27,7 +27,7 @@ pub struct DyldCache {
 type MachObj = MachOInfo;
 type DepsVec = Vec<String>;
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct MachOInfo {
     rpath: search_path::SearchPathVec,
     deps: DepsVec,
@@ -82,7 +82,7 @@ pub fn create_context() -> DyldCache {
 pub fn resolve_binary(
     cache: &DyldCache,
     _ld_preload: &search_path::SearchPathVec,
-    _ld_library_path: &search_path::SearchPathVec,
+    library_path: &search_path::SearchPathVec,
     _platform: Option<&String>,
     all: bool,
     arg: &str,
@@ -112,6 +112,7 @@ pub fn resolve_binary(
     for dep in &omf.deps {
         resolve_dependency(
             cache,
+            library_path,
             &executable_path,
             &executable_path,
             &omf.rpath,
@@ -127,6 +128,7 @@ pub fn resolve_binary(
 
 fn resolve_dependency(
     cache: &DyldCache,
+    library_path: &search_path::SearchPathVec,
     executable_path: &String,
     loader_path: &String,
     rpaths: &search_path::SearchPathVec,
@@ -143,6 +145,7 @@ fn resolve_dependency(
             let mut newdependency = dependency.replace("@rpath", rpath.path.as_str());
             if resolve_dependency_1(
                 cache,
+                library_path,
                 executable_path,
                 &mut newdependency,
                 true,
@@ -158,6 +161,7 @@ fn resolve_dependency(
 
     resolve_dependency_1(
         cache,
+        library_path,
         executable_path,
         &mut dependency,
         false,
@@ -169,6 +173,7 @@ fn resolve_dependency(
 
 fn resolve_dependency_1(
     cache: &DyldCache,
+    library_path: &search_path::SearchPathVec,
     executable_path: &String,
     dependency: &mut String,
     rpath: bool,
@@ -178,6 +183,7 @@ fn resolve_dependency_1(
 ) -> bool {
     let elc = resolve_dependency_2(
         cache,
+        library_path,
         executable_path,
         dependency,
         rpath,
@@ -190,6 +196,7 @@ fn resolve_dependency_1(
         for dep in &elc.deps {
             resolve_dependency(
                 cache,
+                library_path,
                 executable_path,
                 &path,
                 &elc.rpath,
@@ -205,8 +212,38 @@ fn resolve_dependency_1(
     }
 }
 
+fn resolve_overrides<P: AsRef<Path>>(
+    library_path: &search_path::SearchPathVec,
+    executable_path: &String,
+    path: &P,
+    deptree: &mut DepTree,
+    depp: usize,
+) -> Option<(MachOInfo, usize)> {
+    let filename = pathutils::get_name(&path);
+    for searchpath in library_path {
+        let newpath = Path::new(&searchpath.path).join(&filename);
+        match open_macho_file(&newpath, executable_path).ok() {
+            Some(OpenMachOFileResult::Object(elc)) => {
+                let depd = deptree.addnode(
+                    DepNode {
+                        path: pathutils::get_path(&newpath),
+                        name: filename.to_string(),
+                        mode: DepMode::LdLibraryPath,
+                        found: false,
+                    },
+                    depp,
+                );
+                return Some((elc, depd));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn resolve_dependency_2(
     cache: &DyldCache,
+    library_path: &search_path::SearchPathVec,
     executable_path: &String,
     dependency: &mut String,
     rpath: bool,
@@ -221,7 +258,14 @@ fn resolve_dependency_2(
 
     let path = Path::new(&dependency);
 
-    // First try the dyld system cache, if existente.
+    // First check overrides: DYLD_LIBRARY_PATH paths.
+    if let Some((elc, depd)) =
+        resolve_overrides(library_path, executable_path, &path, deptree, depp)
+    {
+        return Some((elc, depd));
+    }
+
+    // Then try the dyld system cache, if existent.
     if let Some(elc) = cache.get(dependency, executable_path) {
         if resolve_dependency_check_found(dependency, deptree, depp, all) {
             return None;
