@@ -162,15 +162,15 @@ fn main() {
     let mut ctx = create_context();
 
     for arg in args {
-        if let Ok(mut deptree) = resolve_binary(
+        match resolve_binary(
             &mut ctx,
             &ld_preload,
             &ld_library_path,
             plat,
             all,
-            arg.as_str(),
-        ) {
-            print_deps(&mut printer, &mut deptree);
+            arg.as_str()) {
+            Ok(deptree) => print_deps(&mut printer, &deptree),
+            Err(e) => eprintln!("error: {}", e),
         }
     }
 }
