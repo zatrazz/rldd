@@ -115,7 +115,7 @@ fn check_file_entry_flags(flags: i32, ei_class: u8, e_machine: u16, e_flags: u32
             }
             _ => false,
         },
-        EM_PPC64 => flags == FLAG_POWERPC_LIB64,
+        EM_PPC64 => flags == FLAG_ELF_LIBC6 | FLAG_POWERPC_LIB64,
         EM_RISCV => {
             if e_flags | EF_RISCV_FLOAT_ABI_SOFT == EF_RISCV_FLOAT_ABI_SOFT {
                 flags == FLAG_ELF_LIBC6 | FLAG_RISCV_FLOAT_ABI_SOFT
