@@ -7,6 +7,8 @@ use std::str;
 
 use object::elf::*;
 
+mod hwcap;
+
 const CACHEMAGIC: &str = "ld.so-1.7.0";
 const CACHEMAGIC_NEW: &str = "glibc-ld.so.cache";
 const CACHE_VERSION: &str = "1.1";
@@ -52,6 +54,34 @@ struct file_entry_new {
     hwcap: u64,
 }
 const FILE_ENTRY_NEW_LEN: usize = size_of::<file_entry_new>();
+
+// The cache_file_new extension header, pointer by extension_offset field.  The MAGIC should be
+// 'cache_extension_magic' and COUNT indicates ow many cache_extension_section can be read
+// (on glibc definition the cache_extension_section is defined as a flexible array meant to be
+// accessed through mmap).
+#[derive(Debug)]
+#[repr(C)]
+struct cache_extension {
+    magic: u32,
+    count: u32,
+}
+const CACHE_EXTENSION_LEN: usize = size_of::<cache_extension>();
+
+#[allow(non_upper_case_globals)]
+const cache_extension_magic: u32 = 0xeaa42174;
+
+const CACHE_EXTENSION_TAG_GLIBC_HWCAPS: u32 = 1;
+
+// Element in the array following struct cache_extension.
+#[derive(Debug)]
+#[repr(C)]
+struct cache_extension_section {
+    tag: u32,    // Type of the extension section (CACHE_EXTENSION_TAG_*).
+    flags: u32,  // Extension-specific flags.  Currently generated as zero.
+    offset: u32, // Offset from the start of the file for the data in this extension section.
+    size: u32,   // Length in bytes of the extension data.
+}
+const CACHE_EXTENSION_SECTION_LEN: usize = size_of::<cache_extension_section>();
 
 // Check the ld.so.cache file_entry_new flags against a pre-defined value from glibc
 // dl-cache.h.
@@ -176,9 +206,18 @@ fn read_string<R: Read + Seek>(
     Ok(value)
 }
 
+// Read a u32 value in native endianess format.
+fn read_u32<R: Read + Seek>(reader: &mut BufReader<R>) -> Result<u32> {
+    let mut buffer = [0; 4];
+    reader.read(&mut buffer[..]).unwrap();
+    Ok(u32::from_ne_bytes(buffer))
+}
+
 fn align_cache(value: usize) -> usize {
     (value + (align_of::<cache_file_new>() - 1)) & !(align_of::<cache_file_new>() - 1)
 }
+
+pub type LdCache = HashMap<String, String>;
 
 fn parse_ld_so_cache_old<R: Read + Seek>(
     reader: &mut BufReader<R>,
@@ -254,32 +293,158 @@ fn parse_ld_so_cache_new<R: Read + Seek>(
         return Err(Error::new(ErrorKind::Other, "Invalid cache endianness"));
     }
 
-    let mut offsets: Vec<(u32, u32)> = Vec::with_capacity(hdr.nlibs as usize);
+    // To optimize file read, create a list of file entries offset (name and path)
+    // and then read the filaname and path.  Also keep track of hwcap index value used for
+    // glibc-hwcap support.
+    let mut offsets: Vec<(u32, u32, Option<u32>)> = Vec::with_capacity(hdr.nlibs as usize);
+
     for _i in 0..hdr.nlibs {
         let entry: file_entry_new = {
             let mut e = [0u8; FILE_ENTRY_NEW_LEN];
             reader.read_exact(&mut e[..])?;
             unsafe { transmute(e) }
         };
+        // Skip not supported entries for the binary architecture, for instance x86_64/i686
+        // with multilib support.
         if !check_file_entry_flags(entry.flags, ei_class, e_machine, e_flags) {
             continue;
         }
-        offsets.push((entry.key, entry.value));
+
+        offsets.push((
+            entry.key,
+            entry.value,
+            check_cache_hwcap_extension(entry.hwcap),
+        ));
     }
 
     let mut prev_off = CACHE_FILE_NEW_LEN as i64 + hdr.nlibs as i64 * FILE_ENTRY_NEW_LEN as i64;
 
+    // Return vector of defined glibc-hwcap subfolder defined in the extension headers.  For
+    // instance on x86_64 it mught return [x86-64-v2, x86-64-v3].
+    let hwcap_idxs =
+        parse_ld_so_cache_glibc_hwcap(reader, &mut prev_off, hdr.extension_offset as i64)?;
+
+    // And obtain the current machine supported glibc-hwcap subfolder.
+    let hwcap_supported = hwcap::hwcap_supported();
+
     let mut ldsocache = LdCache::new();
+    // Keep track of the last glibc-hwcap value for the entry to allow check if the new entry is
+    // new best-fit value.  Using an extra map avoid the need to add an extra field on the
+    // returned ldsocache map.
+    let mut hwcapseen = HashMap::<String, usize>::new();
+
+    // Now read all library entries
     for off in offsets {
         let key = read_string(reader, &mut prev_off, off.0 as i64)?;
         let value = read_string(reader, &mut prev_off, off.1 as i64)?;
 
-        ldsocache.insert(key, value);
+        // First check if there is an already found glibc-hwcap option for the entry.  In this case,
+        // also check if the newer entry has a glibc-hwcap index associated and if it is also the case
+        // check if the new glibc-hwcap is a better fit than the existent one.  This is done by
+        // comparing the index value, since the supported hwcasp are sorted in priority order (with
+        // the first entry being the better fit).
+        if let Some(seen_idx) = hwcapseen.get(&key) {
+            // It only makes sense to possible update a new entry if there is also a glibc-hwcap
+            // entry associated.
+            if let Some(new_idx) = check_hwcap_index(&off.2, &hwcap_idxs, &hwcap_supported) {
+                if new_idx < *seen_idx {
+                    // If the entry is a newer best fit, update both the cache and the seen map.
+                    hwcapseen.insert(key.to_string(), new_idx);
+                    ldsocache.insert(key, value);
+                }
+            }
+        } else {
+            if let Some(idx) = check_hwcap_index(&off.2, &hwcap_idxs, &hwcap_supported) {
+                hwcapseen.insert(key.to_string(), idx);
+            }
+            ldsocache.insert(key, value);
+        }
     }
+
     Ok(ldsocache)
 }
 
-pub type LdCache = HashMap<String, String>;
+// Return a new best-fit index for HWCAP_SUPPORTED if the HWCAPIDX contains a valid value.
+fn check_hwcap_index(
+    hwcapidx: &Option<u32>,
+    hwcap_idxs: &Vec<String>,
+    hwcap_supported: &Vec<&'static str>,
+) -> Option<usize> {
+    if let Some(hwidx) = hwcapidx {
+        let hwcap_value = hwcap_idxs[*hwidx as usize].to_string();
+        if let Some(new_idx) = hwcap_supported.iter().position(|&r| r == hwcap_value) {
+            return Some(new_idx);
+        }
+    }
+    None
+}
+
+const DL_CACHE_HWCAP_ISA_LEVEL_COUNT: u64 = 10;
+const DL_CACHE_HWCAP_EXTENSION: u64 = 1u64 << 62;
+const DL_CACHE_HWCAP_ISA_LEVEL_MASK: u64 = (1 << DL_CACHE_HWCAP_ISA_LEVEL_COUNT) - 1;
+
+// The hwcap is an index on a string list, so return remove the unused high bits.
+fn check_cache_hwcap_extension(hwcap: u64) -> Option<u32> {
+    // The hwcap extension is enabled iff the DL_CACHE_HWCAP_EXTENSION bit is set, ignoring the
+    // lower 32 bits as well as the ISA level bits in the upper 32 bits.
+    let active: bool =
+        (hwcap >> 32) & !DL_CACHE_HWCAP_ISA_LEVEL_MASK == (DL_CACHE_HWCAP_EXTENSION >> 32);
+    match active {
+        true => Some(hwcap as u32),
+        false => None,
+    }
+}
+
+// Return the possible glibc-hwcap subfolders used in optimized library selection.  The
+// array is indexed by the 32-bit lower bit from file_entry_new hwcap field.
+fn parse_ld_so_cache_glibc_hwcap<R: Read + Seek>(
+    reader: &mut BufReader<R>,
+    prev_off: &mut i64,
+    cur: i64,
+) -> Result<Vec<String>> {
+    reader.seek_relative(cur - *prev_off)?;
+    let ext: cache_extension = {
+        let mut h = [0u8; CACHE_EXTENSION_LEN];
+        reader.read_exact(&mut h[..])?;
+        unsafe { transmute(h) }
+    };
+    *prev_off = cur + CACHE_EXTENSION_LEN as i64;
+
+    if ext.magic != cache_extension_magic {
+        return Err(Error::new(
+            ErrorKind::Other,
+            "Invalid cache_extension magic",
+        ));
+    }
+
+    // Return an empty set if the cache does not have any glibc-hwcap extension.
+    let mut r = Vec::<String>::new();
+    for _i in 0..ext.count {
+        let ext_sec: cache_extension_section = {
+            let mut h = [0u8; CACHE_EXTENSION_SECTION_LEN];
+            reader.read_exact(&mut h[..])?;
+            unsafe { transmute(h) }
+        };
+        *prev_off += CACHE_EXTENSION_SECTION_LEN as i64;
+
+        if ext_sec.tag == CACHE_EXTENSION_TAG_GLIBC_HWCAPS {
+            reader.seek_relative(ext_sec.offset as i64 - *prev_off)?;
+
+            let idxslen: usize = ext_sec.size as usize / 4;
+            let mut idxs: Vec<u32> = Vec::with_capacity(idxslen);
+
+            for _j in 0..idxslen {
+                idxs.push(read_u32(reader)?);
+            }
+
+            *prev_off = ext_sec.offset as i64 + ext_sec.size as i64;
+            for idx in &idxs {
+                r.push(read_string(reader, prev_off, *idx as i64)?);
+            }
+        }
+    }
+    return Ok(r);
+}
 
 pub fn parse_ld_so_cache<P: AsRef<Path>>(
     filename: &P,

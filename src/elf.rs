@@ -614,13 +614,14 @@ pub fn resolve_binary(
 #[cfg(target_os = "linux")]
 fn load_so_cache(elc: &ElfInfo) -> Option<ld_so_cache::LdCache> {
     if interp::is_glibc(&elc.interp) {
-        return ld_so_cache::parse_ld_so_cache(
+        match ld_so_cache::parse_ld_so_cache(
             &Path::new("/etc/ld.so.cache"),
             elc.ei_class,
             elc.e_machine,
-            elc.e_flags,
-        )
-        .ok();
+            elc.e_flags) {
+            Ok(cache) => return Some(cache),
+            Err(e) => eprintln!("error: load_so_cache: {}", e),
+        }
     };
     None
 }
