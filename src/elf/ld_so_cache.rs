@@ -145,9 +145,9 @@ fn check_file_entry_flags(flags: i32, ei_class: u8, e_machine: u16, e_flags: u32
 }
 
 // To mimic glibc internal definitions
-#[allow(non_upper_case_globals)]
+#[allow(non_upper_case_globals, dead_code)]
 const cache_file_new_flags_endian_big: u8 = 3u8;
-#[allow(non_upper_case_globals)]
+#[allow(non_upper_case_globals, dead_code)]
 const cache_file_new_flags_endian_little: u8 = 2u8;
 #[cfg(target_endian = "big")]
 #[allow(non_upper_case_globals)]
