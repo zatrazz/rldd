@@ -55,12 +55,7 @@ impl fmt::Display for DepMode {
             DepMode::Preload => write!(f, "[preload]"),
             DepMode::Direct => write!(f, "[direct]"),
             DepMode::DtRpath => write!(f, "[rpath]"),
-            #[cfg(any(
-                target_os = "linux",
-                target_os = "freebsd",
-                target_os = "openbsd",
-                target_os = "netbsd"
-            ))]
+            #[cfg(all(target_family = "unix", not(target_os = "macos")))]
             DepMode::LdLibraryPath => write!(f, "[LD_LIBRARY_PATH]"),
             #[cfg(target_os = "macos")]
             DepMode::LdLibraryPath => write!(f, "[DYLD_LIBRARY_PATH]"),
@@ -73,6 +68,8 @@ impl fmt::Display for DepMode {
             DepMode::LdCache => write!(f, "[ld-so.hints]"),
             #[cfg(target_os = "netbsd")]
             DepMode::LdCache => write!(f, "[ld.so.conf]"),
+            #[cfg(any(target_os = "illumos", target_os = "solaris"))]
+            DepMode::LdCache => write!(f, "[unknown]"),
             #[cfg(target_os = "macos")]
             DepMode::LdCache => write!(f, "[dyld cache]"),
             DepMode::SystemDirs => write!(f, "[system default paths]"),

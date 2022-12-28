@@ -7,20 +7,12 @@ mod deptree;
 mod pathutils;
 mod search_path;
 use deptree::*;
-#[cfg(any(
-    target_os = "linux",
-    target_os = "freebsd",
-    target_os = "openbsd",
-    target_os = "netbsd"
-))]
+
+#[cfg(all(target_family = "unix", not(target_os = "macos")))]
 mod elf;
-#[cfg(any(
-    target_os = "linux",
-    target_os = "freebsd",
-    target_os = "openbsd",
-    target_os = "netbsd"
-))]
+#[cfg(all(target_family = "unix", not(target_os = "macos")))]
 use elf::*;
+
 #[cfg(any(target_os = "macos"))]
 mod macho;
 #[cfg(any(target_os = "macos"))]
@@ -74,12 +66,7 @@ enum SystemOptions {
     PreloadPathOption,
 }
 
-#[cfg(any(
-    target_os = "linux",
-    target_os = "freebsd",
-    target_os = "openbsd",
-    target_os = "netbsd"
-))]
+#[cfg(all(target_family = "unix", not(target_os = "macos")))]
 const SYSTEM_OPTIONS: &'static [&'static str] = &[
     "Assume the LD_LIBRARY_PATH is set",
     "Assume the LD_PRELOAD is set",

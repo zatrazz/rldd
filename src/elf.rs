@@ -29,7 +29,7 @@ mod ld_so_conf_netbsd;
 
 #[cfg(target_os = "linux")]
 type LoaderCache = ld_so_cache::LdCache;
-#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+#[cfg(all(target_family = "unix", not(target_os = "linux")))]
 type LoaderCache = search_path::SearchPathVec;
 
 type DepsVec = Vec<String>;
@@ -147,7 +147,7 @@ fn parse_header_elf<Elf: FileHeader<Endian = Endianness>>(
 fn handle_loader(elc: &mut ElfInfo) {
     elc.is_musl = interp::is_musl(&elc.interp)
 }
-#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+#[cfg(all(target_family = "unix", not(target_os = "linux")))]
 fn handle_loader(_elc: &mut ElfInfo) {}
 
 fn parse_elf_program_headers<Elf: FileHeader>(
@@ -314,7 +314,7 @@ fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
     *dynstr = replace_dyn_str(dynstr, "LIB", libdir);
 }
 
-#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+#[cfg(all(target_family = "unix", not(target_os = "linux")))]
 fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
     _endian: Elf::Endian,
     _elf: &Elf,
@@ -463,6 +463,10 @@ fn check_elf_header(elc: &ElfInfo) -> bool {
 fn check_elf_header(elc: &ElfInfo) -> bool {
     elc.ei_osabi == ELFOSABI_SYSV || elc.ei_osabi == ELFOSABI_NETBSD
 }
+#[cfg(any(target_os = "illumos", target_os = "solaris"))]
+fn check_elf_header(elc: &ElfInfo) -> bool {
+    elc.ei_osabi == ELFOSABI_SYSV || elc.ei_osabi == ELFOSABI_SOLARIS
+}
 
 fn match_elf_header(a1: &ElfInfo, a2: &ElfInfo) -> bool {
     a1.ei_class == a2.ei_class && a1.ei_data == a2.ei_data && a1.e_machine == a2.e_machine
@@ -515,7 +519,7 @@ fn resolve_binary_arch(elc: &ElfInfo, deptree: &mut DepTree, depp: usize) {
         );
     }
 }
-#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+#[cfg(all(target_family = "unix", not(target_os = "linux")))]
 fn resolve_binary_arch(_elc: &ElfInfo, _deptree: &mut DepTree, _depp: usize) {}
 
 pub type ElfCtx = Option<LoaderCache>;
@@ -632,6 +636,10 @@ fn load_so_cache(_ecl: &ElfInfo) -> Option<LoaderCache> {
 fn load_so_cache(_ecl: &ElfInfo) -> Option<LoaderCache> {
     ld_so_conf_netbsd::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")).ok()
 }
+#[cfg(any(target_os = "illumos", target_os = "solaris"))]
+fn load_so_cache(_ecl: &ElfInfo) -> Option<LoaderCache> {
+    None
+}
 
 #[cfg(target_os = "linux")]
 fn load_ld_so_preload(interp: &Option<String>) -> search_path::SearchPathVec {
@@ -640,7 +648,7 @@ fn load_ld_so_preload(interp: &Option<String>) -> search_path::SearchPathVec {
     }
     search_path::SearchPathVec::new()
 }
-#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+#[cfg(all(target_family = "unix", not(target_os = "linux")))]
 fn load_ld_so_preload(_interp: &Option<String>) -> search_path::SearchPathVec {
     search_path::SearchPathVec::new()
 }
@@ -836,7 +844,7 @@ fn resolve_dependency_ld_cache<'a>(
     None
 }
 
-#[cfg(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+#[cfg(all(target_family = "unix", not(target_os = "linux")))]
 fn resolve_dependency_ld_cache<'a>(
     dtneeded: &'a String,
     config: &'a Config,
