@@ -89,7 +89,7 @@ struct Options {
 
     /// show the resolved path instead of the library SONAME.
     #[argh(switch, short = 'p')]
-    showpath: bool,
+    path: bool,
 
     /// print already resolved dependencies.
     #[argh(switch, short = 'a')]
@@ -106,7 +106,7 @@ struct Options {
 fn main() {
     let opts: Options = argh::from_env();
 
-    let mut printer = printer::create(opts.showpath, opts.ldd, opts.args.len() == 1);
+    let mut printer = printer::create(opts.path, opts.ldd, opts.args.len() == 1);
 
     let ld_library_path = search_path::from_string(&opts.library_path.as_str(), &[':']);
     let ld_preload = search_path::from_preload(&opts.preload.as_str());
