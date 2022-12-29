@@ -1,5 +1,4 @@
-use argparse::{ArgumentParser, List, Store, StoreTrue, Print};
-use std::ops::Index;
+use argh::FromArgs;
 
 mod printer;
 use printer::*;
@@ -13,9 +12,9 @@ mod elf;
 #[cfg(all(target_family = "unix", not(target_os = "macos")))]
 use elf::*;
 
-#[cfg(any(target_os = "macos"))]
+#[cfg(target_os = "macos")]
 mod macho;
-#[cfg(any(target_os = "macos"))]
+#[cfg(target_os = "macos")]
 use macho::*;
 
 fn print_deps(p: &Printer, deps: &DepTree) {
@@ -61,102 +60,66 @@ fn print_deps_children(
     }
 }
 
-enum SystemOptions {
-    LibraryPathOption,
-    PreloadPathOption,
-}
+#[derive(FromArgs)]
+/// Print shared objects dependencies
+struct Options {
+    /// assume the LD_LIBRARY_PATH is set.
+    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
+    #[argh(option, default = "\"\".to_string()")]
+    library_path: String,
 
-#[cfg(all(target_family = "unix", not(target_os = "macos")))]
-const SYSTEM_OPTIONS: &'static [&'static str] = &[
-    "Assume the LD_LIBRARY_PATH is set",
-    "Assume the LD_PRELOAD is set",
-];
-#[cfg(any(target_os = "macos"))]
-const SYSTEM_OPTIONS: &'static [&'static str] = &[
-    "Assume the DYLD_FRAMEWORK_PATH is set",
-    "Assume the DYLD_INSERT_LIBRARIES is set",
-];
+    /// assume the DYLD_FRAMEWORK_PATH is set.
+    #[cfg(target_os = "macos")]
+    #[argh(option, default = "\"\".to_string()")]
+    library_path: String,
 
-impl Index<SystemOptions> for [&'static str] {
-    type Output = &'static str;
+    /// assume the LD_PRELOAD is set.
+    #[argh(option, default = "\"\".to_string()")]
+    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
+    preload: String,
 
-    fn index(&self, idx: SystemOptions) -> &Self::Output {
-        match idx {
-            SystemOptions::LibraryPathOption => &self[0],
-            SystemOptions::PreloadPathOption => &self[1],
-        }
-    }
+    /// assume the DYLD_INSERT_LIBRARIES is set.
+    #[cfg(target_os = "macos")]
+    #[argh(option, default = "\"\".to_string()")]
+    preload: String,
+
+    /// set the value of $PLATFORM in rpath/runpath expansion.
+    #[argh(option)]
+    platform: Option<String>,
+
+    /// show the resolved path instead of the library SONAME.
+    #[argh(switch, short = 'p')]
+    showpath: bool,
+
+    /// print already resolved dependencies.
+    #[argh(switch, short = 'a')]
+    all: bool,
+
+    /// output similar to lld (unique dependencies, one per line).
+    #[argh(switch, short = 'l')]
+    ldd: bool,
+
+     #[argh(positional, greedy)]
+    args: Vec<String>,
 }
 
 fn main() {
-    let mut showpath = false;
-    let mut ld_library_path = String::new();
-    let mut ld_preload = String::new();
-    let mut platform = String::new();
-    let mut all = false;
-    let mut ldd = false;
-    let mut args: Vec<String> = vec![];
+    let opts: Options = argh::from_env();
 
-    {
-        let mut ap = ArgumentParser::new();
-        ap.refer(&mut showpath).add_option(
-            &["-p"],
-            StoreTrue,
-            "Show the resolved path instead of the library soname",
-        );
-        ap.refer(&mut ld_library_path).add_option(
-            &["--library-path"],
-            Store,
-            SYSTEM_OPTIONS[SystemOptions::LibraryPathOption],
-        );
-        ap.refer(&mut ld_preload).add_option(
-            &["--preload"],
-            Store,
-            SYSTEM_OPTIONS[SystemOptions::PreloadPathOption],
-        );
-        ap.refer(&mut platform).add_option(
-            &["--platform"],
-            Store,
-            "Set the value of $PLATFORM in rpath/runpath expansion",
-        );
-        ap.refer(&mut all).add_option(
-            &["-a", "--all"],
-            StoreTrue,
-            "Print already resolved dependencies",
-        );
-        ap.refer(&mut ldd).add_option(
-            &["-l", "--ldd"],
-            StoreTrue,
-            "Output similar to lld (unique dependencies, one per line)",
-        );
-        ap.add_option(&["-v", "--version"],
-            Print(env!("CARGO_PKG_VERSION").to_string()), "Show version");
-        ap.refer(&mut args)
-            .add_argument("binary", List, "binaries to print the dependencies");
-        ap.stop_on_first_argument(true);
-        ap.parse_args_or_exit();
-    }
+    let mut printer = printer::create(opts.showpath, opts.ldd, opts.args.len() == 1);
 
-    let mut printer = printer::create(showpath, ldd, args.len() == 1);
-
-    let ld_library_path = search_path::from_string(&ld_library_path.as_str(), &[':']);
-    let ld_preload = search_path::from_preload(&ld_preload.as_str());
-
-    let plat = if platform.is_empty() {
-        None
-    } else {
-        Some(&platform)
-    };
+    let ld_library_path = search_path::from_string(&opts.library_path.as_str(), &[':']);
+    let ld_preload = search_path::from_preload(&opts.preload.as_str());
 
     let mut ctx = create_context();
 
-    for arg in args {
+    for arg in opts.args {
         match resolve_binary(
             &mut ctx,
             &ld_preload,
             &ld_library_path,
-            plat,
-            all,
+            &opts.platform,
+            opts.all,
             arg.as_str()) {
             Ok(deptree) => print_deps(&mut printer, &deptree),
             Err(e) => eprintln!("error: {}", e),

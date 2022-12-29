@@ -534,7 +534,7 @@ pub fn resolve_binary(
     ld_cache: &mut ElfCtx,
     ld_preload: &search_path::SearchPathVec,
     ld_library_path: &search_path::SearchPathVec,
-    platform: Option<&String>,
+    platform: &Option<String>,
     all: bool,
     arg: &str,
 ) -> Result<DepTree, std::io::Error> {
@@ -556,7 +556,7 @@ pub fn resolve_binary(
         }
     };
 
-    let elc = match open_elf_file(&filename, None, None, platform, false) {
+    let elc = match open_elf_file(&filename, None, None, platform.as_ref(), false) {
         Ok(elc) => elc,
         Err(err) => {
             return Err(Error::new(
@@ -585,7 +585,7 @@ pub fn resolve_binary(
         ld_library_path: ld_library_path,
         ld_cache: ld_cache,
         system_dirs: system_dirs,
-        platform: platform,
+        platform: platform.as_ref(),
         all: all,
     };
 

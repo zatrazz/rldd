@@ -83,7 +83,7 @@ pub fn resolve_binary(
     cache: &DyldCache,
     preload: &search_path::SearchPathVec,
     library_path: &search_path::SearchPathVec,
-    _platform: Option<&String>,
+    _platform: &Option<String>,
     all: bool,
     arg: &str,
 ) -> Result<DepTree, std::io::Error> {
