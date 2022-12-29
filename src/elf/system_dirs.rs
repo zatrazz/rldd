@@ -82,28 +82,27 @@ pub fn get_system_dirs(_e_machine: u16, _ei_class: u8) -> Option<search_path::Se
 pub fn get_system_dirs(e_machine: u16, _ei_class: u8) -> Option<search_path::SearchPathVec> {
     let mut r = search_path::SearchPathVec::new();
     if e_machine == EM_386 {
-            r.push(search_path::SearchPath {
-                path: "/lib".to_string(),
-                dev: 0,
-                ino: 0,
-            });
-            r.push(search_path::SearchPath {
-                path: "/usr/lib".to_string(),
-                dev: 0,
-                ino: 0,
-            });
-        }
-    else if e_machine == EM_X86_64 {
-            r.push(search_path::SearchPath {
-                path: "/lib/64".to_string(),
-                dev: 0,
-                ino: 0,
-            });
-            r.push(search_path::SearchPath {
-                path: "/usr/lib/64".to_string(),
-                dev: 0,
-                ino: 0,
-            });
+        r.push(search_path::SearchPath {
+            path: "/lib".to_string(),
+            dev: 0,
+            ino: 0,
+        });
+        r.push(search_path::SearchPath {
+            path: "/usr/lib".to_string(),
+            dev: 0,
+            ino: 0,
+        });
+    } else if e_machine == EM_X86_64 {
+        r.push(search_path::SearchPath {
+            path: "/lib/64".to_string(),
+            dev: 0,
+            ino: 0,
+        });
+        r.push(search_path::SearchPath {
+            path: "/usr/lib/64".to_string(),
+            dev: 0,
+            ino: 0,
+        });
     };
     Some(r)
 }

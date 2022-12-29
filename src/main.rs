@@ -99,7 +99,7 @@ struct Options {
     #[argh(switch, short = 'l')]
     ldd: bool,
 
-     #[argh(positional, greedy)]
+    #[argh(positional, greedy)]
     args: Vec<String>,
 }
 
@@ -120,7 +120,8 @@ fn main() {
             &ld_library_path,
             &opts.platform,
             opts.all,
-            arg.as_str()) {
+            arg.as_str(),
+        ) {
             Ok(deptree) => print_deps(&mut printer, &deptree),
             Err(e) => eprintln!("error: {}", e),
         }
