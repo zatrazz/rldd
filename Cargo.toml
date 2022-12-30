@@ -6,6 +6,7 @@ edition = "2021"
 license = "MIT"
 description = "Print shared object dependencies"
 repository = "https://github.com/zatrazz/rldd/"
+keywords = ["elf", "mach-o", "cli", "linux", ]
 
 [dependencies]
 # There is no need for compression.
