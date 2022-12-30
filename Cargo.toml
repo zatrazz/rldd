@@ -4,8 +4,12 @@ version = "0.1.0"
 authors = [ "Adhemerval Zanella <zatrazz@gmail.com>" ]
 edition = "2021"
 license = "MIT"
-description = "Print shared object dependencies"
+description = """
+A program to print shared object dependencies
+"""
 repository = "https://github.com/zatrazz/rldd/"
+homepage = "https://github.com/zatrazz/rldd/"
+readme = "README.md"
 keywords = ["elf", "mach-o", "cli", "linux", ]
 
 [dependencies]
