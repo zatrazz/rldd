@@ -12,6 +12,10 @@ homepage = "https://github.com/zatrazz/rldd/"
 readme = "README.md"
 keywords = ["elf", "mach-o", "cli", "linux", ]
 categories = ["command-line-utilities"]
+exclude = [
+    "TODO.md",
+    "doc/screenshot.png",
+]
 
 [dependencies]
 # There is no need for compression.
