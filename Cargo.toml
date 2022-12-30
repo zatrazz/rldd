@@ -11,6 +11,7 @@ repository = "https://github.com/zatrazz/rldd/"
 homepage = "https://github.com/zatrazz/rldd/"
 readme = "README.md"
 keywords = ["elf", "mach-o", "cli", "linux", ]
+categories = ["command-line-utilities"]
 
 [dependencies]
 # There is no need for compression.
