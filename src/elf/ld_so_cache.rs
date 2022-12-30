@@ -402,6 +402,9 @@ fn parse_ld_so_cache_glibc_hwcap<R: Read + Seek>(
     prev_off: &mut i64,
     cur: i64,
 ) -> Result<Vec<String>> {
+    if cur == 0 {
+        return Ok(Vec::<String>::new());
+    }
     reader.seek_relative(cur - *prev_off)?;
     let ext: cache_extension = {
         let mut h = [0u8; CACHE_EXTENSION_LEN];
