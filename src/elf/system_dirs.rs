@@ -1,4 +1,9 @@
-#[cfg(any(target_os = "linux", target_os = "illumos", target_os = "solaris"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "illumos",
+    target_os = "solaris",
+    target_os = "android"
+))]
 use object::elf::*;
 
 use crate::search_path;
@@ -51,6 +56,35 @@ pub fn get_system_dirs(e_machine: u16, ei_class: u8) -> Option<search_path::Sear
             ino: 0,
         },
     ])
+}
+
+#[cfg(target_os = "android")]
+pub fn get_system_dirs_xx(suffix: &str) -> Option<search_path::SearchPathVec> {
+    Some(vec![
+        search_path::SearchPath {
+            path: format!("/system/lib{}", suffix),
+            dev: 0,
+            ino: 0,
+        },
+        search_path::SearchPath {
+            path: format!("/vendor/lib{}", suffix),
+            dev: 0,
+            ino: 0,
+        },
+    ])
+}
+#[cfg(target_os = "android")]
+pub fn get_system_dirs(e_machine: u16, ei_class: u8) -> Option<search_path::SearchPathVec> {
+    match e_machine {
+        EM_AARCH64 | EM_X86_64 => get_system_dirs_xx("64"),
+        EM_ARM | EM_386 => get_system_dirs_xx(""),
+        EM_MIPS => match ei_class {
+            ELFCLASS64 => get_system_dirs_xx("64"),
+            ELFCLASS32 => get_system_dirs_xx(""),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 #[cfg(target_os = "freebsd")]

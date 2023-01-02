@@ -62,6 +62,8 @@ impl fmt::Display for DepMode {
             DepMode::DtRunpath => write!(f, "[runpath]"),
             #[cfg(target_os = "linux")]
             DepMode::LdCache => write!(f, "[ld.so.cache]"),
+            #[cfg(target_os = "android")]
+            DepMode::LdCache => write!(f, "[ld.config.txt]"),
             #[cfg(target_os = "freebsd")]
             DepMode::LdCache => write!(f, "[ld-elf.so.hints]"),
             #[cfg(target_os = "openbsd")]

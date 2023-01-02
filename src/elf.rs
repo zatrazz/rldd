@@ -446,7 +446,7 @@ fn match_elf_name(melc: &ElfInfo, dtneeded: Option<&String>, elc: &ElfInfo) -> b
     true
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn check_elf_header(elc: &ElfInfo) -> bool {
     // TODO: ARM also accepts ELFOSABI_SYSV
     elc.ei_osabi == ELFOSABI_SYSV || elc.ei_osabi == ELFOSABI_GNU
@@ -624,6 +624,10 @@ fn load_so_cache(elc: &ElfInfo) -> Option<ld_so_cache::LdCache> {
             Err(e) => eprintln!("error: load_so_cache: {}", e),
         }
     };
+    None
+}
+#[cfg(target_os = "android")]
+fn load_so_cache(_elc: &ElfInfo) -> Option<Vec<search_path::SearchPath>> {
     None
 }
 #[cfg(target_os = "freebsd")]
