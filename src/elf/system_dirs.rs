@@ -6,6 +6,8 @@
 ))]
 use object::elf::*;
 
+#[cfg(target_os = "android")]
+use crate::elf::android;
 use crate::search_path;
 
 // Return the default system directory for the architectures and class.  It is hard
@@ -60,18 +62,35 @@ pub fn get_system_dirs(e_machine: u16, ei_class: u8) -> Option<search_path::Sear
 
 #[cfg(target_os = "android")]
 pub fn get_system_dirs_xx(suffix: &str) -> Option<search_path::SearchPathVec> {
-    Some(vec![
-        search_path::SearchPath {
-            path: format!("/system/lib{}", suffix),
+    let add_odm = match android::get_release().unwrap() {
+        android::AndroidRelease::AndroidR28
+        | android::AndroidRelease::AndroidR29
+        | android::AndroidRelease::AndroidR30
+        | android::AndroidRelease::AndroidR31
+        | android::AndroidRelease::AndroidR32
+        | android::AndroidRelease::AndroidR33 => true,
+        _ => false,
+    };
+
+    let mut r = search_path::SearchPathVec::new();
+    r.push(search_path::SearchPath {
+        path: format!("/system/lib{}", suffix),
+        dev: 0,
+        ino: 0,
+    });
+    if add_odm {
+        r.push(search_path::SearchPath {
+            path: format!("/odm/lib{}", suffix),
             dev: 0,
             ino: 0,
-        },
-        search_path::SearchPath {
-            path: format!("/vendor/lib{}", suffix),
-            dev: 0,
-            ino: 0,
-        },
-    ])
+        });
+    }
+    r.push(search_path::SearchPath {
+        path: format!("/vendor/lib{}", suffix),
+        dev: 0,
+        ino: 0,
+    });
+    Some(r)
 }
 #[cfg(target_os = "android")]
 pub fn get_system_dirs(e_machine: u16, ei_class: u8) -> Option<search_path::SearchPathVec> {
