@@ -577,7 +577,7 @@ pub fn resolve_binary(
     // We need a new vector for the case of binaries with different interpreters.
     preload.extend(load_ld_so_preload(&elc.interp));
 
-    let system_dirs = match system_dirs::get_system_dirs(elc.e_machine, elc.ei_class) {
+    let system_dirs = match system_dirs::get_system_dirs(&elc.interp, elc.e_machine, elc.ei_class) {
         Some(r) => r,
         None => return Err(Error::new(ErrorKind::Other, "Invalid ELF architcture")),
     };
