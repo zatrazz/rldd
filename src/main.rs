@@ -108,8 +108,8 @@ fn main() {
 
     let mut printer = printer::create(opts.path, opts.ldd, opts.args.len() == 1);
 
-    let ld_library_path = search_path::from_string(&opts.library_path.as_str(), &[':']);
-    let ld_preload = search_path::from_preload(&opts.preload.as_str());
+    let ld_library_path = search_path::from_string(&opts.library_path, &[':']);
+    let ld_preload = search_path::from_preload(&opts.preload);
 
     let mut ctx = create_context();
 

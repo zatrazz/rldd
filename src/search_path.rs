@@ -50,17 +50,17 @@ impl SearchPathVecExt for SearchPathVec {
     }
 }
 
-pub fn from_string(string: &str, delim: &[char]) -> SearchPathVec {
+pub fn from_string<S: AsRef<str>>(string: S, delim: &[char]) -> SearchPathVec {
     let mut r = SearchPathVec::new();
-    for path in string.split(delim) {
+    for path in string.as_ref().split(delim) {
         r.add_path(path);
     }
     r
 }
 
-pub fn from_preload(string: &str) -> SearchPathVec {
+pub fn from_preload<S: AsRef<str>>(string: S) -> SearchPathVec {
     let mut r = SearchPathVec::new();
-    for path in string.split(":") {
+    for path in string.as_ref().split(":") {
         let path = match Path::new(path).canonicalize() {
             Ok(path) => path,
             // Maybe print an error message.

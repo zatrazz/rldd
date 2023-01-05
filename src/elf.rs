@@ -343,7 +343,7 @@ fn parse_elf_dyn_searchpath<Elf: FileHeader>(
         };
         let newdynstr = replace_dyn_str(&newdynstr, "$PLATFORM", platform.as_str());
 
-        return search_path::from_string(newdynstr.as_str(), &[':']);
+        return search_path::from_string(newdynstr, &[':']);
     }
     search_path::SearchPathVec::new()
 }
