@@ -18,6 +18,8 @@ mod system_dirs;
 mod android;
 #[cfg(target_os = "linux")]
 mod interp;
+#[cfg(target_os = "android")]
+mod ld_config_txt;
 #[cfg(target_os = "freebsd")]
 mod ld_hints_freebsd;
 #[cfg(target_os = "openbsd")]
@@ -31,7 +33,12 @@ mod ld_so_conf_netbsd;
 
 #[cfg(target_os = "linux")]
 type LoaderCache = ld_so_cache::LdCache;
-#[cfg(all(target_family = "unix", not(target_os = "linux")))]
+#[cfg(target_os = "android")]
+type LoaderCache = ld_config_txt::LdCache;
+#[cfg(all(
+    target_family = "unix",
+    not(any(target_os = "linux", target_os = "android"))
+))]
 type LoaderCache = search_path::SearchPathVec;
 
 type DepsVec = Vec<String>;
@@ -569,7 +576,7 @@ pub fn resolve_binary(
     };
 
     if ld_cache.is_none() {
-        *ld_cache = load_so_cache(&elc);
+        *ld_cache = load_so_cache(&filename, &elc);
     }
 
     let mut preload = ld_preload.to_vec();
@@ -614,7 +621,7 @@ pub fn resolve_binary(
 }
 
 #[cfg(target_os = "linux")]
-fn load_so_cache(elc: &ElfInfo) -> Option<ld_so_cache::LdCache> {
+fn load_so_cache<P: AsRef<Path>>(_binary: &P, elc: &ElfInfo) -> Option<ld_so_cache::LdCache> {
     if interp::is_glibc(&elc.interp) {
         match ld_so_cache::parse_ld_so_cache(
             &Path::new("/etc/ld.so.cache"),
@@ -629,23 +636,31 @@ fn load_so_cache(elc: &ElfInfo) -> Option<ld_so_cache::LdCache> {
     None
 }
 #[cfg(target_os = "android")]
-fn load_so_cache(_elc: &ElfInfo) -> Option<Vec<search_path::SearchPath>> {
+fn load_so_cache<P: AsRef<Path>>(binary: &P, elc: &ElfInfo) -> Option<ld_config_txt::LdCache> {
+    if let Some(ld_config_path) = ld_config_txt::get_ld_config_path(binary, elc.e_machine, elc.ei_data) {
+        return ld_config_txt::parse_ld_config_txt(
+            &Path::new(&ld_config_path),
+            binary,
+            &elc.interp.as_ref().unwrap(),
+            elc.e_machine,
+            elc.ei_data).ok()
+    }
     None
 }
 #[cfg(target_os = "freebsd")]
-fn load_so_cache(_elc: &ElfInfo) -> Option<LoaderCache> {
+fn load_so_cache<P: AsRef<Path>>(_binary: &P, _elc: &ElfInfo) -> Option<LoaderCache> {
     ld_hints_freebsd::parse_ld_so_hints(&Path::new("/var/run/ld-elf.so.hints")).ok()
 }
 #[cfg(target_os = "openbsd")]
-fn load_so_cache(_ecl: &ElfInfo) -> Option<LoaderCache> {
+fn load_so_cache<P: AsRef<Path>>(_binary: &P, _ecl: &ElfInfo) -> Option<LoaderCache> {
     ld_hints_openbsd::parse_ld_so_hints(&Path::new("/var/run/ld.so.hints")).ok()
 }
 #[cfg(target_os = "netbsd")]
-fn load_so_cache(_ecl: &ElfInfo) -> Option<LoaderCache> {
+fn load_so_cache<P: AsRef<Path>>(_binary: &P, _ecl: &ElfInfo) -> Option<LoaderCache> {
     ld_so_conf_netbsd::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")).ok()
 }
 #[cfg(any(target_os = "illumos", target_os = "solaris"))]
-fn load_so_cache(_ecl: &ElfInfo) -> Option<LoaderCache> {
+fn load_so_cache<P: AsRef<Path>>(_binary: &P, _ecl: &ElfInfo) -> Option<LoaderCache> {
     None
 }
 
@@ -852,7 +867,19 @@ fn resolve_dependency_ld_cache<'a>(
     None
 }
 
-#[cfg(all(target_family = "unix", not(target_os = "linux")))]
+#[cfg(target_os = "android")]
+fn resolve_dependency_ld_cache<'a>(
+    dtneeded: &'a String,
+    config: &'a Config,
+    elc: &'a ElfInfo,
+) -> Option<ResolvedDependency<'a>> {
+    None
+}
+
+#[cfg(all(
+    target_family = "unix",
+    not(any(target_os = "linux", target_os = "android"))
+))]
 fn resolve_dependency_ld_cache<'a>(
     dtneeded: &'a String,
     config: &'a Config,

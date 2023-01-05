@@ -69,7 +69,6 @@ pub fn get_system_dirs(
     ei_class: u8,
 ) -> Option<search_path::SearchPathVec> {
     use crate::elf::android;
-    use crate::pathutils;
 
     pub fn get_system_dirs_xx(suffix: &str, is_asan: bool) -> Option<search_path::SearchPathVec> {
         let add_odm = match android::get_release().unwrap() {
@@ -125,10 +124,7 @@ pub fn get_system_dirs(
     }
 
     if let Some(interp) = interp {
-        let is_asan = match pathutils::get_name(&std::path::Path::new(interp)).as_str() {
-            "linker_asan" | "linker_asan64" => true,
-            _ => false,
-        };
+        let is_asan = android::is_asan(interp);
 
         return match e_machine {
             EM_AARCH64 | EM_X86_64 => get_system_dirs_xx("64", is_asan),
