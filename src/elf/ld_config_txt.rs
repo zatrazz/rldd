@@ -101,10 +101,7 @@ impl Properties for HashMap<String, String> {
             path = path.replace("${SDK_VER}", sdk_ver.as_str());
         }
 
-        path = path.replace(
-            "${VNDK_VER}",
-            format!("-{}", get_vndk_version_string("")).as_str(),
-        );
+        path = path.replace("${VNDK_VER}", get_vndk_version_str('-').as_str());
 
         // TODO Add VNDK_APEX_VER support (the expansion depends on release version)
 
@@ -122,6 +119,14 @@ enum Token {
     Error,
 }
 
+fn get_vndk_version_str(delimiter: char) -> String {
+    let vndk_str =  get_vndk_version_string("");
+    if vndk_str == "" || vndk_str == "default" {
+        return "".to_string();
+    }
+    format!("{}{}", delimiter, vndk_str)
+}
+
 pub fn get_ld_config_path<P: AsRef<Path>>(
     executable: &P,
     e_machine: u16,
@@ -132,7 +137,7 @@ pub fn get_ld_config_path<P: AsRef<Path>>(
             return "/system/etc/ld.config.vndk_lite.txt".to_string();
         }
 
-        format!("/system/etc/ld.config.{}.txt", get_vndk_version_string(""))
+        format!("/system/etc/ld.config{}.txt", get_vndk_version_str('.'))
     }
 
     fn get_default_ld_config_path() -> Option<String> {
