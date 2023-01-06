@@ -97,7 +97,9 @@ impl Properties for HashMap<String, String> {
 
         let lib = libpath(e_machine, ei_class).unwrap();
 
-        // TODO Add SDK_VER support
+        if let Ok(sdk_ver) = get_release_str() {
+            path = path.replace("${SDK_VER}", sdk_ver.as_str());
+        }
         // TODO Add VNDK_VER support
         // TODO Add VNDK_APEX_VER support (the expansion depends on release version)
 

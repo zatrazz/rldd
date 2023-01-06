@@ -40,8 +40,12 @@ pub fn get_property<S1: AsRef<str>, S2: AsRef<str>>(
     }
 }
 
+pub fn get_release_str() -> Result<String, std::io::Error> {
+    get_property("ro.build.version.sdk", "").and_then(|s| Ok(s.to_string()))
+}
+
 pub fn get_release() -> Result<AndroidRelease, std::io::Error> {
-    match get_property("ro.build.version.sdk", "")?.as_str() {
+    match get_release_str()?.as_str() {
         "26" => Ok(AndroidRelease::AndroidR26),
         "27" => Ok(AndroidRelease::AndroidR27),
         "28" => Ok(AndroidRelease::AndroidR28),
