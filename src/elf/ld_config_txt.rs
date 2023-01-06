@@ -101,9 +101,10 @@ impl Properties for HashMap<String, String> {
             path = path.replace("${SDK_VER}", sdk_ver.as_str());
         }
 
-        path = path.replace("${VNDK_VER}", get_vndk_version_str('-').as_str());
+        let vndk_version_str = get_vndk_version_str('-');
 
-        // TODO Add VNDK_APEX_VER support (the expansion depends on release version)
+        path = path.replace("${VNDK_VER}", vndk_version_str.as_str());
+        path = path.replace("${VNDK_APEX_VER}", vndk_version_str.as_str());
 
         path = path.replace("${LIB}", lib);
 
