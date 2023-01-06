@@ -33,21 +33,33 @@ pub trait NamespaceConfigTrait {
 
 const DEFAULT_NAME_CONFIG: &str = "default";
 
-pub trait LdCacheTraits {
-    fn get_default_namespace(&self) -> Option<&NamespaceConfig>;
+pub type LdCacheNs = HashMap<String, NamespaceConfig>;
+
+pub struct LdCache {
+    namespaces_config: LdCacheNs,
+    target_sdk_version: i64,
 }
 
-pub type LdCache = HashMap<String, NamespaceConfig>;
+impl LdCache {
+    fn new(target_sdk_version: i64) -> LdCache {
+        LdCache {
+            namespaces_config: LdCacheNs::new(),
+            target_sdk_version: target_sdk_version,
+        }
+    }
 
-impl LdCacheTraits for LdCache {
-    fn get_default_namespace(&self) -> Option<&NamespaceConfig> {
-        self.get(DEFAULT_NAME_CONFIG)
+    pub fn get_default_namespace(&self) -> Option<&NamespaceConfig> {
+        self.namespaces_config.get(DEFAULT_NAME_CONFIG)
+    }
+
+    fn config_set(&self) -> HashSet<String> {
+        self.namespaces_config.keys().cloned().collect()
     }
 }
 
 impl NamespaceConfigTrait for LdCache {
     fn push_namespace(&mut self, name: &str) -> &Self {
-        self.insert(
+        self.namespaces_config.insert(
             name.to_string(),
             NamespaceConfig {
                 name: name.to_string(),
@@ -63,26 +75,58 @@ impl NamespaceConfigTrait for LdCache {
     }
 }
 
-pub trait Properties {
-    fn get_bool<S: AsRef<str>>(&self, name: S) -> bool;
-    fn get_string<S: AsRef<str>>(&self, name: S) -> String;
-    fn get_paths<S: AsRef<str>>(
-        &self,
-        name: S,
-        e_machine: u16,
-        ei_class: u8,
-    ) -> search_path::SearchPathVec;
+struct Properties {
+    properties: HashMap<String, String>,
+    target_sdk_version: String,
 }
 
-impl Properties for HashMap<String, String> {
+impl Properties {
+    fn new() -> Properties {
+        Properties {
+            properties: HashMap::<String, String>::new(),
+            target_sdk_version: "".to_string(),
+        }
+    }
+
+    fn add<K: AsRef<str>, V: AsRef<str>>(&mut self, key: K, value: V) {
+        self.properties
+            .insert(key.as_ref().to_string(), value.as_ref().to_string());
+    }
+
+    fn append<K: AsRef<str>, V: AsRef<str>>(&mut self, key: K, value: V) {
+        let key = key.as_ref().to_string();
+        if let Some(v) = self.properties.get_mut(&key) {
+            let sep = if key.ends_with(".links") || key.ends_with(".namespaces") {
+                ','
+            } else if key.ends_with(".paths")
+                || key.ends_with(".shared_libs")
+                || key.ends_with(".whitelisted")
+                || key.ends_with(".allowed_libs")
+            {
+                ':'
+            } else {
+                return;
+            };
+            v.push_str(&format!("{}{}", sep, value.as_ref()).to_string());
+        } else {
+            self.add(key, value);
+        };
+    }
+
+    fn get<S: AsRef<str>>(&self, name: S) -> Option<&String> {
+        self.properties.get(name.as_ref())
+    }
+
     fn get_bool<S: AsRef<str>>(&self, name: S) -> bool {
-        self.get(name.as_ref())
+        self.properties
+            .get(name.as_ref())
             .and_then(|s| Some(s == "true"))
             .unwrap_or(false)
     }
 
     fn get_string<S: AsRef<str>>(&self, name: S) -> String {
-        self.get(name.as_ref())
+        self.properties
+            .get(name.as_ref())
             .unwrap_or(&"".to_string())
             .to_string()
     }
@@ -97,9 +141,7 @@ impl Properties for HashMap<String, String> {
 
         let lib = libpath(e_machine, ei_class).unwrap();
 
-        if let Ok(sdk_ver) = get_release_str() {
-            path = path.replace("${SDK_VER}", sdk_ver.as_str());
-        }
+        path = path.replace("${SDK_VER}", self.target_sdk_version.as_str());
 
         let vndk_version_str = get_vndk_version_str('-');
 
@@ -121,7 +163,7 @@ enum Token {
 }
 
 fn get_vndk_version_str(delimiter: char) -> String {
-    let vndk_str =  get_vndk_version_string("");
+    let vndk_str = get_vndk_version_string("");
     if vndk_str == "" || vndk_str == "default" {
         return "".to_string();
     }
@@ -221,6 +263,26 @@ pub fn get_ld_config_path<P: AsRef<Path>>(
     None
 }
 
+pub fn get_target_sdk_version() -> Result<i64, &'static str> {
+    if let Ok(version_str) = get_release_str() {
+        if let Ok(value) = version_str.parse::<i64>() {
+            return Ok(value);
+        }
+    }
+    Err("error getting ABI version")
+}
+
+pub fn read_version_file<P: AsRef<Path>>(binary: &P) -> Result<i64, &'static str> {
+    if let Some(parent) = binary.as_ref().parent() {
+        if let Ok(version_str) = std::fs::read_to_string(parent.join(".version")) {
+            if let Ok(value) = version_str.parse::<i64>() {
+                return Ok(value);
+            }
+        }
+    }
+    Err("error reading version file")
+}
+
 pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>, S: AsRef<str>>(
     filename: &P2,
     binary: &P1,
@@ -237,7 +299,7 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>, S: AsRef<str>>(
 
     find_section(&section, &mut lines)?;
 
-    let mut properties = HashMap::<String, String>::new();
+    let mut properties = Properties::new();
     while let Some(Ok(line)) = lines.next() {
         let (token, line) = match next_token(&line) {
             Some(fields) => fields,
@@ -246,52 +308,41 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>, S: AsRef<str>>(
         match token {
             Token::PropertyAssign => {
                 let (name, value) = parse_assignment(&line)?;
-                properties.insert(name.to_string(), value.to_string());
+                properties.add(name, value);
             }
             Token::PropertyAppend => {
                 let (name, value) = parse_append(&line)?;
-                if let Some(vec) = properties.get_mut(name) {
-                    let sep = if name.ends_with(".links") || name.ends_with(".namespaces") {
-                        ','
-                    } else if name.ends_with(".paths")
-                        || name.ends_with(".shared_libs")
-                        || name.ends_with(".whitelisted")
-                        || name.ends_with(".allowed_libs")
-                    {
-                        ':'
-                    } else {
-                        continue;
-                    };
-                    vec.push_str(&format!("{}{}", sep, value).to_string());
-                } else {
-                    properties.insert(name.to_string(), value.to_string());
-                }
+                properties.append(name, value);
             }
             Token::Section | Token::Error => break,
         }
     }
 
-    let mut ns_configs = LdCache::new();
+    let target_sdk_version = if properties.get_bool("enable.target.sdk.version") {
+        read_version_file(binary)?
+    } else {
+        get_target_sdk_version()?
+    };
+    properties.target_sdk_version = target_sdk_version.to_string();
 
-    ns_configs.push_namespace(DEFAULT_NAME_CONFIG);
+    let mut ldcache = LdCache::new(target_sdk_version);
+
+    ldcache.push_namespace(DEFAULT_NAME_CONFIG);
 
     if let Some(additional_namespaces) = properties.get("additional.namespaces") {
         for namespace in additional_namespaces.split(',') {
-            ns_configs.push_namespace(namespace);
+            ldcache.push_namespace(namespace);
         }
     }
 
-    // TODO: handle sdk version
-    if properties.get_bool("enable.target.sdk.version") {}
-
     // The loop below borrow as immutable, so it can not check if the linked namespace
-    // is within the ns_configs.  To accomplish a different set with only ns_config
+    // is within the ldcache.  To accomplish a different set with only ldcache
     // keys is used.
-    let ns_configs_set: HashSet<String> = ns_configs.keys().cloned().collect();
+    let ns_configs_set = ldcache.config_set();
 
     let is_asan = is_asan(interp);
 
-    for (_, ns) in ns_configs.iter_mut() {
+    for (_, ns) in ldcache.namespaces_config.iter_mut() {
         let mut property_name_prefix = format!("namespace.{}", ns.name);
         if let Some(linked_namespaces) = properties.get(&format!("{}.links", property_name_prefix))
         {
@@ -363,7 +414,7 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>, S: AsRef<str>>(
         );
     }
 
-    Ok(ns_configs)
+    Ok(ldcache)
 }
 
 fn find_initial_section<P: AsRef<Path>>(
@@ -542,6 +593,10 @@ mod tests {
         let binpath = dirtest.join("binary");
         File::create(&binpath)?;
 
+        let versiondir = dirtest.join(".version");
+        let mut versionfile = File::create(&versiondir)?;
+        write!(versionfile, "26")?;
+
         let vendor = dirtest.join("vendor");
         fs::create_dir(&vendor)?;
 
@@ -631,9 +686,9 @@ mod tests {
                 );
                 assert_eq!(default_ns.namespaces[1].allow_all, false);
 
-                assert_eq!(ldcache.len(), 4);
+                assert_eq!(ldcache.namespaces_config.len(), 4);
 
-                let system_ns = ldcache.get("system").unwrap();
+                let system_ns = ldcache.namespaces_config.get("system").unwrap();
                 assert_eq!(system_ns.name, "system");
                 assert_eq!(system_ns.isolated, true);
                 assert_eq!(system_ns.visible, true);
@@ -652,7 +707,7 @@ mod tests {
                     assert_eq!(d, e);
                 }
 
-                let vndk_ns = ldcache.get("vndk").unwrap();
+                let vndk_ns = ldcache.namespaces_config.get("vndk").unwrap();
                 assert_eq!(vndk_ns.name, "vndk");
                 assert_eq!(vndk_ns.isolated, false);
                 assert_eq!(vndk_ns.visible, false);
@@ -665,7 +720,7 @@ mod tests {
                 assert_eq!(vndk_ns.namespaces[0].name, "default");
                 assert_eq!(vndk_ns.namespaces[0].allow_all, true);
 
-                let vndk_ns_system = ldcache.get("vndk_in_system").unwrap();
+                let vndk_ns_system = ldcache.namespaces_config.get("vndk_in_system").unwrap();
                 assert_eq!(vndk_ns_system.name, "vndk_in_system");
                 assert_eq!(vndk_ns_system.isolated, true);
                 assert_eq!(vndk_ns_system.visible, true);
