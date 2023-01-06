@@ -100,7 +100,12 @@ impl Properties for HashMap<String, String> {
         if let Ok(sdk_ver) = get_release_str() {
             path = path.replace("${SDK_VER}", sdk_ver.as_str());
         }
-        // TODO Add VNDK_VER support
+
+        path = path.replace(
+            "${VNDK_VER}",
+            format!("-{}", get_vndk_version_string("")).as_str(),
+        );
+
         // TODO Add VNDK_APEX_VER support (the expansion depends on release version)
 
         path = path.replace("${LIB}", lib);
