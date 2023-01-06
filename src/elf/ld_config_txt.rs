@@ -323,12 +323,14 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>, S: AsRef<str>>(
             .map(|s| s.to_string())
             .filter(|x| !x.is_empty())
             .collect();
-        allowed_libs.append(&mut properties
-            .get_string(format!("{}.allowed_libs", property_name_prefix))
-            .split(':')
-            .map(|s| s.to_string())
-            .filter(|x| !x.is_empty())
-            .collect());
+        allowed_libs.append(
+            &mut properties
+                .get_string(format!("{}.allowed_libs", property_name_prefix))
+                .split(':')
+                .map(|s| s.to_string())
+                .filter(|x| !x.is_empty())
+                .collect(),
+        );
         ns.allowed_libs = allowed_libs;
 
         if is_asan {

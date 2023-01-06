@@ -575,9 +575,7 @@ pub fn resolve_binary(
         }
     };
 
-    if ld_cache.is_none() {
-        *ld_cache = load_so_cache(&filename, &elc);
-    }
+    load_so_cache(ld_cache, &filename, &elc);
 
     let mut preload = ld_preload.to_vec();
     // glibc first parses LD_PRELOAD and then ld.so.preload.
@@ -621,47 +619,62 @@ pub fn resolve_binary(
 }
 
 #[cfg(target_os = "linux")]
-fn load_so_cache<P: AsRef<Path>>(_binary: &P, elc: &ElfInfo) -> Option<ld_so_cache::LdCache> {
+fn load_so_cache<P: AsRef<Path>>(
+    ld_cache: &mut ElfCtx,
+    _binary: &P,
+    elc: &ElfInfo,
+) {
     if interp::is_glibc(&elc.interp) {
-        match ld_so_cache::parse_ld_so_cache(
-            &Path::new("/etc/ld.so.cache"),
-            elc.ei_class,
-            elc.e_machine,
-            elc.e_flags,
-        ) {
-            Ok(cache) => return Some(cache),
-            Err(e) => eprintln!("error: load_so_cache: {}", e),
+        // glibc's ld.so.cache is shared between all executables, so there is no need
+        // to reload for multiple entries.
+        if ld_cache.is_none() {
+            *ld_cache = ld_so_cache::parse_ld_so_cache(
+                &Path::new("/etc/ld.so.cache"),
+                elc.ei_class,
+                elc.e_machine,
+                elc.e_flags,
+            )
+            .ok();
         }
     };
-    None
 }
 #[cfg(target_os = "android")]
-fn load_so_cache<P: AsRef<Path>>(binary: &P, elc: &ElfInfo) -> Option<ld_config_txt::LdCache> {
-    if let Some(ld_config_path) = ld_config_txt::get_ld_config_path(binary, elc.e_machine, elc.ei_data) {
-        return ld_config_txt::parse_ld_config_txt(
+fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut ElfCtx, binary: &P, elc: &ElfInfo) {
+    if let Some(ld_config_path) =
+        ld_config_txt::get_ld_config_path(binary, elc.e_machine, elc.ei_data)
+    {
+        // On Android 10 and forward each executable might have a associated ld.config.txt
+        // file in different paths, so we need to reload for each argument.
+        *ld_cache = ld_config_txt::parse_ld_config_txt(
             &Path::new(&ld_config_path),
             binary,
             &elc.interp.as_ref().unwrap(),
             elc.e_machine,
-            elc.ei_data).ok()
+            elc.ei_data,
+        )
+        .ok();
     }
-    None
 }
 #[cfg(target_os = "freebsd")]
-fn load_so_cache<P: AsRef<Path>>(_binary: &P, _elc: &ElfInfo) -> Option<LoaderCache> {
-    ld_hints_freebsd::parse_ld_so_hints(&Path::new("/var/run/ld-elf.so.hints")).ok()
+fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut ElfCtx, _binary: &P, _elc: &ElfInfo) {
+    if ld_cache.is_none() {
+      *ld_cache = ld_hints_freebsd::parse_ld_so_hints(&Path::new("/var/run/ld-elf.so.hints")).ok();
+    }
 }
 #[cfg(target_os = "openbsd")]
-fn load_so_cache<P: AsRef<Path>>(_binary: &P, _ecl: &ElfInfo) -> Option<LoaderCache> {
-    ld_hints_openbsd::parse_ld_so_hints(&Path::new("/var/run/ld.so.hints")).ok()
+fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut ElfCtx, _binary: &P, _ecl: &ElfInfo) {
+    if ld_cache.is_none() {
+      *ld_cache = ld_hints_openbsd::parse_ld_so_hints(&Path::new("/var/run/ld.so.hints")).ok()
+    }
 }
 #[cfg(target_os = "netbsd")]
-fn load_so_cache<P: AsRef<Path>>(_binary: &P, _ecl: &ElfInfo) -> Option<LoaderCache> {
-    ld_so_conf_netbsd::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")).ok()
+fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut ElfCtx, _binary: &P, _ecl: &ElfInfo) {
+    if ld_cache.is_none() {
+      *ld_cache = ld_so_conf_netbsd::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")).ok()
+    }
 }
 #[cfg(any(target_os = "illumos", target_os = "solaris"))]
-fn load_so_cache<P: AsRef<Path>>(_binary: &P, _ecl: &ElfInfo) -> Option<LoaderCache> {
-    None
+fn load_so_cache<P: AsRef<Path>>(_ld_cache: &mut ElfCtx, _binary: &P, _ecl: &ElfInfo) {
 }
 
 #[cfg(target_os = "linux")]
