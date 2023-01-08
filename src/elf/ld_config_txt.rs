@@ -273,15 +273,6 @@ pub fn get_ld_config_path<P: AsRef<Path>>(
     None
 }
 
-pub fn get_target_sdk_version() -> Result<i64, &'static str> {
-    if let Ok(version_str) = get_release_str() {
-        if let Ok(value) = version_str.parse::<i64>() {
-            return Ok(value);
-        }
-    }
-    Err("error getting ABI version")
-}
-
 pub fn read_version_file<P: AsRef<Path>>(binary: &P) -> Result<i64, &'static str> {
     if let Some(parent) = binary.as_ref().parent() {
         if let Ok(version_str) = std::fs::read_to_string(parent.join(".version")) {
@@ -300,6 +291,13 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>, S: AsRef<str>>(
     e_machine: u16,
     ei_class: u8,
 ) -> Result<LdCache, &'static str> {
+    let is_asan = is_asan(interp);
+    let release = get_release().map_err(|_| "invalid android release")?;
+
+    if is_asan && matches!(release, AndroidRelease::AndroidR26) {
+        return Err("asan not supported");
+    }
+
     let mut lines = match read_lines(filename) {
         Ok(lines) => lines,
         Err(_e) => return Err("Could not open the filename"),
@@ -329,11 +327,11 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>, S: AsRef<str>>(
     }
 
     let target_sdk_version = if properties.get_bool("enable.target.sdk.version") {
-        read_version_file(binary)?
+        read_version_file(binary)?.to_string()
     } else {
-        get_target_sdk_version()?
+        release.to_string()
     };
-    properties.target_sdk_version = target_sdk_version.to_string();
+    properties.target_sdk_version = target_sdk_version;
 
     let mut ldcache = LdCache::new();
 
@@ -349,8 +347,6 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>, S: AsRef<str>>(
     // is within the ldcache.  To accomplish a different set with only ldcache
     // keys is used.
     let ns_configs_set = ldcache.config_set();
-
-    let is_asan = is_asan(interp);
 
     for (_, ns) in ldcache.namespaces_config.iter_mut() {
         let mut property_name_prefix = format!("namespace.{}", ns.name);

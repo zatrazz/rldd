@@ -1,6 +1,7 @@
 use object::elf::*;
 use std::ffi::CString;
 use std::io::{Error, ErrorKind};
+use std::fmt;
 
 use crate::pathutils;
 
@@ -14,6 +15,23 @@ pub enum AndroidRelease {
     AndroidR32 = 32, // 12.1
     AndroidR33 = 33, // 13
     AndroidR34 = 34, // 14
+}
+
+impl fmt::Display for AndroidRelease {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        match &self {
+            AndroidRelease::AndroidR26 => fmt.write_str("26")?,
+            AndroidRelease::AndroidR27 => fmt.write_str("27")?,
+            AndroidRelease::AndroidR28 => fmt.write_str("28")?,
+            AndroidRelease::AndroidR29 => fmt.write_str("29")?,
+            AndroidRelease::AndroidR30 => fmt.write_str("30")?,
+            AndroidRelease::AndroidR31 => fmt.write_str("31")?,
+            AndroidRelease::AndroidR32 => fmt.write_str("32")?,
+            AndroidRelease::AndroidR33 => fmt.write_str("33")?,
+            AndroidRelease::AndroidR34 => fmt.write_str("34")?,
+        };
+        Ok(())
+    }
 }
 
 const PROP_VALUE_MAX: usize = 92;
