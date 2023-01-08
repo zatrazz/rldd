@@ -833,8 +833,10 @@ fn resolve_dependency_1<'a>(
     }
 
     // Check the loader cache.
-    if let Some(dep) = resolve_dependency_ld_cache(dtneeded, config, elc) {
-        return Some(dep);
+    if let Some(ld_cache) = config.ld_cache {
+        if let Some(dep) = resolve_dependency_ld_cache(dtneeded, ld_cache, config.platform, elc) {
+            return Some(dep);
+        }
     }
 
     // Finally the system directories.
@@ -855,21 +857,18 @@ fn resolve_dependency_1<'a>(
 #[cfg(target_os = "linux")]
 fn resolve_dependency_ld_cache<'a>(
     dtneeded: &'a String,
-    config: &'a Config,
+    ld_cache: &'a LoaderCache,
+    platform: Option<&String>,
     elc: &'a ElfInfo,
 ) -> Option<ResolvedDependency<'a>> {
-    if let Some(ld_cache) = config.ld_cache {
-        if let Some(path) = ld_cache.get(dtneeded) {
-            let pathbuf = Path::new(&path);
-            if let Ok(elc) =
-                open_elf_file(&pathbuf, Some(elc), Some(dtneeded), config.platform, false)
-            {
-                return Some(ResolvedDependency {
-                    elc: elc,
-                    path: &path,
-                    mode: DepMode::LdCache,
-                });
-            }
+    if let Some(path) = ld_cache.get(dtneeded) {
+        let pathbuf = Path::new(&path);
+        if let Ok(elc) = open_elf_file(&pathbuf, Some(elc), Some(dtneeded), platform, false) {
+            return Some(ResolvedDependency {
+                elc: elc,
+                path: path,
+                mode: DepMode::LdCache,
+            });
         }
     }
     None
@@ -878,9 +877,51 @@ fn resolve_dependency_ld_cache<'a>(
 #[cfg(target_os = "android")]
 fn resolve_dependency_ld_cache<'a>(
     dtneeded: &'a String,
-    config: &'a Config,
+    ld_cache: &'a LoaderCache,
+    platform: Option<&String>,
     elc: &'a ElfInfo,
 ) -> Option<ResolvedDependency<'a>> {
+    // The constraint function is used to instruct the compiler with a higher-ranked trait
+    // bounds (for <...>) that the closure must return a reference of the same lifetime as
+    // the argument.  Otherwise it complains that the closure arguments has a different
+    // lifetime than result.
+    fn constraint<F>(f: F) -> F
+    where
+        F: for<'a> Fn(&'a ld_config_txt::NamespaceConfig) -> Option<ResolvedDependency<'a>>,
+    {
+        f
+    }
+
+    let search_namespace = constraint(|namespace: &ld_config_txt::NamespaceConfig| {
+        for searchpath in &namespace.search_paths {
+            let path = Path::new(&searchpath.path).join(dtneeded);
+            if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), platform, false) {
+                return Some(ResolvedDependency {
+                    elc: elc,
+                    path: &searchpath.path,
+                    mode: DepMode::LdCache,
+                });
+            }
+        }
+        None
+    });
+
+    // First check the default namespace and then the linked namespaces for the default one.
+    // For latter, do not follow further linked namespaces.
+    if let Some(default_ns) = ld_cache.get_default_namespace() {
+        if let Some(resolved) = search_namespace(default_ns) {
+            return Some(resolved);
+        }
+
+        for linked_ns in &default_ns.namespaces {
+            if let Some(namespace) = ld_cache.get_namespace(&linked_ns.name) {
+                if let Some(resolved) = search_namespace(namespace) {
+                    return Some(resolved);
+                }
+            }
+        }
+    }
+
     None
 }
 
@@ -890,20 +931,18 @@ fn resolve_dependency_ld_cache<'a>(
 ))]
 fn resolve_dependency_ld_cache<'a>(
     dtneeded: &'a String,
-    config: &'a Config,
+    ld_cache: &'a LoaderCache,
+    platform: Option<&String>,
     elc: &'a ElfInfo,
 ) -> Option<ResolvedDependency<'a>> {
-    if let Some(ld_so_conf) = config.ld_cache {
-        for searchpath in ld_so_conf {
-            let path = Path::new(&searchpath.path).join(dtneeded);
-            if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false)
-            {
-                return Some(ResolvedDependency {
-                    elc: elc,
-                    path: &searchpath.path,
-                    mode: DepMode::LdCache,
-                });
-            }
+    for searchpath in ld_cache {
+        let path = Path::new(&searchpath.path).join(dtneeded);
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), platform, false) {
+            return Some(ResolvedDependency {
+                elc: elc,
+                path: &searchpath.path,
+                mode: DepMode::LdCache,
+            });
         }
     }
     None

@@ -5,12 +5,11 @@ use std::io::{self, BufRead};
 use std::path::Path;
 
 use crate::elf::android::*;
-use crate::pathutils;
 use crate::search_path;
 
 #[derive(Debug)]
 pub struct NamespaceLinkingConfig {
-    name: String,
+    pub name: String,
     shared_libs: String,
     allow_all: bool,
 }
@@ -21,10 +20,10 @@ pub struct NamespaceConfig {
     name: String,
     isolated: bool,
     visible: bool,
-    search_paths: search_path::SearchPathVec,
+    pub search_paths: search_path::SearchPathVec,
     permitted: search_path::SearchPathVec,
     allowed_libs: Vec<String>,
-    namespaces: NamespaceLinkingConfigVec,
+    pub namespaces: NamespaceLinkingConfigVec,
 }
 
 pub trait NamespaceConfigTrait {
@@ -50,6 +49,10 @@ impl LdCache {
 
     pub fn get_default_namespace(&self) -> Option<&NamespaceConfig> {
         self.namespaces_config.get(DEFAULT_NAME_CONFIG)
+    }
+
+    pub fn get_namespace<S: AsRef<str>>(&self, name: S) -> Option<&NamespaceConfig> {
+        self.namespaces_config.get(name.as_ref())
     }
 
     fn config_set(&self) -> HashSet<String> {
@@ -435,8 +438,7 @@ fn find_initial_section<P: AsRef<Path>>(
                 }
 
                 if let Ok(resolved) = std::fs::canonicalize(value) {
-                    if pathutils::file_is_under_dir(binary, &resolved) {
-                        //  Skip the "dir."
+                    if binary.as_ref().starts_with(resolved) {
                         return Ok(name[4..].to_string());
                     }
                 }
