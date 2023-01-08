@@ -580,9 +580,25 @@ pub fn resolve_binary(
     // We need a new vector for the case of binaries with different interpreters.
     preload.extend(load_ld_so_preload(&elc.interp));
 
-    let system_dirs = match system_dirs::get_system_dirs(&elc.interp, elc.e_machine, elc.ei_class) {
-        Some(r) => r,
-        None => return Err(Error::new(ErrorKind::Other, "Invalid ELF architcture")),
+    // android loader only uses the default system search patch if the ld.so.config file can not
+    // be loader or if an error was found parsing it (for instance if the executable does not
+    // has an entry associated in the section).
+    #[cfg(target_os = "android")]
+    fn load_system_dirs(ld_cache: &Option<LoaderCache>) -> bool {
+        ld_cache.is_none()
+    }
+    #[cfg(not(target_os = "android"))]
+    fn load_system_dirs(_ld_cache: &Option<LoaderCache>) -> bool {
+        true
+    }
+
+    let system_dirs = if load_system_dirs(&*ld_cache) {
+        match system_dirs::get_system_dirs(&elc.interp, elc.e_machine, elc.ei_class) {
+            Some(r) => r,
+            None => return Err(Error::new(ErrorKind::Other, "Invalid ELF architcture")),
+        }
+    } else {
+        search_path::SearchPathVec::new()
     };
 
     let config = Config {
