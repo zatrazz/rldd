@@ -26,10 +26,6 @@ pub struct NamespaceConfig {
     pub namespaces: NamespaceLinkingConfigVec,
 }
 
-pub trait NamespaceConfigTrait {
-    fn push_namespace(&mut self, name: &str) -> &Self;
-}
-
 const DEFAULT_NAME_CONFIG: &str = "default";
 
 pub type LdCacheNs = HashMap<String, NamespaceConfig>;
@@ -58,9 +54,7 @@ impl LdCache {
     fn config_set(&self) -> HashSet<String> {
         self.namespaces_config.keys().cloned().collect()
     }
-}
 
-impl NamespaceConfigTrait for LdCache {
     fn push_namespace(&mut self, name: &str) -> &Self {
         self.namespaces_config.insert(
             name.to_string(),
