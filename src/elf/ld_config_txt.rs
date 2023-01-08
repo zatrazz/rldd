@@ -7,39 +7,48 @@ use std::path::Path;
 use crate::elf::android::*;
 use crate::search_path;
 
-#[derive(Debug)]
-pub struct NamespaceLinkingConfig {
-    pub name: String,
-    shared_libs: String,
-    allow_all: bool,
-}
-pub type NamespaceLinkingConfigVec = Vec<NamespaceLinkingConfig>;
+pub type NamespaceLinkingConfigVec = Vec<String>;
 
 #[derive(Debug)]
 pub struct NamespaceConfig {
     name: String,
     isolated: bool,
     visible: bool,
-    pub search_paths: search_path::SearchPathVec,
-    permitted: search_path::SearchPathVec,
     allowed_libs: Vec<String>,
+    pub search_paths: search_path::SearchPathVec,
     pub namespaces: NamespaceLinkingConfigVec,
+}
+
+impl NamespaceConfig {
+    pub fn is_accessible<S: AsRef<str>>(&self, file: S) -> bool {
+        if !self.isolated {
+            return true;
+        }
+
+        if !self.allowed_libs.is_empty() && !self.allowed_libs.contains(&file.as_ref().to_string())
+        {
+            return false;
+        }
+
+        // The resolve_dependency_ld_cache will check the search_path and fail if it is not
+        // found.
+        true
+    }
 }
 
 const DEFAULT_NAME_CONFIG: &str = "default";
 
 pub type LdCacheNs = HashMap<String, NamespaceConfig>;
 
+#[derive(Debug)]
 pub struct LdCache {
     namespaces_config: LdCacheNs,
-    target_sdk_version: i64,
 }
 
 impl LdCache {
-    fn new(target_sdk_version: i64) -> LdCache {
+    fn new() -> LdCache {
         LdCache {
             namespaces_config: LdCacheNs::new(),
-            target_sdk_version: target_sdk_version,
         }
     }
 
@@ -48,7 +57,12 @@ impl LdCache {
     }
 
     pub fn get_namespace<S: AsRef<str>>(&self, name: S) -> Option<&NamespaceConfig> {
-        self.namespaces_config.get(name.as_ref())
+        if let Some(namespace) = self.namespaces_config.get(name.as_ref()) {
+            if namespace.visible {
+                return Some(namespace);
+            }
+        }
+        None
     }
 
     fn config_set(&self) -> HashSet<String> {
@@ -63,7 +77,6 @@ impl LdCache {
                 isolated: false,
                 visible: false,
                 search_paths: search_path::SearchPathVec::new(),
-                permitted: search_path::SearchPathVec::new(),
                 allowed_libs: Vec::<String>::new(),
                 namespaces: NamespaceLinkingConfigVec::new(),
             },
@@ -322,7 +335,7 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>, S: AsRef<str>>(
     };
     properties.target_sdk_version = target_sdk_version.to_string();
 
-    let mut ldcache = LdCache::new(target_sdk_version);
+    let mut ldcache = LdCache::new();
 
     ldcache.push_namespace(DEFAULT_NAME_CONFIG);
 
@@ -366,11 +379,7 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>, S: AsRef<str>>(
                     return Err("both shared_libs and allow_all_shared_libs are set.");
                 }
 
-                ns.namespaces.push(NamespaceLinkingConfig {
-                    name: ns_linked.to_string(),
-                    shared_libs: shared_libs,
-                    allow_all: allow_all,
-                });
+                ns.namespaces.push(ns_linked.to_string());
             }
         }
 
@@ -404,11 +413,7 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>, S: AsRef<str>>(
             ei_class,
         );
 
-        ns.permitted = properties.get_paths(
-            format!("{}.permitted.paths", property_name_prefix),
-            e_machine,
-            ei_class,
-        );
+        // Skip the permitted.paths, since it is not required for program loading.
     }
 
     Ok(ldcache)
@@ -620,16 +625,8 @@ mod tests {
             true => vec![data.to_str().unwrap(), vendorlib.to_str().unwrap()],
             false => vec![vendorlib.to_str().unwrap()],
         };
-        let expected_default_permitted_paths = match &is_asan {
-            true => vec![data.to_str().unwrap(), vendor.to_str().unwrap()],
-            false => vec![vendorlib.to_str().unwrap()],
-        };
         let expected_system_search_paths = match &is_asan {
             true => vec![data.to_str().unwrap(), systemlib.to_str().unwrap()],
-            false => vec![systemlib.to_str().unwrap()],
-        };
-        let expected_system_permitted_paths = match &is_asan {
-            true => vec![data.to_str().unwrap(), system.to_str().unwrap()],
             false => vec![systemlib.to_str().unwrap()],
         };
         let expected_vndk_search_paths = match &is_asan {
@@ -639,10 +636,6 @@ mod tests {
         let expected_vndk_in_system_search_paths = match &is_asan {
             true => vec![],
             false => vec![systemlib.to_str().unwrap()],
-        };
-        let expected_vndk_in_system_permitted_paths = match &is_asan {
-            true => vec![],
-            false => vec![system.to_str().unwrap()],
         };
 
         match parse_ld_config_txt(&cfgpath, &binpath, interp, EM_386, ELFCLASS32) {
@@ -660,27 +653,10 @@ mod tests {
                 for (d, e) in zip(&default_ns.search_paths, &expected_default_search_paths) {
                     assert_eq!(d, e);
                 }
-                assert_eq!(
-                    default_ns.permitted.len(),
-                    expected_default_permitted_paths.len()
-                );
-                for (d, e) in zip(&default_ns.permitted, &expected_default_permitted_paths) {
-                    assert_eq!(d, e);
-                }
 
                 assert_eq!(default_ns.namespaces.len(), 2);
-                assert_eq!(default_ns.namespaces[0].name, "system");
-                assert_eq!(
-                    default_ns.namespaces[0].shared_libs,
-                    "libc.so:libm.so:libdl.so:libstdc++.so"
-                );
-                assert_eq!(default_ns.namespaces[0].allow_all, false);
-                assert_eq!(default_ns.namespaces[1].name, "vndk");
-                assert_eq!(
-                    default_ns.namespaces[1].shared_libs,
-                    "libcutils.so:libbase.so"
-                );
-                assert_eq!(default_ns.namespaces[1].allow_all, false);
+                assert_eq!(default_ns.namespaces[0], "system");
+                assert_eq!(default_ns.namespaces[1], "vndk");
 
                 assert_eq!(ldcache.namespaces_config.len(), 4);
 
@@ -695,13 +671,6 @@ mod tests {
                 for (d, e) in zip(&system_ns.search_paths, &expected_system_search_paths) {
                     assert_eq!(d, e);
                 }
-                assert_eq!(
-                    system_ns.permitted.len(),
-                    expected_system_permitted_paths.len()
-                );
-                for (d, e) in zip(&system_ns.permitted, &expected_system_permitted_paths) {
-                    assert_eq!(d, e);
-                }
 
                 let vndk_ns = ldcache.namespaces_config.get("vndk").unwrap();
                 assert_eq!(vndk_ns.name, "vndk");
@@ -711,10 +680,7 @@ mod tests {
                 for (d, e) in zip(&vndk_ns.search_paths, &expected_vndk_search_paths) {
                     assert_eq!(d, e);
                 }
-                assert_eq!(vndk_ns.permitted.len(), 0);
                 assert_eq!(vndk_ns.namespaces.len(), 1);
-                assert_eq!(vndk_ns.namespaces[0].name, "default");
-                assert_eq!(vndk_ns.namespaces[0].allow_all, true);
 
                 let vndk_ns_system = ldcache.namespaces_config.get("vndk_in_system").unwrap();
                 assert_eq!(vndk_ns_system.name, "vndk_in_system");
@@ -730,10 +696,6 @@ mod tests {
                 ) {
                     assert_eq!(d, e);
                 }
-                assert_eq!(
-                    vndk_ns_system.permitted.len(),
-                    expected_vndk_in_system_permitted_paths.len()
-                );
                 assert_eq!(
                     vndk_ns_system.allowed_libs,
                     vec!["libz.so", "libyuv.so", "libtinyxml2.so"]

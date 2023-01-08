@@ -930,7 +930,11 @@ fn resolve_dependency_ld_cache<'a>(
         }
 
         for linked_ns in &default_ns.namespaces {
-            if let Some(namespace) = ld_cache.get_namespace(&linked_ns.name) {
+            if let Some(namespace) = ld_cache.get_namespace(&linked_ns) {
+                if !namespace.is_accessible(dtneeded) {
+                    continue;
+                }
+
                 if let Some(resolved) = search_namespace(namespace) {
                     return Some(resolved);
                 }
