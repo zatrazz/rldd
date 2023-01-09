@@ -57,19 +57,14 @@ impl LdCache {
     }
 
     pub fn get_namespace<S: AsRef<str>>(&self, name: S) -> Option<&NamespaceConfig> {
-        if let Some(namespace) = self.namespaces_config.get(name.as_ref()) {
-            if namespace.visible {
-                return Some(namespace);
-            }
-        }
-        None
+        self.namespaces_config.get(name.as_ref())
     }
 
     fn config_set(&self) -> HashSet<String> {
         self.namespaces_config.keys().cloned().collect()
     }
 
-    fn push_namespace(&mut self, name: &str) -> &Self {
+    fn push_namespace(&mut self, name: &str) {
         self.namespaces_config.insert(
             name.to_string(),
             NamespaceConfig {
@@ -81,7 +76,6 @@ impl LdCache {
                 namespaces: NamespaceLinkingConfigVec::new(),
             },
         );
-        self
     }
 }
 
