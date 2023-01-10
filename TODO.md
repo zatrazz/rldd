@@ -23,3 +23,4 @@
 - [x] Linux: read /etc/ld.so.cache instead of parsing /etd/ld.so.conf.
 - [x] Implement DYLD_INSERT_LIBRARIES.
 - [x] Linux: add [glibc-hwcap support](https://sourceware.org/pipermail/libc-alpha/2020-June/115250.html), which affects symbol resolution paths fro x86_64, powerpc64, aarch64, and s390-64.
+- [x] Linux: add Android support.

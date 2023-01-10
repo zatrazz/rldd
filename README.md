@@ -1,8 +1,8 @@
 # rldd
 
-The rldd tool resolves and prints the binary or shared library dependencies with different visualization options.  Similar to the Linux ldd tool, it does not invoke the system loader but instead parses the loading information directly from either ELF or Mach-O files.
+The rldd tool resolves and prints the binary or shared library dependencies with different visualization options.  Similar to the Linux ldd tool, it does not invoke the system loader but instead parses the loading information directly from either ELF or Mach-O files, along with any required system files (such as loader cache or extra configuration files).
 
-Currently it supports Linux, FreeBSD, OpenBSD, NetBSD, Illumos (no support for crle/ld.config, trusted directories, or any environment variable), and macOS.
+Currently it supports Linux (glibc, android, and musl), FreeBSD, OpenBSD, NetBSD, Illumos (no support for crle/ld.config, trusted directories, or any environment variable), and macOS.
 
 ![screenshot](doc/screenshot.png)
 

@@ -1,4 +1,9 @@
-#[cfg(any(target_os = "linux", target_os = "illumos", target_os = "solaris"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "illumos",
+    target_os = "solaris",
+    target_os = "android"
+))]
 use object::elf::*;
 
 use crate::search_path;
@@ -34,7 +39,11 @@ pub fn get_slibdir(e_machine: u16, ei_class: u8) -> Option<&'static str> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn get_system_dirs(e_machine: u16, ei_class: u8) -> Option<search_path::SearchPathVec> {
+pub fn get_system_dirs(
+    _interp: &Option<String>,
+    e_machine: u16,
+    ei_class: u8,
+) -> Option<search_path::SearchPathVec> {
     let path = get_slibdir(e_machine, ei_class)?;
     Some(vec![
         search_path::SearchPath {
@@ -53,8 +62,107 @@ pub fn get_system_dirs(e_machine: u16, ei_class: u8) -> Option<search_path::Sear
     ])
 }
 
+#[cfg(target_os = "android")]
+pub fn get_system_dirs(
+    interp: &Option<String>,
+    e_machine: u16,
+    ei_class: u8,
+) -> Option<search_path::SearchPathVec> {
+    use crate::elf::android;
+
+    pub fn get_system_dirs_xx(suffix: &str, is_asan: bool) -> Option<search_path::SearchPathVec> {
+        let release = match android::get_release() {
+            Ok(release) => release,
+            Err(_) => return None,
+        };
+
+        let add_odm = match release {
+            android::AndroidRelease::AndroidR28
+            | android::AndroidRelease::AndroidR29
+            | android::AndroidRelease::AndroidR30
+            | android::AndroidRelease::AndroidR31
+            | android::AndroidRelease::AndroidR32
+            | android::AndroidRelease::AndroidR33 => true,
+            _ => false,
+        };
+
+        let mut r = search_path::SearchPathVec::new();
+        if is_asan {
+            let path = match release {
+                android::AndroidRelease::AndroidR24 | android::AndroidRelease::AndroidR25 => {
+                    format!("/data/lib{}", suffix)
+                }
+                _ => format!("/data/asan/system/lib{}", suffix),
+            };
+            r.push(search_path::SearchPath {
+                path: path,
+                dev: 0,
+                ino: 0,
+            });
+        }
+        r.push(search_path::SearchPath {
+            path: format!("/system/lib{}", suffix),
+            dev: 0,
+            ino: 0,
+        });
+        if is_asan && add_odm {
+            r.push(search_path::SearchPath {
+                path: format!("/data/asan/odm/lib{}", suffix),
+                dev: 0,
+                ino: 0,
+            });
+        }
+        if add_odm {
+            r.push(search_path::SearchPath {
+                path: format!("/odm/lib{}", suffix),
+                dev: 0,
+                ino: 0,
+            });
+        }
+        if is_asan {
+            let path = match release {
+                android::AndroidRelease::AndroidR24 | android::AndroidRelease::AndroidR25 => {
+                    format!("/vendor/lib{}", suffix)
+                }
+                _ => format!("/data/asan/vendor/lib{}", suffix),
+            };
+            r.push(search_path::SearchPath {
+                path: path,
+                dev: 0,
+                ino: 0,
+            });
+        }
+        r.push(search_path::SearchPath {
+            path: format!("/vendor/lib{}", suffix),
+            dev: 0,
+            ino: 0,
+        });
+        Some(r)
+    }
+
+    if let Some(interp) = interp {
+        let is_asan = android::is_asan(interp);
+
+        return match e_machine {
+            EM_AARCH64 | EM_X86_64 => get_system_dirs_xx("64", is_asan),
+            EM_ARM | EM_386 => get_system_dirs_xx("", is_asan),
+            EM_MIPS => match ei_class {
+                ELFCLASS64 => get_system_dirs_xx("64", is_asan),
+                ELFCLASS32 => get_system_dirs_xx("", is_asan),
+                _ => None,
+            },
+            _ => None,
+        };
+    };
+    None
+}
+
 #[cfg(target_os = "freebsd")]
-pub fn get_system_dirs(_e_machine: u16, _ei_class: u8) -> Option<search_path::SearchPathVec> {
+pub fn get_system_dirs(
+    _interp: &Option<String>,
+    _e_machine: u16,
+    _ei_class: u8,
+) -> Option<search_path::SearchPathVec> {
     Some(vec![search_path::SearchPath {
         path: "/lib".to_string(),
         dev: 0,
@@ -63,7 +171,11 @@ pub fn get_system_dirs(_e_machine: u16, _ei_class: u8) -> Option<search_path::Se
 }
 
 #[cfg(any(target_os = "openbsd", target_os = "netbsd"))]
-pub fn get_system_dirs(_e_machine: u16, _ei_class: u8) -> Option<search_path::SearchPathVec> {
+pub fn get_system_dirs(
+    _interp: &Option<String>,
+    _e_machine: u16,
+    _ei_class: u8,
+) -> Option<search_path::SearchPathVec> {
     Some(vec![search_path::SearchPath {
         path: "/usr/lib".to_string(),
         dev: 0,
@@ -72,7 +184,11 @@ pub fn get_system_dirs(_e_machine: u16, _ei_class: u8) -> Option<search_path::Se
 }
 
 #[cfg(any(target_os = "illumos", target_os = "solaris"))]
-pub fn get_system_dirs(e_machine: u16, _ei_class: u8) -> Option<search_path::SearchPathVec> {
+pub fn get_system_dirs(
+    _interp: &Option<String>,
+    e_machine: u16,
+    _ei_class: u8,
+) -> Option<search_path::SearchPathVec> {
     match e_machine {
         EM_386 => Some(vec![
             search_path::SearchPath {

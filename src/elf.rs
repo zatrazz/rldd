@@ -14,8 +14,12 @@ use crate::search_path;
 
 mod system_dirs;
 
+#[cfg(target_os = "android")]
+mod android;
 #[cfg(target_os = "linux")]
 mod interp;
+#[cfg(target_os = "android")]
+mod ld_config_txt;
 #[cfg(target_os = "freebsd")]
 mod ld_hints_freebsd;
 #[cfg(target_os = "openbsd")]
@@ -29,7 +33,12 @@ mod ld_so_conf_netbsd;
 
 #[cfg(target_os = "linux")]
 type LoaderCache = ld_so_cache::LdCache;
-#[cfg(all(target_family = "unix", not(target_os = "linux")))]
+#[cfg(target_os = "android")]
+type LoaderCache = ld_config_txt::LdCache;
+#[cfg(all(
+    target_family = "unix",
+    not(any(target_os = "linux", target_os = "android"))
+))]
 type LoaderCache = search_path::SearchPathVec;
 
 type DepsVec = Vec<String>;
@@ -446,7 +455,7 @@ fn match_elf_name(melc: &ElfInfo, dtneeded: Option<&String>, elc: &ElfInfo) -> b
     true
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn check_elf_header(elc: &ElfInfo) -> bool {
     // TODO: ARM also accepts ELFOSABI_SYSV
     elc.ei_osabi == ELFOSABI_SYSV || elc.ei_osabi == ELFOSABI_GNU
@@ -522,16 +531,14 @@ fn resolve_binary_arch(elc: &ElfInfo, deptree: &mut DepTree, depp: usize) {
 #[cfg(all(target_family = "unix", not(target_os = "linux")))]
 fn resolve_binary_arch(_elc: &ElfInfo, _deptree: &mut DepTree, _depp: usize) {}
 
-pub type ElfCtx = Option<LoaderCache>;
-
 // The loader search cache is lazy loaded if the binary has a loader that actually
 // supports it.
-pub fn create_context() -> ElfCtx {
+pub fn create_context() -> Option<LoaderCache> {
     None
 }
 
 pub fn resolve_binary(
-    ld_cache: &mut ElfCtx,
+    ld_cache: &mut Option<LoaderCache>,
     ld_preload: &search_path::SearchPathVec,
     ld_library_path: &search_path::SearchPathVec,
     platform: &Option<String>,
@@ -566,18 +573,32 @@ pub fn resolve_binary(
         }
     };
 
-    if ld_cache.is_none() {
-        *ld_cache = load_so_cache(&elc);
-    }
+    load_so_cache(ld_cache, &filename, &elc);
 
     let mut preload = ld_preload.to_vec();
     // glibc first parses LD_PRELOAD and then ld.so.preload.
     // We need a new vector for the case of binaries with different interpreters.
     preload.extend(load_ld_so_preload(&elc.interp));
 
-    let system_dirs = match system_dirs::get_system_dirs(elc.e_machine, elc.ei_class) {
-        Some(r) => r,
-        None => return Err(Error::new(ErrorKind::Other, "Invalid ELF architcture")),
+    // android loader only uses the default system search patch if the ld.so.config file can not
+    // be loader or if an error was found parsing it (for instance if the executable does not
+    // has an entry associated in the section).
+    #[cfg(target_os = "android")]
+    fn load_system_dirs(ld_cache: &Option<LoaderCache>) -> bool {
+        ld_cache.is_none()
+    }
+    #[cfg(not(target_os = "android"))]
+    fn load_system_dirs(_ld_cache: &Option<LoaderCache>) -> bool {
+        true
+    }
+
+    let system_dirs = if load_system_dirs(&*ld_cache) {
+        match system_dirs::get_system_dirs(&elc.interp, elc.e_machine, elc.ei_class) {
+            Some(r) => r,
+            None => return Err(Error::new(ErrorKind::Other, "could not get the default system dirs")),
+        }
+    } else {
+        search_path::SearchPathVec::new()
     };
 
     let config = Config {
@@ -612,35 +633,59 @@ pub fn resolve_binary(
 }
 
 #[cfg(target_os = "linux")]
-fn load_so_cache(elc: &ElfInfo) -> Option<ld_so_cache::LdCache> {
+fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, _binary: &P, elc: &ElfInfo) {
     if interp::is_glibc(&elc.interp) {
-        match ld_so_cache::parse_ld_so_cache(
-            &Path::new("/etc/ld.so.cache"),
-            elc.ei_class,
-            elc.e_machine,
-            elc.e_flags,
-        ) {
-            Ok(cache) => return Some(cache),
-            Err(e) => eprintln!("error: load_so_cache: {}", e),
+        // glibc's ld.so.cache is shared between all executables, so there is no need
+        // to reload for multiple entries.
+        if ld_cache.is_none() {
+            *ld_cache = ld_so_cache::parse_ld_so_cache(
+                &Path::new("/etc/ld.so.cache"),
+                elc.ei_class,
+                elc.e_machine,
+                elc.e_flags,
+            )
+            .ok();
         }
     };
-    None
+}
+#[cfg(target_os = "android")]
+fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, binary: &P, elc: &ElfInfo) {
+    if let Some(ld_config_path) =
+        ld_config_txt::get_ld_config_path(binary, elc.e_machine, elc.ei_data)
+    {
+        // On Android 10 and forward each executable might have a associated ld.config.txt
+        // file in different paths, so we need to reload for each argument.
+        *ld_cache = ld_config_txt::parse_ld_config_txt(
+            &Path::new(&ld_config_path),
+            binary,
+            &elc.interp.as_ref().unwrap(),
+            elc.e_machine,
+            elc.ei_data,
+        )
+        .ok();
+    }
 }
 #[cfg(target_os = "freebsd")]
-fn load_so_cache(_elc: &ElfInfo) -> Option<LoaderCache> {
-    ld_hints_freebsd::parse_ld_so_hints(&Path::new("/var/run/ld-elf.so.hints")).ok()
+fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, _binary: &P, _elc: &ElfInfo) {
+    if ld_cache.is_none() {
+        *ld_cache =
+            ld_hints_freebsd::parse_ld_so_hints(&Path::new("/var/run/ld-elf.so.hints")).ok();
+    }
 }
 #[cfg(target_os = "openbsd")]
-fn load_so_cache(_ecl: &ElfInfo) -> Option<LoaderCache> {
-    ld_hints_openbsd::parse_ld_so_hints(&Path::new("/var/run/ld.so.hints")).ok()
+fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, _binary: &P, _ecl: &ElfInfo) {
+    if ld_cache.is_none() {
+        *ld_cache = ld_hints_openbsd::parse_ld_so_hints(&Path::new("/var/run/ld.so.hints")).ok()
+    }
 }
 #[cfg(target_os = "netbsd")]
-fn load_so_cache(_ecl: &ElfInfo) -> Option<LoaderCache> {
-    ld_so_conf_netbsd::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")).ok()
+fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, _binary: &P, _ecl: &ElfInfo) {
+    if ld_cache.is_none() {
+        *ld_cache = ld_so_conf_netbsd::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")).ok()
+    }
 }
 #[cfg(any(target_os = "illumos", target_os = "solaris"))]
-fn load_so_cache(_ecl: &ElfInfo) -> Option<LoaderCache> {
-    None
+fn load_so_cache<P: AsRef<Path>>(_ld_cache: &mut Option<LoaderCache>, _binary: &P, _ecl: &ElfInfo) {
 }
 
 #[cfg(target_os = "linux")]
@@ -804,8 +849,10 @@ fn resolve_dependency_1<'a>(
     }
 
     // Check the loader cache.
-    if let Some(dep) = resolve_dependency_ld_cache(dtneeded, config, elc) {
-        return Some(dep);
+    if let Some(ld_cache) = config.ld_cache {
+        if let Some(dep) = resolve_dependency_ld_cache(dtneeded, ld_cache, config.platform, elc) {
+            return Some(dep);
+        }
     }
 
     // Finally the system directories.
@@ -826,43 +873,96 @@ fn resolve_dependency_1<'a>(
 #[cfg(target_os = "linux")]
 fn resolve_dependency_ld_cache<'a>(
     dtneeded: &'a String,
-    config: &'a Config,
+    ld_cache: &'a LoaderCache,
+    platform: Option<&String>,
     elc: &'a ElfInfo,
 ) -> Option<ResolvedDependency<'a>> {
-    if let Some(ld_cache) = config.ld_cache {
-        if let Some(path) = ld_cache.get(dtneeded) {
-            let pathbuf = Path::new(&path);
-            if let Ok(elc) =
-                open_elf_file(&pathbuf, Some(elc), Some(dtneeded), config.platform, false)
-            {
-                return Some(ResolvedDependency {
-                    elc: elc,
-                    path: &path,
-                    mode: DepMode::LdCache,
-                });
-            }
+    if let Some(path) = ld_cache.get(dtneeded) {
+        let pathbuf = Path::new(&path);
+        if let Ok(elc) = open_elf_file(&pathbuf, Some(elc), Some(dtneeded), platform, false) {
+            return Some(ResolvedDependency {
+                elc: elc,
+                path: path,
+                mode: DepMode::LdCache,
+            });
         }
     }
     None
 }
 
-#[cfg(all(target_family = "unix", not(target_os = "linux")))]
+#[cfg(target_os = "android")]
 fn resolve_dependency_ld_cache<'a>(
     dtneeded: &'a String,
-    config: &'a Config,
+    ld_cache: &'a LoaderCache,
+    platform: Option<&String>,
     elc: &'a ElfInfo,
 ) -> Option<ResolvedDependency<'a>> {
-    if let Some(ld_so_conf) = config.ld_cache {
-        for searchpath in ld_so_conf {
+    // The constraint function is used to instruct the compiler with a higher-ranked trait
+    // bounds (for <...>) that the closure must return a reference of the same lifetime as
+    // the argument.  Otherwise it complains that the closure arguments has a different
+    // lifetime than result.
+    fn constraint<F>(f: F) -> F
+    where
+        F: for<'a> Fn(&'a ld_config_txt::NamespaceConfig) -> Option<ResolvedDependency<'a>>,
+    {
+        f
+    }
+
+    let search_namespace = constraint(|namespace: &ld_config_txt::NamespaceConfig| {
+        for searchpath in &namespace.search_paths {
             let path = Path::new(&searchpath.path).join(dtneeded);
-            if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false)
-            {
+            if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), platform, false) {
                 return Some(ResolvedDependency {
                     elc: elc,
                     path: &searchpath.path,
                     mode: DepMode::LdCache,
                 });
             }
+        }
+        None
+    });
+
+    // First check the default namespace and then the linked namespaces for the default one.
+    // For latter, do not follow further linked namespaces.
+    if let Some(default_ns) = ld_cache.get_default_namespace() {
+        if let Some(resolved) = search_namespace(default_ns) {
+            return Some(resolved);
+        }
+
+        for linked_ns in &default_ns.namespaces {
+            if let Some(namespace) = ld_cache.get_namespace(&linked_ns) {
+                if !namespace.is_accessible(dtneeded) {
+                    continue;
+                }
+
+                if let Some(resolved) = search_namespace(namespace) {
+                    return Some(resolved);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(all(
+    target_family = "unix",
+    not(any(target_os = "linux", target_os = "android"))
+))]
+fn resolve_dependency_ld_cache<'a>(
+    dtneeded: &'a String,
+    ld_cache: &'a LoaderCache,
+    platform: Option<&String>,
+    elc: &'a ElfInfo,
+) -> Option<ResolvedDependency<'a>> {
+    for searchpath in ld_cache {
+        let path = Path::new(&searchpath.path).join(dtneeded);
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), platform, false) {
+            return Some(ResolvedDependency {
+                elc: elc,
+                path: &searchpath.path,
+                mode: DepMode::LdCache,
+            });
         }
     }
     None
