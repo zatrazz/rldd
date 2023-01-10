@@ -237,6 +237,9 @@ pub fn get_ld_config_path<P: AsRef<Path>>(
 
     if let Ok(release) = get_release() {
         return match release {
+            // Android 7.0/7.1 does not support ld.config.txt.
+            AndroidRelease::AndroidR24 | AndroidRelease::AndroidR25 => None,
+
             // Android 8.0/8.1 has the ld.config.txt hardcoded.
             AndroidRelease::AndroidR26 | AndroidRelease::AndroidR27 => get_default_ld_config_path(),
 

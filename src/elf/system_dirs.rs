@@ -71,7 +71,12 @@ pub fn get_system_dirs(
     use crate::elf::android;
 
     pub fn get_system_dirs_xx(suffix: &str, is_asan: bool) -> Option<search_path::SearchPathVec> {
-        let add_odm = match android::get_release().unwrap() {
+        let release = match android::get_release() {
+            Ok(release) => release,
+            Err(_) => return None,
+        };
+
+        let add_odm = match release {
             android::AndroidRelease::AndroidR28
             | android::AndroidRelease::AndroidR29
             | android::AndroidRelease::AndroidR30
@@ -83,8 +88,14 @@ pub fn get_system_dirs(
 
         let mut r = search_path::SearchPathVec::new();
         if is_asan {
+            let path = match release {
+                android::AndroidRelease::AndroidR24 | android::AndroidRelease::AndroidR25 => {
+                    format!("/data/lib{}", suffix)
+                }
+                _ => format!("/data/asan/system/lib{}", suffix),
+            };
             r.push(search_path::SearchPath {
-                path: format!("/data/asan/system/lib{}", suffix),
+                path: path,
                 dev: 0,
                 ino: 0,
             });
@@ -109,8 +120,14 @@ pub fn get_system_dirs(
             });
         }
         if is_asan {
+            let path = match release {
+                android::AndroidRelease::AndroidR24 | android::AndroidRelease::AndroidR25 => {
+                    format!("/vendor/lib{}", suffix)
+                }
+                _ => format!("/data/asan/vendor/lib{}", suffix),
+            };
             r.push(search_path::SearchPath {
-                path: format!("/data/asan/vendor/lib{}", suffix),
+                path: path,
                 dev: 0,
                 ino: 0,
             });

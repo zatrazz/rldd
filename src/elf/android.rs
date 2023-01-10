@@ -1,11 +1,13 @@
 use object::elf::*;
 use std::ffi::CString;
-use std::io::{Error, ErrorKind};
 use std::fmt;
+use std::io::{Error, ErrorKind};
 
 use crate::pathutils;
 
 pub enum AndroidRelease {
+    AndroidR24 = 24, // 7.0
+    AndroidR25 = 25, // 7.1
     AndroidR26 = 26, // 8.0
     AndroidR27 = 27, // 8.1
     AndroidR28 = 28, // 9.0
@@ -20,6 +22,8 @@ pub enum AndroidRelease {
 impl fmt::Display for AndroidRelease {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         match &self {
+            AndroidRelease::AndroidR24 => fmt.write_str("24")?,
+            AndroidRelease::AndroidR25 => fmt.write_str("25")?,
             AndroidRelease::AndroidR26 => fmt.write_str("26")?,
             AndroidRelease::AndroidR27 => fmt.write_str("27")?,
             AndroidRelease::AndroidR28 => fmt.write_str("28")?,
@@ -64,6 +68,8 @@ pub fn get_release_str() -> Result<String, std::io::Error> {
 
 pub fn get_release() -> Result<AndroidRelease, std::io::Error> {
     match get_release_str()?.as_str() {
+        "24" => Ok(AndroidRelease::AndroidR24),
+        "25" => Ok(AndroidRelease::AndroidR25),
         "26" => Ok(AndroidRelease::AndroidR26),
         "27" => Ok(AndroidRelease::AndroidR27),
         "28" => Ok(AndroidRelease::AndroidR28),
