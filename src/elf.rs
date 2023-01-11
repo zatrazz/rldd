@@ -595,7 +595,12 @@ pub fn resolve_binary(
     let system_dirs = if load_system_dirs(&*ld_cache) {
         match system_dirs::get_system_dirs(&elc.interp, elc.e_machine, elc.ei_class) {
             Some(r) => r,
-            None => return Err(Error::new(ErrorKind::Other, "could not get the default system dirs")),
+            None => {
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    "could not get the default system dirs",
+                ))
+            }
         }
     } else {
         search_path::SearchPathVec::new()
