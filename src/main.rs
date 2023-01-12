@@ -113,6 +113,15 @@ fn main() {
 
     let mut ctx = create_context();
 
+    if opts.args.len() == 0 {
+        println!(
+            "{progname}: missing file arguments\n\
+            Try `{progname} --help' for more information.",
+            progname = env!("CARGO_PKG_NAME")
+        );
+        std::process::exit(0);
+    };
+
     for arg in opts.args {
         match resolve_binary(
             &mut ctx,
