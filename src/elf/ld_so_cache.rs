@@ -241,6 +241,10 @@ fn parse_ld_so_cache_old<R: Read + Seek>(
         return parse_ld_so_cache_new(reader, offset, ei_class, e_machine, e_flags);
     }
 
+    if hdr.magic != CACHEMAGIC.as_bytes() {
+        return Err(Error::new(ErrorKind::Other, "Invalid magic"));
+    }
+
     // The new string format starts at a different position than the newer one.
     let cache_off = CACHE_FILE_LEN as u32 + hdr.nlibs * FILE_ENTRY_LEN as u32;
 
@@ -284,13 +288,13 @@ fn parse_ld_so_cache_new<R: Read + Seek>(
     };
 
     if hdr.magic != CACHEMAGIC_NEW.as_bytes() {
-        return Err(Error::new(ErrorKind::Other, "Invalid cache magic"));
+        return Err(Error::new(ErrorKind::Other, "Invalid new cache magic"));
     }
     if hdr.version != CACHE_VERSION.as_bytes() {
-        return Err(Error::new(ErrorKind::Other, "Invalid cache version"));
+        return Err(Error::new(ErrorKind::Other, "Invalid new cache version"));
     }
     if !check_cache_new_endian(hdr.flags) {
-        return Err(Error::new(ErrorKind::Other, "Invalid cache endianness"));
+        return Err(Error::new(ErrorKind::Other, "Invalid new cache endianness"));
     }
 
     // To optimize file read, create a list of file entries offset (name and path)
