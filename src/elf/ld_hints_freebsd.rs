@@ -5,23 +5,40 @@
 
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Result, Seek, SeekFrom};
-use std::mem::{size_of, transmute};
 use std::path::Path;
 use std::str;
 
 use crate::search_path;
 
-#[repr(C)]
-struct elfhints_hdr {
+// Read a u32 value in native endianess format.
+fn read_u32(reader: &mut dyn Read) -> std::io::Result<u32> {
+    let mut buffer = [0; 4];
+    reader.read(&mut buffer[..])?;
+    Ok(u32::from_ne_bytes(buffer) as u32)
+}
+
+struct ElfhintsHdr {
     magic: u32,
     version: u32,
     strtab: u32,
-    strsize: u32,
+    _strsize: u32,
     dirlist: u32,
     dirlistlen: u32,
-    spare: [u32; 26usize],
+    // It does not require to read the 'spare'.
 }
-const ELFHINTS_HDR_LEN: u32 = size_of::<elfhints_hdr>() as u32;
+
+impl ElfhintsHdr {
+    fn from_reader<R: Read>(rdr: &mut R) -> std::io::Result<Self> {
+        Ok(ElfhintsHdr {
+            magic: read_u32(rdr)?,
+            version: read_u32(rdr)?,
+            strtab: read_u32(rdr)?,
+            _strsize: read_u32(rdr)?,
+            dirlist: read_u32(rdr)?,
+            dirlistlen: read_u32(rdr)?,
+        })
+    }
+}
 
 const ELFHINTS_MAGIC: u32 = 0x746e6845;
 const ELFHINTS_VERSION: u32 = 0x1;
@@ -37,11 +54,7 @@ pub fn parse_ld_so_hints<P: AsRef<Path>>(filename: &P) -> Result<search_path::Se
         ));
     }
 
-    let hdr: elfhints_hdr = {
-        let mut h = [0u8; ELFHINTS_HDR_LEN as usize];
-        file.read_exact(&mut h[..])?;
-        unsafe { transmute(h) }
-    };
+    let hdr = ElfhintsHdr::from_reader(&mut file)?;
 
     if hdr.magic != ELFHINTS_MAGIC {
         return Err(Error::new(ErrorKind::Other, "Invalid ELFHINTS_MAGIC"));

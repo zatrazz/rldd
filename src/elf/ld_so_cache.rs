@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Result, Seek, SeekFrom};
-use std::mem::{align_of, size_of, transmute};
+use std::mem::{align_of, size_of};
 use std::path::Path;
 use std::str;
 
@@ -13,77 +13,179 @@ const CACHEMAGIC: &str = "ld.so-1.7.0";
 const CACHEMAGIC_NEW: &str = "glibc-ld.so.cache";
 const CACHE_VERSION: &str = "1.1";
 
+fn read_u8(reader: &mut dyn Read) -> std::io::Result<u8> {
+    let mut buffer = [0; 1];
+    reader.read(&mut buffer)?;
+    Ok(buffer[0])
+}
+
+// Read a i32 value in native endianess format.
+fn read_i32(reader: &mut dyn Read) -> std::io::Result<i32> {
+    let mut buffer = [0; 4];
+    reader.read(&mut buffer[..])?;
+    Ok(i32::from_ne_bytes(buffer) as i32)
+}
+
+// Read a u32 value in native endianess format.
+fn read_u32(reader: &mut dyn Read) -> std::io::Result<u32> {
+    let mut buffer = [0; 4];
+    reader.read(&mut buffer[..])?;
+    Ok(u32::from_ne_bytes(buffer) as u32)
+}
+
+// Read a u64 value in native endianess format.
+fn read_u64(reader: &mut dyn Read) -> std::io::Result<u64> {
+    let mut buffer = [0; 8];
+    reader.read(&mut buffer[..])?;
+    Ok(u64::from_ne_bytes(buffer) as u64)
+}
+
 #[derive(Debug)]
-#[repr(C)]
-struct cache_file {
+struct CacheFile {
     magic: [u8; CACHEMAGIC.len()],
     nlibs: u32,
 }
-const CACHE_FILE_LEN: usize = size_of::<cache_file>();
+const CACHE_FILE_LEN: usize = size_of::<CacheFile>();
+
+impl CacheFile {
+    fn from_reader<R: Read>(rdr: &mut BufReader<R>) -> std::io::Result<Self> {
+        let mut magic = [0; CACHEMAGIC.len()];
+        rdr.read(&mut magic)?;
+
+        Ok(CacheFile {
+            magic: magic,
+            nlibs: read_u32(rdr)?,
+        })
+    }
+}
 
 #[derive(Debug)]
-#[repr(C)]
-struct file_entry {
+struct FileEntry {
     flags: i32,
     key: u32,
     value: u32,
 }
-const FILE_ENTRY_LEN: usize = size_of::<file_entry>();
+const FILE_ENTRY_LEN: usize = size_of::<FileEntry>();
+
+impl FileEntry {
+    fn from_reader<R: Read>(rdr: &mut BufReader<R>) -> std::io::Result<Self> {
+        Ok(FileEntry {
+            flags: read_i32(rdr)?,
+            key: read_u32(rdr)?,
+            value: read_u32(rdr)?,
+        })
+    }
+}
 
 #[derive(Debug)]
-#[repr(C)]
-struct cache_file_new {
+struct CacheFileNew {
     magic: [u8; CACHEMAGIC_NEW.len()],
     version: [u8; CACHE_VERSION.len()],
     nlibs: u32,
-    len_strings: u32,
+    _len_strings: u32,
     flags: u8,
-    padding_unsed: [u8; 3],
+    _padding_unused: [u8; 3],
     extension_offset: u32,
-    unused: [u32; 3],
+    _unused: [u32; 3],
 }
-const CACHE_FILE_NEW_LEN: usize = size_of::<cache_file_new>();
+const CACHE_FILE_NEW_LEN: usize = size_of::<CacheFileNew>();
+
+impl CacheFileNew {
+    fn from_reader<R: Read>(rdr: &mut BufReader<R>) -> std::io::Result<Self> {
+        let mut magic = [0; CACHEMAGIC_NEW.len()];
+        rdr.read(&mut magic)?;
+        let mut version = [0; CACHE_VERSION.len()];
+        rdr.read(&mut version)?;
+        let nlibs = read_u32(rdr)?;
+        let len_strings = read_u32(rdr)?;
+        let flags = read_u8(rdr)?;
+        let mut pending_unused: [u8; 3] = [0; 3];
+        rdr.read(&mut pending_unused)?;
+        let extension_offset = read_u32(rdr)?;
+        let unused = [read_u32(rdr)?, read_u32(rdr)?, read_u32(rdr)?];
+
+        Ok(CacheFileNew {
+            magic: magic,
+            version: version,
+            nlibs: nlibs,
+            _len_strings: len_strings,
+            flags: flags,
+            _padding_unused: pending_unused,
+            extension_offset: extension_offset,
+            _unused: unused,
+        })
+    }
+}
 
 #[derive(Debug)]
-#[repr(C)]
-struct file_entry_new {
+struct FileEntryNew {
     flags: i32,
     key: u32,
     value: u32,
-    osversion_unused: u32,
+    _osversion_unused: u32,
     hwcap: u64,
 }
-const FILE_ENTRY_NEW_LEN: usize = size_of::<file_entry_new>();
+const FILE_ENTRY_NEW_LEN: usize = size_of::<FileEntryNew>();
 
-// The cache_file_new extension header, pointer by extension_offset field.  The MAGIC should be
-// 'cache_extension_magic' and COUNT indicates ow many cache_extension_section can be read
-// (on glibc definition the cache_extension_section is defined as a flexible array meant to be
+impl FileEntryNew {
+    fn from_reader<R: Read>(rdr: &mut BufReader<R>) -> std::io::Result<Self> {
+        Ok(FileEntryNew {
+            flags: read_i32(rdr)?,
+            key: read_u32(rdr)?,
+            value: read_u32(rdr)?,
+            _osversion_unused: read_u32(rdr)?,
+            hwcap: read_u64(rdr)?,
+        })
+    }
+}
+
+// The CacheFileNew extension header, pointer by extension_offset field.  The MAGIC should be
+// 'cache_extension_magic' and COUNT indicates ow many CacheExtensionSection can be read
+// (on glibc definition the CacheExtensionSection is defined as a flexible array meant to be
 // accessed through mmap).
 #[derive(Debug)]
-#[repr(C)]
-struct cache_extension {
+struct CacheExtension {
     magic: u32,
     count: u32,
 }
-const CACHE_EXTENSION_LEN: usize = size_of::<cache_extension>();
+const CACHE_EXTENSION_LEN: usize = size_of::<CacheExtension>();
+
+impl CacheExtension {
+    fn from_reader<R: Read>(rdr: &mut BufReader<R>) -> std::io::Result<Self> {
+        Ok(CacheExtension {
+            magic: read_u32(rdr)?,
+            count: read_u32(rdr)?,
+        })
+    }
+}
 
 #[allow(non_upper_case_globals)]
 const cache_extension_magic: u32 = 0xeaa42174;
 
 const CACHE_EXTENSION_TAG_GLIBC_HWCAPS: u32 = 1;
 
-// Element in the array following struct cache_extension.
+// Element in the array following struct CacheExtension.
 #[derive(Debug)]
-#[repr(C)]
-struct cache_extension_section {
+struct CacheExtensionSection {
     tag: u32,    // Type of the extension section (CACHE_EXTENSION_TAG_*).
-    flags: u32,  // Extension-specific flags.  Currently generated as zero.
+    _flags: u32, // Extension-specific flags.  Currently generated as zero.
     offset: u32, // Offset from the start of the file for the data in this extension section.
     size: u32,   // Length in bytes of the extension data.
 }
-const CACHE_EXTENSION_SECTION_LEN: usize = size_of::<cache_extension_section>();
+const CACHE_EXTENSION_SECTION_LEN: usize = size_of::<CacheExtensionSection>();
 
-// Check the ld.so.cache file_entry_new flags against a pre-defined value from glibc
+impl CacheExtensionSection {
+    fn from_reader<R: Read>(rdr: &mut BufReader<R>) -> std::io::Result<Self> {
+        Ok(CacheExtensionSection {
+            tag: read_u32(rdr)?,
+            _flags: read_u32(rdr)?,
+            offset: read_u32(rdr)?,
+            size: read_u32(rdr)?,
+        })
+    }
+}
+
+// Check the ld.so.cache FileEntryNew flags against a pre-defined value from glibc
 // dl-cache.h.
 const FLAG_ELF_LIBC6: i32 = 0x0003;
 const FLAG_SPARC_LIB64: i32 = 0x0100;
@@ -176,19 +278,19 @@ fn check_file_entry_flags(flags: i32, ei_class: u8, e_machine: u16, e_flags: u32
 
 // To mimic glibc internal definitions
 #[allow(non_upper_case_globals, dead_code)]
-const cache_file_new_flags_endian_big: u8 = 3u8;
+const CacheFileNew_flags_endian_big: u8 = 3u8;
 #[allow(non_upper_case_globals, dead_code)]
-const cache_file_new_flags_endian_little: u8 = 2u8;
+const CacheFileNew_flags_endian_little: u8 = 2u8;
 #[cfg(target_endian = "big")]
 #[allow(non_upper_case_globals)]
-const cache_file_new_flags_endian_current: u8 = cache_file_new_flags_endian_big;
+const CacheFileNew_flags_endian_current: u8 = CacheFileNew_flags_endian_big;
 #[cfg(target_endian = "little")]
 #[allow(non_upper_case_globals)]
-const cache_file_new_flags_endian_current: u8 = cache_file_new_flags_endian_little;
+const CacheFileNew_flags_endian_current: u8 = CacheFileNew_flags_endian_little;
 
 fn check_cache_new_endian(flags: u8) -> bool {
     // A zero value for cache->flags means that no endianness.
-    flags == 0 || (flags & cache_file_new_flags_endian_big) == cache_file_new_flags_endian_current
+    flags == 0 || (flags & CacheFileNew_flags_endian_big) == CacheFileNew_flags_endian_current
 }
 
 fn read_string<R: Read + Seek>(
@@ -206,15 +308,8 @@ fn read_string<R: Read + Seek>(
     Ok(value)
 }
 
-// Read a u32 value in native endianess format.
-fn read_u32<R: Read + Seek>(reader: &mut BufReader<R>) -> Result<u32> {
-    let mut buffer = [0; 4];
-    reader.read(&mut buffer[..]).unwrap();
-    Ok(u32::from_ne_bytes(buffer))
-}
-
 fn align_cache(value: usize) -> usize {
-    (value + (align_of::<cache_file_new>() - 1)) & !(align_of::<cache_file_new>() - 1)
+    (value + (align_of::<CacheFileNew>() - 1)) & !(align_of::<CacheFileNew>() - 1)
 }
 
 pub type LdCache = HashMap<String, String>;
@@ -226,11 +321,7 @@ fn parse_ld_so_cache_old<R: Read + Seek>(
     e_machine: u16,
     e_flags: u32,
 ) -> Result<LdCache> {
-    let hdr: cache_file = {
-        let mut h = [0u8; CACHE_FILE_LEN];
-        reader.read_exact(&mut h[..])?;
-        unsafe { transmute(h) }
-    };
+    let hdr = CacheFile::from_reader(reader)?;
 
     if (cache_size - CACHE_FILE_LEN) / FILE_ENTRY_LEN < hdr.nlibs as usize {
         return Err(Error::new(ErrorKind::Other, "Invalid cache file"));
@@ -241,16 +332,16 @@ fn parse_ld_so_cache_old<R: Read + Seek>(
         return parse_ld_so_cache_new(reader, offset, ei_class, e_machine, e_flags);
     }
 
+    if hdr.magic != CACHEMAGIC.as_bytes() {
+        return Err(Error::new(ErrorKind::Other, "Invalid cache magic"));
+    }
+
     // The new string format starts at a different position than the newer one.
     let cache_off = CACHE_FILE_LEN as u32 + hdr.nlibs * FILE_ENTRY_LEN as u32;
 
     let mut offsets: Vec<(u32, u32)> = Vec::with_capacity(hdr.nlibs as usize);
     for _i in 0..hdr.nlibs {
-        let entry: file_entry = {
-            let mut e = [0u8; FILE_ENTRY_LEN];
-            reader.read_exact(&mut e[..])?;
-            unsafe { transmute(e) }
-        };
+        let entry = FileEntry::from_reader(reader)?;
         if !check_file_entry_flags(entry.flags, ei_class, e_machine, e_flags) {
             continue;
         }
@@ -277,20 +368,16 @@ fn parse_ld_so_cache_new<R: Read + Seek>(
     e_flags: u32,
 ) -> Result<LdCache> {
     reader.seek(SeekFrom::Start(initial as u64))?;
-    let hdr: cache_file_new = {
-        let mut h = [0u8; CACHE_FILE_NEW_LEN];
-        reader.read_exact(&mut h[..])?;
-        unsafe { transmute(h) }
-    };
+    let hdr = CacheFileNew::from_reader(reader)?;
 
     if hdr.magic != CACHEMAGIC_NEW.as_bytes() {
-        return Err(Error::new(ErrorKind::Other, "Invalid cache magic"));
+        return Err(Error::new(ErrorKind::Other, "Invalid new cache magic"));
     }
     if hdr.version != CACHE_VERSION.as_bytes() {
-        return Err(Error::new(ErrorKind::Other, "Invalid cache version"));
+        return Err(Error::new(ErrorKind::Other, "Invalid new cache version"));
     }
     if !check_cache_new_endian(hdr.flags) {
-        return Err(Error::new(ErrorKind::Other, "Invalid cache endianness"));
+        return Err(Error::new(ErrorKind::Other, "Invalid new cache endianness"));
     }
 
     // To optimize file read, create a list of file entries offset (name and path)
@@ -299,11 +386,7 @@ fn parse_ld_so_cache_new<R: Read + Seek>(
     let mut offsets: Vec<(u32, u32, Option<u32>)> = Vec::with_capacity(hdr.nlibs as usize);
 
     for _i in 0..hdr.nlibs {
-        let entry: file_entry_new = {
-            let mut e = [0u8; FILE_ENTRY_NEW_LEN];
-            reader.read_exact(&mut e[..])?;
-            unsafe { transmute(e) }
-        };
+        let entry = FileEntryNew::from_reader(reader)?;
         // Skip not supported entries for the binary architecture, for instance x86_64/i686
         // with multilib support.
         if !check_file_entry_flags(entry.flags, ei_class, e_machine, e_flags) {
@@ -396,7 +479,7 @@ fn check_cache_hwcap_extension(hwcap: u64) -> Option<u32> {
 }
 
 // Return the possible glibc-hwcap subfolders used in optimized library selection.  The
-// array is indexed by the 32-bit lower bit from file_entry_new hwcap field.
+// array is indexed by the 32-bit lower bit from FileEntryNew hwcap field.
 fn parse_ld_so_cache_glibc_hwcap<R: Read + Seek>(
     reader: &mut BufReader<R>,
     prev_off: &mut i64,
@@ -406,28 +489,20 @@ fn parse_ld_so_cache_glibc_hwcap<R: Read + Seek>(
         return Ok(Vec::<String>::new());
     }
     reader.seek_relative(cur - *prev_off)?;
-    let ext: cache_extension = {
-        let mut h = [0u8; CACHE_EXTENSION_LEN];
-        reader.read_exact(&mut h[..])?;
-        unsafe { transmute(h) }
-    };
+    let ext = CacheExtension::from_reader(reader)?;
     *prev_off = cur + CACHE_EXTENSION_LEN as i64;
 
     if ext.magic != cache_extension_magic {
         return Err(Error::new(
             ErrorKind::Other,
-            "Invalid cache_extension magic",
+            "Invalid CacheExtension magic",
         ));
     }
 
     // Return an empty set if the cache does not have any glibc-hwcap extension.
     let mut r = Vec::<String>::new();
     for _i in 0..ext.count {
-        let ext_sec: cache_extension_section = {
-            let mut h = [0u8; CACHE_EXTENSION_SECTION_LEN];
-            reader.read_exact(&mut h[..])?;
-            unsafe { transmute(h) }
-        };
+        let ext_sec = CacheExtensionSection::from_reader(reader)?;
         *prev_off += CACHE_EXTENSION_SECTION_LEN as i64;
 
         if ext_sec.tag == CACHE_EXTENSION_TAG_GLIBC_HWCAPS {

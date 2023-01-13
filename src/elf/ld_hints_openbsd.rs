@@ -2,24 +2,43 @@
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Result, Seek, SeekFrom};
-use std::mem::{size_of, transmute};
 use std::path::Path;
 use std::str;
 
 use crate::search_path;
 
-#[repr(C)]
-struct hints_header {
+// Read a u32 value in native endianess format.
+fn read_i64(reader: &mut dyn Read) -> std::io::Result<i64> {
+    let mut buffer = [0; 8];
+    reader.read(&mut buffer[..])?;
+    Ok(i64::from_ne_bytes(buffer) as i64)
+}
+
+struct HintsHeader {
     hh_magic: i64,
     hh_version: i64,
-    hh_hashtab: i64,
-    hh_nbucket: i64,
+    _hh_hashtab: i64,
+    _hh_nbucket: i64,
     hh_strtab: i64,
-    hh_strtab_sz: i64,
+    _hh_strtab_sz: i64,
     hh_ehints: i64,
     hh_dirlist: i64,
 }
-const HINTS_HEADER_LEN: u32 = size_of::<hints_header>() as u32;
+
+impl HintsHeader {
+    fn from_reader<R: Read>(rdr: &mut R) -> std::io::Result<Self> {
+        Ok(HintsHeader {
+            hh_magic: read_i64(rdr)?,
+            hh_version: read_i64(rdr)?,
+            _hh_hashtab: read_i64(rdr)?,
+            _hh_nbucket: read_i64(rdr)?,
+            hh_strtab: read_i64(rdr)?,
+            _hh_strtab_sz: read_i64(rdr)?,
+            hh_ehints: read_i64(rdr)?,
+            hh_dirlist: read_i64(rdr)?,
+        })
+    }
+}
 
 const HH_MAGIC: i64 = 0o11421044151;
 const LD_HINTS_VERSION_2: i64 = 2;
@@ -36,11 +55,7 @@ pub fn parse_ld_so_hints<P: AsRef<Path>>(filename: &P) -> Result<search_path::Se
         ));
     }
 
-    let hdr: hints_header = {
-        let mut h = [0u8; HINTS_HEADER_LEN as usize];
-        file.read_exact(&mut h[..])?;
-        unsafe { transmute(h) }
-    };
+    let hdr = HintsHeader::from_reader(&mut file)?;
 
     if hdr.hh_magic != HH_MAGIC || hdr.hh_ehints > hsize {
         return Err(Error::new(ErrorKind::Other, "Invalid ELFHINTS_MAGIC"));
