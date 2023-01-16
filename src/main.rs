@@ -103,6 +103,14 @@ struct Options {
     args: Vec<String>,
 }
 
+fn print_error(arg: &String, err: std::io::Error) -> String {
+    match err.kind() {
+        std::io::ErrorKind::NotFound => format!("{}: no such file or directory", arg),
+        std::io::ErrorKind::PermissionDenied => format!("{}: permission denied", arg),
+        _ => format!("{}: {}", arg, err.to_string()),
+    }
+}
+
 fn main() {
     let opts: Options = argh::from_env();
 
@@ -132,7 +140,7 @@ fn main() {
             arg.as_str(),
         ) {
             Ok(deptree) => print_deps(&mut printer, &deptree),
-            Err(e) => eprintln!("error: {}", e),
+            Err(e) => eprintln!("error: {}", print_error(&arg, e)),
         }
     }
 }

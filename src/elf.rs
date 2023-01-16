@@ -553,15 +553,7 @@ pub fn resolve_binary(
     // try to canocalize the input filename to remove any symlinks.  There is not much
     // sense in trying LD_ORIGIN_PATH, since it is only checked by the loader if
     // the binary can not dereference the procfs entry.
-    let filename = match Path::new(arg).canonicalize() {
-        Ok(filename) => filename,
-        Err(err) => {
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!("Failed to read file {}: {}", arg, err),
-            ))
-        }
-    };
+    let filename = Path::new(arg).canonicalize()?;
 
     let elc = match open_elf_file(&filename, None, None, platform.as_ref(), false) {
         Ok(elc) => elc,
@@ -593,15 +585,7 @@ pub fn resolve_binary(
     }
 
     let system_dirs = if load_system_dirs(&*ld_cache) {
-        match system_dirs::get_system_dirs(&elc.interp, elc.e_machine, elc.ei_class) {
-            Some(r) => r,
-            None => {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    "could not get the default system dirs",
-                ))
-            }
-        }
+        system_dirs::get_system_dirs(&elc.interp, elc.e_machine, elc.ei_class)?
     } else {
         search_path::SearchPathVec::new()
     };

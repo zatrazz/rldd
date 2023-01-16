@@ -8,33 +8,41 @@ use object::elf::*;
 
 use crate::search_path;
 
+#[allow(dead_code)]
+fn return_error<T>() -> Result<T, std::io::Error> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        "failed to get default system dir",
+    ))
+}
+
 // Return the default system directory for the architectures and class.  It is hard
 // wired on glibc install for each triplet (the $slibdir).
 #[cfg(target_os = "linux")]
-pub fn get_slibdir(e_machine: u16, ei_class: u8) -> Option<&'static str> {
+pub fn get_slibdir(e_machine: u16, ei_class: u8) -> Result<&'static str, std::io::Error> {
     // Not all machines are supported by object crate.
     const EM_ARCV2: u16 = 195;
 
     match e_machine {
-        EM_AARCH64 | EM_ALPHA | EM_PPC64 | EM_LOONGARCH => Some("/lib64"),
+        EM_AARCH64 | EM_ALPHA | EM_PPC64 | EM_LOONGARCH => Ok("/lib64"),
         EM_ARCV2 | EM_ARM | EM_CSKY | EM_PARISC | EM_386 | EM_68K | EM_MICROBLAZE
-        | EM_ALTERA_NIOS2 | EM_OPENRISC | EM_PPC | EM_SH => Some("/lib"),
+        | EM_ALTERA_NIOS2 | EM_OPENRISC | EM_PPC | EM_SH => Ok("/lib"),
         EM_S390 | EM_SPARC | EM_MIPS | EM_MIPS_RS3_LE => match ei_class {
-            ELFCLASS32 => Some("/lib"),
-            ELFCLASS64 => Some("/lib64"),
-            _ => return None,
+            ELFCLASS32 => Ok("/lib"),
+            ELFCLASS64 => Ok("/lib64"),
+            _ => return_error(),
         },
         EM_RISCV => match ei_class {
-            ELFCLASS32 => Some("/lib32/ilp32d"),
-            ELFCLASS64 => Some("/lib64/lp64d"),
-            _ => return None,
+            ELFCLASS32 => Ok("/lib32/ilp32d"),
+            ELFCLASS64 => Ok("/lib64/lp64d"),
+            _ => return_error(),
         },
         EM_X86_64 => match ei_class {
-            ELFCLASS32 => Some("/libx32"),
-            ELFCLASS64 => Some("/lib64"),
-            _ => return None,
+            ELFCLASS32 => Ok("/libx32"),
+            ELFCLASS64 => Ok("/lib64"),
+            _ => return_error(),
         },
-        _ => return None,
+        _ => return_error(),
     }
 }
 
@@ -43,9 +51,9 @@ pub fn get_system_dirs(
     _interp: &Option<String>,
     e_machine: u16,
     ei_class: u8,
-) -> Option<search_path::SearchPathVec> {
+) -> Result<search_path::SearchPathVec, std::io::Error> {
     let path = get_slibdir(e_machine, ei_class)?;
-    Some(vec![
+    Ok(vec![
         search_path::SearchPath {
             path: path.to_string(),
             dev: 0,
@@ -67,14 +75,14 @@ pub fn get_system_dirs(
     interp: &Option<String>,
     e_machine: u16,
     ei_class: u8,
-) -> Option<search_path::SearchPathVec> {
+) -> Result<search_path::SearchPathVec, std::io::Error> {
     use crate::elf::android;
 
-    pub fn get_system_dirs_xx(suffix: &str, is_asan: bool) -> Option<search_path::SearchPathVec> {
-        let release = match android::get_release() {
-            Ok(release) => release,
-            Err(_) => return None,
-        };
+    pub fn get_system_dirs_xx(
+        suffix: &str,
+        is_asan: bool,
+    ) -> Result<search_path::SearchPathVec, std::io::Error> {
+        let release = android::get_release()?;
 
         let add_odm = match release {
             android::AndroidRelease::AndroidR28
@@ -137,7 +145,7 @@ pub fn get_system_dirs(
             dev: 0,
             ino: 0,
         });
-        Some(r)
+        Ok(r)
     }
 
     if let Some(interp) = interp {
@@ -149,12 +157,12 @@ pub fn get_system_dirs(
             EM_MIPS => match ei_class {
                 ELFCLASS64 => get_system_dirs_xx("64", is_asan),
                 ELFCLASS32 => get_system_dirs_xx("", is_asan),
-                _ => None,
+                _ => return_error(),
             },
-            _ => None,
+            _ => return_error(),
         };
     };
-    None
+    return_error()
 }
 
 #[cfg(target_os = "freebsd")]
@@ -162,8 +170,8 @@ pub fn get_system_dirs(
     _interp: &Option<String>,
     _e_machine: u16,
     _ei_class: u8,
-) -> Option<search_path::SearchPathVec> {
-    Some(vec![search_path::SearchPath {
+) -> Result<search_path::SearchPathVec, std::io::Error> {
+    Ok(vec![search_path::SearchPath {
         path: "/lib".to_string(),
         dev: 0,
         ino: 0,
@@ -175,8 +183,8 @@ pub fn get_system_dirs(
     _interp: &Option<String>,
     _e_machine: u16,
     _ei_class: u8,
-) -> Option<search_path::SearchPathVec> {
-    Some(vec![search_path::SearchPath {
+) -> Result<search_path::SearchPathVec, std::io::Error> {
+    Ok(vec![search_path::SearchPath {
         path: "/usr/lib".to_string(),
         dev: 0,
         ino: 0,
@@ -188,9 +196,9 @@ pub fn get_system_dirs(
     _interp: &Option<String>,
     e_machine: u16,
     _ei_class: u8,
-) -> Option<search_path::SearchPathVec> {
+) -> Result<search_path::SearchPathVec, std::io::Error> {
     match e_machine {
-        EM_386 => Some(vec![
+        EM_386 => Ok(vec![
             search_path::SearchPath {
                 path: "/lib".to_string(),
                 dev: 0,
@@ -202,7 +210,7 @@ pub fn get_system_dirs(
                 ino: 0,
             },
         ]),
-        EM_X86_64 => Some(vec![
+        EM_X86_64 => Ok(vec![
             search_path::SearchPath {
                 path: "/lib64".to_string(),
                 dev: 0,
@@ -214,6 +222,6 @@ pub fn get_system_dirs(
                 ino: 0,
             },
         ]),
-        _ => None,
+        _ => return_error(),
     }
 }
