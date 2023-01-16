@@ -54,6 +54,7 @@ struct ElfInfo {
     ei_class: u8,
     ei_data: u8,
     ei_osabi: u8,
+    ei_abiver: u8,
     e_machine: u16,
     #[allow(dead_code)]
     e_flags: u32,
@@ -248,6 +249,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
                 ei_class: elf.e_ident().class,
                 ei_data: elf.e_ident().data,
                 ei_osabi: elf.e_ident().os_abi,
+                ei_abiver: elf.e_ident().abi_version,
                 e_machine: elf.e_machine(endian),
                 e_flags: elf.e_flags(endian),
                 interp: None,
@@ -457,8 +459,28 @@ fn match_elf_name(melc: &ElfInfo, dtneeded: Option<&String>, elc: &ElfInfo) -> b
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn check_elf_header(elc: &ElfInfo) -> bool {
-    // TODO: ARM also accepts ELFOSABI_SYSV
-    elc.ei_osabi == ELFOSABI_SYSV || elc.ei_osabi == ELFOSABI_GNU
+    let maxver = match elc.e_machine {
+        EM_MIPS | EM_MIPS_RS3_LE => 6,
+        EM_PPC | EM_PPC64 | EM_SPARC | EM_X86_64 | EM_RISCV => 5,
+        _ => 4,
+    };
+
+    let check_elf_osabi = match elc.e_machine {
+        EM_ARM => {
+            |osabi| osabi == ELFOSABI_SYSV || osabi == ELFOSABI_GNU || osabi == ELFOSABI_ARM_AEABI
+        }
+        _ => |osabi| osabi == ELFOSABI_SYSV || osabi == ELFOSABI_GNU,
+    };
+
+    let check_elf_abiversion = match elc.e_machine {
+        EM_MIPS => |osabi, ver, maxver| {
+            ver == 0 || (osabi == ELFOSABI_SYSV && ver < 6) || (osabi == ELFOSABI_GNU && ver < maxver)
+        },
+        _ => |osabi, ver, maxver| ver == 0 || (osabi == ELFOSABI_GNU && ver < maxver),
+    };
+
+    return check_elf_osabi(elc.ei_osabi)
+        && check_elf_abiversion(elc.ei_osabi, elc.ei_abiver, maxver);
 }
 #[cfg(target_os = "freebsd")]
 fn check_elf_header(elc: &ElfInfo) -> bool {
@@ -571,15 +593,7 @@ pub fn resolve_binary(
     // the binary can not dereference the procfs entry.
     let filename = Path::new(arg).canonicalize()?;
 
-    let elc = match open_elf_file(&filename, None, None, platform.as_ref(), false) {
-        Ok(elc) => elc,
-        Err(err) => {
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!("Failed to parse file {}: {}", arg, err),
-            ))
-        }
-    };
+    let elc = open_elf_file(&filename, None, None, platform.as_ref(), false)?;
 
     // The cache/hints/config file is usually an optional file and failing to open it
     // does not incur on a resolution failure.
