@@ -505,12 +505,16 @@ struct Config<'a> {
 
 // Function that mimic the dynamic loader resolution.
 #[cfg(target_os = "linux")]
-fn resolve_binary_arch(elc: &ElfInfo, deptree: &mut DepTree, depp: usize) {
+fn resolve_binary_arch(
+    elc: &ElfInfo,
+    deptree: &mut DepTree,
+    depp: usize,
+) -> Result<(), std::io::Error> {
     // musl loader and libc is on the same shared object, so adds a synthetic dependendy for
     // the binary so it is also shown and to be returned in case a objects has libc.so
     // as needed.
     if !elc.is_musl {
-        return;
+        return Ok(());
     }
 
     if let Some(interp) = &elc.interp {
@@ -526,10 +530,22 @@ fn resolve_binary_arch(elc: &ElfInfo, deptree: &mut DepTree, depp: usize) {
             },
             depp,
         );
+        return Ok(());
     }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        "musl: failed to get INTERP value",
+    ))
 }
 #[cfg(all(target_family = "unix", not(target_os = "linux")))]
-fn resolve_binary_arch(_elc: &ElfInfo, _deptree: &mut DepTree, _depp: usize) {}
+fn resolve_binary_arch(
+    _elc: &ElfInfo,
+    _deptree: &mut DepTree,
+    _depp: usize,
+) -> Result<(), std::io::Error> {
+    Ok(())
+}
 
 // The loader search cache is lazy loaded if the binary has a loader that actually
 // supports it.
@@ -608,7 +624,7 @@ pub fn resolve_binary(
         found: false,
     });
 
-    resolve_binary_arch(&elc, &mut deptree, depp);
+    resolve_binary_arch(&elc, &mut deptree, depp)?;
 
     for ld_preload in config.ld_preload {
         resolve_dependency(&config, &ld_preload.path, &elc, &mut deptree, depp, true);
