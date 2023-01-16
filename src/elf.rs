@@ -581,8 +581,11 @@ pub fn resolve_binary(
         }
     };
 
+    // The cache/hints/config file is usually an optional file and failing to open it
+    // does not incur on a resolution failure.
     load_so_cache(ld_cache, &filename, &elc);
 
+    // Same for glibc ld.so.preload file.
     let mut preload = ld_preload.to_vec();
     // glibc first parses LD_PRELOAD and then ld.so.preload.
     // We need a new vector for the case of binaries with different interpreters.
