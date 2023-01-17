@@ -89,7 +89,10 @@ pub fn resolve_binary(
 ) -> Result<DepTree, std::io::Error> {
     let filename = Path::new(arg).canonicalize()?;
 
-    let executable_path = pathutils::get_path(&filename).unwrap();
+    let executable_path = pathutils::get_path(&filename).ok_or(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        format!("failed to get path of input file {}", arg),
+    ))?;
 
     let omf = match open_macho_file(&filename, &executable_path)? {
         OpenMachOFileResult::Object(obj) => obj,
