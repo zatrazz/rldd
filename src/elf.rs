@@ -474,7 +474,9 @@ fn check_elf_header(elc: &ElfInfo) -> bool {
 
     let check_elf_abiversion = match elc.e_machine {
         EM_MIPS => |osabi, ver, maxver| {
-            ver == 0 || (osabi == ELFOSABI_SYSV && ver < 6) || (osabi == ELFOSABI_GNU && ver < maxver)
+            ver == 0
+                || (osabi == ELFOSABI_SYSV && ver < 6)
+                || (osabi == ELFOSABI_GNU && ver < maxver)
         },
         _ => |osabi, ver, maxver| ver == 0 || (osabi == ELFOSABI_GNU && ver < maxver),
     };
