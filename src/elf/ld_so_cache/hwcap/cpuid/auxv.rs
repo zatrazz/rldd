@@ -5,7 +5,7 @@
 // - Provide getauxval similar to libc signature.
 
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Error, ErrorKind};
 use std::path::Path;
 
 #[cfg(target_pointer_width = "32")]
@@ -24,14 +24,7 @@ pub struct AuxvPair {
     pub value: AuxvType,
 }
 
-#[derive(Debug)]
-pub enum ProcfsAuxvError {
-    IoError,
-    InvalidFormat,
-    NotFound,
-}
-
-pub fn getauxval(key: AuxvType) -> Result<AuxvType, ProcfsAuxvError> {
+pub fn getauxval(key: AuxvType) -> Result<AuxvType, std::io::Error> {
     for r in iterate_path(&Path::new("/proc/self/auxv"))? {
         let pair = match r {
             Ok(p) => p,
@@ -42,7 +35,8 @@ pub fn getauxval(key: AuxvType) -> Result<AuxvType, ProcfsAuxvError> {
             return Ok(pair.value);
         }
     }
-    Err(ProcfsAuxvError::NotFound)
+    //Err(ProcfsAuxvError::NotFound)
+    Err(Error::new(ErrorKind::Other, "auxv entry not found"))
 }
 
 pub struct ProcfsAuxvIter<R: Read> {
@@ -52,9 +46,8 @@ pub struct ProcfsAuxvIter<R: Read> {
     keep_going: bool,
 }
 
-fn iterate_path(path: &Path) -> Result<ProcfsAuxvIter<File>, ProcfsAuxvError> {
+fn iterate_path(path: &Path) -> Result<ProcfsAuxvIter<File>, std::io::Error> {
     let input = File::open(path)
-        .map_err(|_| ProcfsAuxvError::IoError)
         .map(|f| BufReader::new(f))?;
 
     let pair_size = 2 * std::mem::size_of::<AuxvType>();
@@ -69,7 +62,7 @@ fn iterate_path(path: &Path) -> Result<ProcfsAuxvIter<File>, ProcfsAuxvError> {
 }
 
 impl<R: Read> Iterator for ProcfsAuxvIter<R> {
-    type Item = Result<AuxvPair, ProcfsAuxvError>;
+    type Item = Result<AuxvPair, std::io::Error>;
     fn next(&mut self) -> Option<Self::Item> {
         if !self.keep_going {
             return None;
@@ -87,24 +80,18 @@ impl<R: Read> Iterator for ProcfsAuxvIter<R> {
                 Ok(n) => {
                     if n == 0 {
                         // should not hit EOF before AT_NULL
-                        return Some(Err(ProcfsAuxvError::InvalidFormat));
+                        return Some(Err(Error::new(ErrorKind::Other, "invalid auxv format")));
                     }
 
                     read_bytes += n;
                 }
-                Err(_) => return Some(Err(ProcfsAuxvError::IoError)),
+                Err(e) => return Some(Err(e))
             }
         }
 
         let mut reader = &self.buf[..];
-        let aux_key = match read_long(&mut reader) {
-            Ok(x) => x,
-            Err(_) => return Some(Err(ProcfsAuxvError::InvalidFormat)),
-        };
-        let aux_val = match read_long(&mut reader) {
-            Ok(x) => x,
-            Err(_) => return Some(Err(ProcfsAuxvError::InvalidFormat)),
-        };
+        let aux_key = read_long(&mut reader).ok()?;
+        let aux_val = read_long(&mut reader).ok()?;
 
         // AT_NULL (0) signals the end of auxv
         if aux_key == 0 {

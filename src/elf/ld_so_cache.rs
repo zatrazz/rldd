@@ -329,7 +329,7 @@ fn parse_ld_so_cache_new<R: Read + Seek>(
         parse_ld_so_cache_glibc_hwcap(reader, &mut prev_off, hdr.extension_offset as i64)?;
 
     // And obtain the current machine supported glibc-hwcap subfolder.
-    let hwcap_supported = hwcap::hwcap_supported();
+    let hwcap_supported = hwcap::hwcap_supported()?;
 
     let mut ldsocache = LdCache::new();
     // Keep track of the last glibc-hwcap value for the entry to allow check if the new entry is

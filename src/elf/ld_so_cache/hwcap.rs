@@ -47,7 +47,7 @@ pub mod cpuid {
             && extended.has_avx512vl()
     }
 
-    pub fn supported() -> Vec<&'static str> {
+    pub fn supported() -> Result<Vec<&'static str>, std::io::Error> {
         let mut r = vec![];
 
         let cpuid = CpuId::new();
@@ -68,7 +68,7 @@ pub mod cpuid {
                 r.push("x86-64-v2");
             }
         }
-        r
+        Ok(r)
     }
 }
 
@@ -81,17 +81,16 @@ pub mod cpuid {
     pub const PPC_FEATURE2_ARCH_3_1: auxv::AuxvType = 0x00040000; // ISA 3.1
     pub const PPC_FEATURE2_MMA: auxv::AuxvType = 0x00020000; //  Matrix-Multiply Assist
 
-    pub fn supported() -> Vec<&'static str> {
+    pub fn supported() -> Result<Vec<&'static str>, std::io::Error> {
         let mut r = vec![];
-        if let Ok(hwcap2) = auxv::getauxval(auxv::AT_HWCAP2) {
-            if hwcap2 & PPC_FEATURE2_ARCH_3_00 != 0 && hwcap2 & PPC_FEATURE2_HAS_IEEE128 != 0 {
-                r.push("power9");
-            }
-            if hwcap2 & PPC_FEATURE2_ARCH_3_1 != 0 && hwcap2 & PPC_FEATURE2_MMA != 0 {
-                r.push("power10");
-            }
+        let hwcap2 = auxv::getauxval(auxv::AT_HWCAP2)?;
+        if hwcap2 & PPC_FEATURE2_ARCH_3_00 != 0 && hwcap2 & PPC_FEATURE2_HAS_IEEE128 != 0 {
+            r.push("power9");
         }
-        r
+        if hwcap2 & PPC_FEATURE2_ARCH_3_1 != 0 && hwcap2 & PPC_FEATURE2_MMA != 0 {
+            r.push("power10");
+        }
+        Ok(r)
     }
 }
 
@@ -108,26 +107,25 @@ pub mod cpuid {
     pub const HWCAP_S390_VXRS_PDE: auxv::AuxvType = 1 << 16;
     pub const HWCAP_S390_VXRS_PDE2: auxv::AuxvType = 1 << 19;
 
-    pub fn supported() -> Vec<&'static str> {
+    pub fn supported() -> Result<Vec<&'static str>, std::io::Error> {
         let mut r = vec![];
-        if let Ok(hwcap) = auxv::getauxval(auxv::AT_HWCAP) {
-            if hwcap & HWCAP_S390_VX != 0 {
-                r.push("z13");
-            }
-            if hwcap & HWCAP_S390_VXD != 0
-                && hwcap & HWCAP_S390_VXE != 0
-                && hwcap & HWCAP_S390_GS != 0
-            {
-                r.push("z14");
-            }
-            if hwcap & HWCAP_S390_VXRS_EXT2 != 0 && hwcap & HWCAP_S390_VXRS_PDE != 0 {
-                r.push("z15");
-            }
-            if hwcap & HWCAP_S390_VXRS_PDE2 != 0 {
-                r.push("z16");
-            }
+        let hwcap = auxv::getauxval(auxv::AT_HWCAP)?;
+        if hwcap & HWCAP_S390_VX != 0 {
+            r.push("z13");
         }
-        r
+        if hwcap & HWCAP_S390_VXD != 0
+            && hwcap & HWCAP_S390_VXE != 0
+            && hwcap & HWCAP_S390_GS != 0
+        {
+            r.push("z14");
+        }
+        if hwcap & HWCAP_S390_VXRS_EXT2 != 0 && hwcap & HWCAP_S390_VXRS_PDE != 0 {
+            r.push("z15");
+        }
+        if hwcap & HWCAP_S390_VXRS_PDE2 != 0 {
+            r.push("z16");
+        }
+        Ok(r)
     }
 }
 
@@ -146,6 +144,6 @@ pub mod cpuid {
     }
 }
 
-pub fn hwcap_supported() -> Vec<&'static str> {
+pub fn hwcap_supported() -> Result<Vec<&'static str>, std::io::Error> {
     cpuid::supported()
 }
