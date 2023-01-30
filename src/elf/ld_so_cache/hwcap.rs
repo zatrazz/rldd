@@ -139,8 +139,8 @@ pub mod cpuid {
     ))
 ))]
 pub mod cpuid {
-    pub fn supported() -> Vec<&'static str> {
-        vec![]
+    pub fn supported() -> Result<Vec<&'static str>, std::io::Error> {
+        Ok(vec![])
     }
 }
 
