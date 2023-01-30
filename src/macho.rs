@@ -50,7 +50,7 @@ impl DyldCache {
     fn get(&self, name: &String, executable_path: &String) -> Option<MachOInfo> {
         if let (Some(mmap), Some(offset)) = (self.mmap.as_ref(), self.images.get(name)) {
             if let Some(offset) = offset {
-                return match parse_object(&*mmap, *offset, executable_path) {
+                return match parse_object(mmap, *offset, executable_path) {
                     Ok(ParseObjectResult::Object(obj)) => Some(obj),
                     _ => None,
                 };
@@ -69,10 +69,8 @@ impl DyldCache {
 // cache.
 pub fn create_context() -> DyldCache {
     if let Some(path) = dydlcache::path() {
-        if let Ok(cache) = open_macho_file(&Path::new(path), &String::new()) {
-            if let OpenMachOFileResult::Cache(cache) = cache {
-                return cache;
-            }
+        if let Ok(OpenMachOFileResult::Cache(cache)) = open_macho_file(&Path::new(path), &String::new()) {
+            return cache;
         }
     }
 
@@ -80,7 +78,7 @@ pub fn create_context() -> DyldCache {
 }
 
 pub fn resolve_binary(
-    cache: &DyldCache,
+    cache: &mut DyldCache,
     preload: &search_path::SearchPathVec,
     library_path: &search_path::SearchPathVec,
     _platform: &Option<String>,
@@ -91,7 +89,7 @@ pub fn resolve_binary(
 
     let executable_path = pathutils::get_path(&filename).ok_or(std::io::Error::new(
         std::io::ErrorKind::Other,
-        format!("failed to get path of input file {}", arg),
+        format!("failed to get path of input file {arg}"),
     ))?;
 
     let omf = match open_macho_file(&filename, &executable_path)? {
@@ -99,7 +97,7 @@ pub fn resolve_binary(
         _ => {
             return Err(Error::new(
                 ErrorKind::Other,
-                format!("Invalid MachO file: {}", arg),
+                format!("Invalid MachO file: {arg}"),
             ))
         }
     };
@@ -134,7 +132,7 @@ pub fn resolve_binary(
             &executable_path,
             &executable_path,
             &omf.rpath,
-            &dep,
+            dep,
             &mut deptree,
             depp,
             all,
@@ -149,9 +147,9 @@ fn resolve_dependency(
     cache: &DyldCache,
     library_path: &search_path::SearchPathVec,
     executable_path: &String,
-    loader_path: &String,
+    loader_path: &str,
     rpaths: &search_path::SearchPathVec,
-    dependency: &String,
+    dependency: &str,
     deptree: &mut DepTree,
     depp: usize,
     all: bool,
@@ -224,7 +222,7 @@ fn resolve_dependency_1(
                 executable_path,
                 &path,
                 &elc.rpath,
-                &dep,
+                dep,
                 deptree,
                 depd,
                 all,
@@ -247,21 +245,18 @@ fn resolve_overrides<P: AsRef<Path>>(
     let filename = pathutils::get_name(&path);
     for searchpath in library_path {
         let newpath = Path::new(&searchpath.path).join(&filename);
-        match open_macho_file(&newpath, executable_path).ok() {
-            Some(OpenMachOFileResult::Object(elc)) => {
-                let depd = deptree.addnode(
-                    DepNode {
-                        path: pathutils::get_path(&newpath),
-                        name: filename.to_string(),
-                        mode: DepMode::LdLibraryPath,
-                        found: false,
-                    },
-                    depp,
-                );
-                return Some((elc, depd));
-            }
-            _ => {}
-        }
+         if let Ok(OpenMachOFileResult::Object(elc)) = open_macho_file(&newpath, executable_path) {
+             let depd = deptree.addnode(
+                 DepNode {
+                     path: pathutils::get_path(&newpath),
+                     name: filename,
+                     mode: DepMode::LdLibraryPath,
+                     found: false,
+                 },
+                 depp,
+             );
+             return Some((elc, depd));
+         }
     }
     None
 }
@@ -300,7 +295,7 @@ fn resolve_dependency_2(
         let depd = deptree.addnode(
             DepNode {
                 path: pathutils::get_path(&path),
-                name: name.to_string(),
+                name,
                 mode: DepMode::LdCache,
                 found: false,
             },
@@ -358,18 +353,18 @@ fn resolve_dependency_2(
 }
 
 fn resolve_dependency_check_found(
-    dependency: &String,
+    dependency: &str,
     deptree: &mut DepTree,
     depp: usize,
     all: bool,
 ) -> bool {
-    if let Some(entry) = deptree.get(&dependency) {
+    if let Some(entry) = deptree.get(dependency) {
         if all {
             deptree.addnode(
                 DepNode {
                     path: entry.path,
                     name: entry.name,
-                    mode: entry.mode.clone(),
+                    mode: entry.mode,
                     found: true,
                 },
                 depp,
@@ -381,27 +376,24 @@ fn resolve_dependency_check_found(
     }
 }
 
-fn open_macho_file<'a, P: AsRef<Path>>(
+fn open_macho_file<P: AsRef<Path>>(
     filename: &P,
     executable_path: &String,
 ) -> Result<OpenMachOFileResult, std::io::Error> {
-    let file = match fs::File::open(&filename) {
-        Ok(file) => file,
-        Err(_) => return Err(Error::new(ErrorKind::Other, "Failed to open file")),
-    };
+    let file = fs::File::open(filename)?;
 
     let mmap = match unsafe { memmap2::Mmap::map(&file) } {
         Ok(mmap) => mmap,
         Err(_) => return Err(Error::new(ErrorKind::Other, "Failed to map file")),
     };
 
-    match parse_object(&*mmap, 0, executable_path) {
+    match parse_object(&mmap, 0, executable_path) {
         Ok(ParseObjectResult::Object(omf)) => Ok(OpenMachOFileResult::Object(omf)),
         Ok(ParseObjectResult::Cache(images)) => Ok(OpenMachOFileResult::Cache(DyldCache {
-            images: images,
+            images,
             mmap: Some(mmap),
         })),
-        Err(e) => return Err(Error::new(ErrorKind::Other, e)),
+        Err(e) => Err(Error::new(ErrorKind::Other, e)),
     }
 }
 
@@ -410,7 +402,7 @@ fn parse_object(
     offset: u64,
     executable_path: &String,
 ) -> Result<ParseObjectResult, &'static str> {
-    let kind = match object::FileKind::parse_at(&*data, offset) {
+    let kind = match object::FileKind::parse_at(data, offset) {
         Ok(file) => file,
         Err(_err) => return Err("Failed to parse file"),
     };
@@ -441,7 +433,7 @@ impl<T, E: fmt::Display> HandleErr<T> for Result<T, E> {
 fn parse_macho32(
     data: &[u8],
     offset: u64,
-    executable_path: &String,
+    executable_path: &str,
 ) -> Result<ParseObjectResult, &'static str> {
     if let Some(macho) = MachHeader32::parse(data, offset).handle_err() {
         return parse_macho(macho, data, offset, executable_path);
@@ -452,7 +444,7 @@ fn parse_macho32(
 fn parse_macho64(
     data: &[u8],
     offset: u64,
-    executable_path: &String,
+    executable_path: &str,
 ) -> Result<ParseObjectResult, &'static str> {
     if let Some(macho) = MachHeader64::parse(data, offset).handle_err() {
         return parse_macho(macho, data, offset, executable_path);
@@ -512,19 +504,19 @@ fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
     header: &Mach,
     data: &[u8],
     offset: u64,
-    executable_path: &String,
+    executable_path: &str,
 ) -> Result<ParseObjectResult, &'static str> {
     let mut deps = DepsVec::new();
-    let mut rpaths = search_path::SearchPathVec::new();
+    let mut rpath = search_path::SearchPathVec::new();
 
     if let Ok(endian) = header.endian() {
         if let Ok(mut commands) = header.load_commands(endian, data, offset) {
             while let Ok(Some(command)) = commands.next() {
                 match parse_load_command::<Mach>(endian, command) {
-                    Some((LoadCommand::DYLIB, dylib)) => deps.push(dylib),
-                    Some((LoadCommand::RPATH, rpath)) => {
-                        let rpath = rpath.replace("@executable_path", executable_path);
-                        rpaths.add_path(rpath.as_str());
+                    Some((LoadCommand::Dylib, dylib)) => deps.push(dylib),
+                    Some((LoadCommand::Rpath, path)) => {
+                        let path = path.replace("@executable_path", executable_path);
+                        rpath.add_path(path.as_str());
                     }
                     _ => {}
                 }
@@ -533,8 +525,8 @@ fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
     }
 
     Ok(ParseObjectResult::Object(MachOInfo {
-        rpath: rpaths,
-        deps: deps,
+        rpath,
+        deps,
     }))
 }
 
@@ -563,7 +555,7 @@ fn parse_dyld_cache_images(
         let path = image
             .path(endian, data)
             .ok()
-            .and_then(|s| str::from_utf8(s).ok().and_then(|s| Some(s.to_string())));
+            .and_then(|s| str::from_utf8(s).ok().map(|s| s.to_string()));
         let offset = mappings.and_then(|mappings| image.file_offset(endian, mappings).ok());
         if let Some(path) = path {
             cache.insert(path, offset);
@@ -574,12 +566,12 @@ fn parse_dyld_cache_images(
 }
 
 enum LoadCommand {
-    DYLIB,
-    RPATH,
+    Dylib,
+    Rpath,
 }
 
-fn parse_string<'data>(data: Option<&'data [u8]>) -> Option<String> {
-    data.and_then(|s| str::from_utf8(s).ok().and_then(|s| Some(s.to_string())))
+fn parse_string(data: Option<&[u8]>) -> Option<String> {
+    data.and_then(|s| str::from_utf8(s).ok().map(|s| s.to_string()))
 }
 
 fn parse_load_command<Mach: MachHeader>(
@@ -590,13 +582,13 @@ fn parse_load_command<Mach: MachHeader>(
         match variant {
             LoadCommandVariant::Dylib(x) | LoadCommandVariant::IdDylib(x) => {
                 if let Some(dylib) = parse_string(command.string(endian, x.dylib.name).ok()) {
-                    return Some((LoadCommand::DYLIB, dylib));
+                    return Some((LoadCommand::Dylib, dylib));
                 };
                 None
             }
             LoadCommandVariant::Rpath(x) => {
                 if let Some(rpath) = parse_string(command.string(endian, x.path).ok()) {
-                    return Some((LoadCommand::RPATH, rpath));
+                    return Some((LoadCommand::Rpath, rpath));
                 };
                 None
             }
