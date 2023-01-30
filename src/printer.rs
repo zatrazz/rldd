@@ -22,9 +22,9 @@ pub struct Printer {
 impl Printer {
     pub fn new(pp: bool, ldd: bool, one: bool) -> Self {
         Self {
-            pp: pp,
-            ldd: ldd,
-            one: one,
+            pp,
+            ldd,
+            one,
         }
     }
 
@@ -68,12 +68,12 @@ impl Printer {
         if self.pp {
             if let Some(path) = path {
                 let delim = std::path::MAIN_SEPARATOR.to_string();
-                self.write_colorized(&mut buffer, &color_path, &format!("{}{}", path, delim));
+                self.write_colorized(&mut buffer, &color_path, &format!("{path}{delim}"));
             }
         }
 
         if self.ldd {
-            self.writeln_colorized(&mut buffer, &color_name, format!("{}:", name));
+            self.writeln_colorized(&mut buffer, &color_name, format!("{name}:"));
         } else {
             self.writeln_colorized(&mut buffer, &color_name, name);
         }
@@ -94,7 +94,7 @@ impl Printer {
 
         if self.pp {
             let delim = std::path::MAIN_SEPARATOR.to_string();
-            self.write_colorized(&mut buffer, &color, format!("{}{}", path, delim));
+            self.write_colorized(&mut buffer, &color, format!("{path}{delim}"));
         }
 
         if !found {
@@ -106,7 +106,7 @@ impl Printer {
         if !found {
             color.set_fg(Some(termcolor::Color::Yellow));
         }
-        self.writeln_colorized(&mut buffer, &color, format!(" {}", mode));
+        self.writeln_colorized(&mut buffer, &color, format!(" {mode}"));
 
         ok!(writer.print(&buffer));
     }
@@ -171,7 +171,7 @@ impl Printer {
             termcolor::ColorSpec::new()
                 .set_fg(Some(termcolor::Color::Red))
                 .set_bold(true),
-            format!("{} not found", dtneeded),
+            format!("{dtneeded} not found"),
         );
         ok!(writer.print(&buffer));
     }

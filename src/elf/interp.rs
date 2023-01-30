@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::pathutils;
 
-const GLIBC_INTERP: &'static [&'static str] = &[
+const GLIBC_INTERP: &[&str] = &[
     "ld-linux-aarch64.so.1",         // AArch64 little-endian.
     "ld-linux-aarch64_be.so.1",      // Aarch64 big-endian.
     "ld-linux-arc.so.2",             // ARC little-endian.
@@ -45,10 +45,10 @@ pub fn is_glibc(interp: &Option<String>) -> bool {
 }
 
 // musl interp is in the form of ld-musl-$(ARCH)$(SUBARCH).so.1
-const MUSL_SUBARCH_MIPS: &'static [&'static str] =
+const MUSL_SUBARCH_MIPS: &[&str] =
     &["r6", "r6el", "el", "r6-sf", "r6el-sf", "el-sf"];
 
-const MUSL_SUBARCH_SH: &'static [&'static str] = &[
+const MUSL_SUBARCH_SH: &[&str] = &[
     "eb",
     "-nofpu",
     "-fdpic",

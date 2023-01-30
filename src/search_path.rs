@@ -60,7 +60,7 @@ pub fn from_string<S: AsRef<str>>(string: S, delim: &[char]) -> SearchPathVec {
 
 pub fn from_preload<S: AsRef<str>>(string: S) -> SearchPathVec {
     let mut r = SearchPathVec::new();
-    for path in string.as_ref().split(":") {
+    for path in string.as_ref().split(':') {
         let path = match Path::new(path).canonicalize() {
             Ok(path) => path,
             // Maybe print an error message.

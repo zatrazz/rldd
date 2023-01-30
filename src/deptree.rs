@@ -14,7 +14,7 @@ pub struct DepNode {
 }
 
 impl arenatree::EqualString for DepNode {
-    fn eqstr(&self, other: &String) -> bool {
+    fn eqstr(&self, other: &str) -> bool {
         if self.mode == DepMode::Preload || self.mode == DepMode::LdLibraryPath {
             pathutils::get_name(&Path::new(other)) == self.name
         } else if self.path.is_none() || !Path::new(other).is_absolute() {

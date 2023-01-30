@@ -14,7 +14,7 @@ where
     Ok(io::BufReader::new(file).lines())
 }
 
-fn parse_line(line: &String) -> Option<String> {
+fn parse_line(line: &str) -> Option<String> {
     // Remove leading whitespace.
     let line = line.trim_start();
     // Remove trailing comments.
@@ -50,7 +50,7 @@ pub fn parse_ld_so_preload<P: AsRef<Path>>(filename: &P) -> SearchPathVec {
         };
 
         for entry in line.split(&[':', ' ', '\t'][..]) {
-            r.add_path(&entry);
+            r.add_path(entry);
         }
     }
 
