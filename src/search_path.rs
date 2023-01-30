@@ -5,7 +5,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::{fmt, fs};
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Eq, Debug, PartialEq, Clone)]
 pub struct SearchPath {
     pub path: String,
     pub dev: u64,
