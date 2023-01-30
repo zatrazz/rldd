@@ -69,7 +69,9 @@ impl DyldCache {
 // cache.
 pub fn create_context() -> DyldCache {
     if let Some(path) = dydlcache::path() {
-        if let Ok(OpenMachOFileResult::Cache(cache)) = open_macho_file(&Path::new(path), &String::new()) {
+        if let Ok(OpenMachOFileResult::Cache(cache)) =
+            open_macho_file(&Path::new(path), &String::new())
+        {
             return cache;
         }
     }
@@ -245,18 +247,18 @@ fn resolve_overrides<P: AsRef<Path>>(
     let filename = pathutils::get_name(&path);
     for searchpath in library_path {
         let newpath = Path::new(&searchpath.path).join(&filename);
-         if let Ok(OpenMachOFileResult::Object(elc)) = open_macho_file(&newpath, executable_path) {
-             let depd = deptree.addnode(
-                 DepNode {
-                     path: pathutils::get_path(&newpath),
-                     name: filename,
-                     mode: DepMode::LdLibraryPath,
-                     found: false,
-                 },
-                 depp,
-             );
-             return Some((elc, depd));
-         }
+        if let Ok(OpenMachOFileResult::Object(elc)) = open_macho_file(&newpath, executable_path) {
+            let depd = deptree.addnode(
+                DepNode {
+                    path: pathutils::get_path(&newpath),
+                    name: filename,
+                    mode: DepMode::LdLibraryPath,
+                    found: false,
+                },
+                depp,
+            );
+            return Some((elc, depd));
+        }
     }
     None
 }
@@ -524,10 +526,7 @@ fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
         }
     }
 
-    Ok(ParseObjectResult::Object(MachOInfo {
-        rpath,
-        deps,
-    }))
+    Ok(ParseObjectResult::Object(MachOInfo { rpath, deps }))
 }
 
 fn parse_dyld_cache(data: &[u8]) -> Result<ParseObjectResult, &'static str> {

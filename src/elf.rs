@@ -683,7 +683,7 @@ fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, binary: &P,
         *ld_cache = ld_config_txt::parse_ld_config_txt(
             &Path::new(&ld_config_path),
             binary,
-            &elc.interp.as_ref().unwrap(),
+            elc.interp.as_ref().unwrap(),
             elc.e_machine,
             elc.ei_data,
         )
@@ -938,7 +938,7 @@ fn resolve_dependency_ld_cache<'a>(
             let path = Path::new(&searchpath.path).join(dtneeded);
             if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), platform, false) {
                 return Some(ResolvedDependency {
-                    elc: elc,
+                    elc,
                     path: &searchpath.path,
                     mode: DepMode::LdCache,
                 });
@@ -955,7 +955,7 @@ fn resolve_dependency_ld_cache<'a>(
         }
 
         for linked_ns in &default_ns.namespaces {
-            if let Some(namespace) = ld_cache.get_namespace(&linked_ns) {
+            if let Some(namespace) = ld_cache.get_namespace(linked_ns) {
                 if !namespace.is_accessible(dtneeded) {
                     continue;
                 }
