@@ -11,10 +11,10 @@ static MACOS_VENTURA_CACHE_PATH_X86_64: &str =
 
 #[derive(Debug)]
 enum MacOsRelease {
-    VENTURA,
-    MONTEREY,
-    BIGSUR,
-    CATALINA,
+    Ventura,
+    Monterey,
+    BigSur,
+    Catalina,
 }
 
 fn osrelease() -> Result<MacOsRelease, std::io::Error> {
@@ -62,31 +62,31 @@ fn osrelease() -> Result<MacOsRelease, std::io::Error> {
         0 => Ok("".to_string()),
         l => std::str::from_utf8(&val[..l - 1])
             .map_err(|_e| Error::new(ErrorKind::Other, "Invalid UTF8 sequence"))
-            .and_then(|s| Ok(s.to_string())),
+            .map(|s| s.to_string()),
     }?;
 
-    match osrelease.split('.').nth(0) {
-        Some("22") => return Ok(MacOsRelease::VENTURA),
-        Some("21") => return Ok(MacOsRelease::MONTEREY),
-        Some("20") => return Ok(MacOsRelease::BIGSUR),
-        Some("19") => return Ok(MacOsRelease::CATALINA),
-        _ => return Err(Error::new(ErrorKind::Other, "Invalid MacOS release")),
+    match osrelease.split('.').next() {
+        Some("22") => Ok(MacOsRelease::Ventura),
+        Some("21") => Ok(MacOsRelease::Monterey),
+        Some("20") => Ok(MacOsRelease::BigSur),
+        Some("19") => Ok(MacOsRelease::Catalina),
+        _ => Err(Error::new(ErrorKind::Other, "Invalid MacOS release")),
     }
 }
 
 pub fn path() -> Option<&'static str> {
     match osrelease() {
-        Ok(MacOsRelease::VENTURA) => match std::env::consts::ARCH {
+        Ok(MacOsRelease::Ventura) => match std::env::consts::ARCH {
             "aarch64" => Some(MACOS_VENTURA_CACHE_PATH_ARM64),
             "x86_64" => Some(MACOS_VENTURA_CACHE_PATH_X86_64),
             _ => None,
         },
-        Ok(MacOsRelease::MONTEREY) | Ok(MacOsRelease::BIGSUR) => match std::env::consts::ARCH {
+        Ok(MacOsRelease::Monterey) | Ok(MacOsRelease::BigSur) => match std::env::consts::ARCH {
             "aarch64" => Some(MACOS_BIG_SUR_CACHE_PATH_ARM64),
             "x86_64" => Some(MACOS_BIG_SUR_CACHE_PATH_X86_64),
             _ => None,
         },
-        Ok(MacOsRelease::CATALINA) => match std::env::consts::ARCH {
+        Ok(MacOsRelease::Catalina) => match std::env::consts::ARCH {
             "x86_64" => Some(MACOS_CATALINA_CACHE_PATH_X86_64),
             _ => None,
         },

@@ -111,7 +111,7 @@ impl Properties {
             } else {
                 return;
             };
-            v.push_str(&format!("{}{}", sep, value.as_ref()).to_string());
+            v.push_str(&format!("{sep}{}", value.as_ref()));
         } else {
             self.add(key, value);
         };
@@ -124,7 +124,7 @@ impl Properties {
     fn get_bool<S: AsRef<str>>(&self, name: S) -> bool {
         self.properties
             .get(name.as_ref())
-            .and_then(|s| Some(s == "true"))
+            .map(|s| s == "true")
             .unwrap_or(false)
     }
 
@@ -168,10 +168,10 @@ enum Token {
 
 fn get_vndk_version_str(delimiter: char) -> String {
     let vndk_str = get_vndk_version_string("");
-    if vndk_str == "" || vndk_str == "default" {
+    if vndk_str.is_empty() || vndk_str == "default" {
         return "".to_string();
     }
-    format!("{}{}", delimiter, vndk_str)
+    format!("{delimiter}{vndk_str}")
 }
 
 pub fn get_ld_config_path<P: AsRef<Path>>(
@@ -193,7 +193,7 @@ pub fn get_ld_config_path<P: AsRef<Path>>(
 
     fn get_vndk_ld_config_path(e_machine: u16, ei_class: u8, linkerconfig: bool) -> Option<String> {
         if let Some(abi) = abi_string(e_machine, ei_class) {
-            let ld_config_arch = format!("/system/etc/ld.config.{}.txt", abi);
+            let ld_config_arch = format!("/system/etc/ld.config.{abi}.txt");
             if Path::new(&ld_config_arch).exists() {
                 return Some(ld_config_arch);
             }
@@ -222,12 +222,12 @@ pub fn get_ld_config_path<P: AsRef<Path>>(
         if parts.len() == 5 && parts[1] == "apex" && parts[3] == "bin" {
             let name = parts[2].to_string_lossy();
             if linkerconfig {
-                let linkerconfig_path = format!("/linkerconfig/{}/ld.config.txt)", name);
+                let linkerconfig_path = format!("/linkerconfig/{name}/ld.config.txt)");
                 if Path::new(&linkerconfig_path).exists() {
                     return Some(linkerconfig_path);
                 }
             }
-            let apex_config = format!("/apex/{}/etc/ld.config.txt", name);
+            let apex_config = format!("/apex/{name}/etc/ld.config.txt");
             if Path::new(&apex_config).exists() {
                 return Some(apex_config);
             }
@@ -347,21 +347,18 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>, S: AsRef<str>>(
 
     for (_, ns) in ldcache.namespaces_config.iter_mut() {
         let mut property_name_prefix = format!("namespace.{}", ns.name);
-        if let Some(linked_namespaces) = properties.get(&format!("{}.links", property_name_prefix))
-        {
+        if let Some(linked_namespaces) = properties.get(&format!("{property_name_prefix}.links")) {
             for ns_linked in linked_namespaces.split(',') {
                 if !ns_configs_set.contains(ns_linked) {
                     return Err("undefined namespace");
                 }
 
                 let allow_all = properties.get_bool(format!(
-                    "{}.link.{}.allow_all_shared_libs",
-                    property_name_prefix, ns_linked
+                    "{property_name_prefix}.link.{ns_linked}.allow_all_shared_libs"
                 ));
 
                 let shared_libs = properties.get_string(format!(
-                    "{}.link.{}.shared_libs",
-                    property_name_prefix, ns_linked
+                    "{property_name_prefix}.link.{ns_linked}.shared_libs"
                 ));
 
                 if !allow_all && shared_libs.is_empty() {
@@ -376,19 +373,19 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>, S: AsRef<str>>(
             }
         }
 
-        ns.isolated = properties.get_bool(format!("{}.isolated", property_name_prefix));
-        ns.visible = properties.get_bool(format!("{}.visible", property_name_prefix));
+        ns.isolated = properties.get_bool(format!("{property_name_prefix}.isolated"));
+        ns.visible = properties.get_bool(format!("{property_name_prefix}.visible"));
 
         // Android r31 added 'allowed_libs' as synonym for 'whitelisted'.
         let mut allowed_libs: Vec<String> = properties
-            .get_string(format!("{}.whitelisted", property_name_prefix))
+            .get_string(format!("{property_name_prefix}.whitelisted"))
             .split(':')
             .map(|s| s.to_string())
             .filter(|x| !x.is_empty())
             .collect();
         allowed_libs.append(
             &mut properties
-                .get_string(format!("{}.allowed_libs", property_name_prefix))
+                .get_string(format!("{property_name_prefix}.allowed_libs"))
                 .split(':')
                 .map(|s| s.to_string())
                 .filter(|x| !x.is_empty())
@@ -401,7 +398,7 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>, S: AsRef<str>>(
         }
 
         ns.search_paths = properties.get_paths(
-            format!("{}.search.paths", property_name_prefix),
+            format!("{property_name_prefix}.search.paths"),
             e_machine,
             ei_class,
         );
@@ -472,7 +469,7 @@ where
     Ok(io::BufReader::new(file).lines())
 }
 
-fn next_token(line: &String) -> Option<(Token, String)> {
+fn next_token(line: &str) -> Option<(Token, String)> {
     // Remove leading whitespace.
     let line = line.trim_start();
     // Remove trailing comments.
@@ -492,22 +489,22 @@ fn next_token(line: &String) -> Option<(Token, String)> {
         return Some((Token::Section, line[1..line.len() - 1].to_string()));
     } else if line.contains("+=") {
         return Some((Token::PropertyAppend, line.to_string()));
-    } else if line.contains("=") {
+    } else if line.contains('=') {
         return Some((Token::PropertyAssign, line.to_string()));
     }
 
     Some((Token::Error, line.to_string()))
 }
 
-fn parse_assignment(line: &String) -> Result<(&str, &str), &'static str> {
-    let vec: Vec<&str> = line.split("=").collect();
+fn parse_assignment(line: &str) -> Result<(&str, &str), &'static str> {
+    let vec: Vec<&str> = line.split('=').collect();
     if vec.len() != 2 {
         return Err("invalid assigment line");
     }
     Ok((vec[0].trim(), vec[1].trim()))
 }
 
-fn parse_append(line: &String) -> Result<(&str, &str), &'static str> {
+fn parse_append(line: &str) -> Result<(&str, &str), &'static str> {
     let vec: Vec<&str> = line.split("+=").collect();
     if vec.len() != 2 {
         return Err("invalid append line");

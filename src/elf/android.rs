@@ -58,12 +58,12 @@ pub fn get_property<S1: AsRef<str>, S2: AsRef<str>>(
         0 => Ok(default.as_ref().to_string()),
         l => std::str::from_utf8(&val[..l - 1])
             .map_err(|_e| Error::new(ErrorKind::Other, "Invalid UTF8 sequence"))
-            .and_then(|s| Ok(s.trim_matches(char::from(0)).to_string())),
+            .map(|s| s.trim_matches(char::from(0)).to_string()),
     }
 }
 
 pub fn get_release_str() -> Result<String, std::io::Error> {
-    get_property("ro.build.version.sdk", "").and_then(|s| Ok(s.to_string()))
+    get_property("ro.build.version.sdk", "")
 }
 
 pub fn get_release() -> Result<AndroidRelease, std::io::Error> {
@@ -102,10 +102,10 @@ pub fn get_vndk_version_string<S: AsRef<str>>(default: S) -> String {
 }
 
 pub fn is_asan<S: AsRef<str>>(interp: S) -> bool {
-    match pathutils::get_name(&std::path::Path::new(interp.as_ref())).as_str() {
-        "linker_asan" | "linker_asan64" => true,
-        _ => false,
-    }
+    matches!(
+        pathutils::get_name(&std::path::Path::new(interp.as_ref())).as_str(),
+        "linker_asan" | "linker_asan64"
+    )
 }
 
 pub fn libpath(e_machine: u16, ei_class: u8) -> Option<&'static str> {

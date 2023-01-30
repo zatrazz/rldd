@@ -5,7 +5,7 @@
 // - Provide getauxval similar to libc signature.
 
 use std::fs::File;
-use std::io::{BufReader, Read, Error, ErrorKind};
+use std::io::{BufReader, Error, ErrorKind, Read};
 use std::path::Path;
 
 #[cfg(target_pointer_width = "32")]
@@ -25,7 +25,7 @@ pub struct AuxvPair {
 }
 
 pub fn getauxval(key: AuxvType) -> Result<AuxvType, std::io::Error> {
-    for r in iterate_path(&Path::new("/proc/self/auxv"))? {
+    for r in iterate_path(Path::new("/proc/self/auxv"))? {
         let pair = match r {
             Ok(p) => p,
             Err(e) => return Err(e),
@@ -47,16 +47,15 @@ pub struct ProcfsAuxvIter<R: Read> {
 }
 
 fn iterate_path(path: &Path) -> Result<ProcfsAuxvIter<File>, std::io::Error> {
-    let input = File::open(path)
-        .map(|f| BufReader::new(f))?;
+    let input = File::open(path).map(BufReader::new)?;
 
     let pair_size = 2 * std::mem::size_of::<AuxvType>();
     let buf: Vec<u8> = Vec::with_capacity(pair_size);
 
     Ok(ProcfsAuxvIter::<File> {
-        pair_size: pair_size,
-        buf: buf,
-        input: input,
+        pair_size,
+        buf,
+        input,
         keep_going: true,
     })
 }
@@ -85,7 +84,7 @@ impl<R: Read> Iterator for ProcfsAuxvIter<R> {
 
                     read_bytes += n;
                 }
-                Err(e) => return Some(Err(e))
+                Err(e) => return Some(Err(e)),
             }
         }
 
@@ -110,14 +109,14 @@ fn read_long(reader: &mut dyn Read) -> std::io::Result<AuxvType> {
     match std::mem::size_of::<AuxvType>() {
         4 => {
             let mut buffer = [0; 4];
-            reader.read(&mut buffer[..]).unwrap();
+            reader.read_exact(&mut buffer[..])?;
             Ok(u32::from_ne_bytes(buffer) as AuxvType)
         }
         8 => {
             let mut buffer = [0; 8];
-            reader.read(&mut buffer[..]).unwrap();
+            reader.read_exact(&mut buffer[..])?;
             Ok(u64::from_ne_bytes(buffer) as AuxvType)
         }
-        x => panic!("Unexpected type width: {}", x),
+        x => unreachable!("Unexpected type width: {x}"),
     }
 }

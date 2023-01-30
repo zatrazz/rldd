@@ -26,7 +26,7 @@ where
 }
 
 pub trait EqualString {
-    fn eqstr(&self, other: &String) -> bool;
+    fn eqstr(&self, other: &str) -> bool;
 }
 
 #[derive(Debug)]
@@ -61,7 +61,7 @@ where
         idx
     }
 
-    pub fn get(&mut self, val: &String) -> Option<T> {
+    pub fn get(&mut self, val: &str) -> Option<T> {
         for node in &self.arena {
             if node.val.eqstr(val) {
                 return Some(node.val.clone());
@@ -71,7 +71,7 @@ where
     }
 
     #[allow(dead_code)]
-    pub fn contains(&self, val: &String) -> bool {
+    pub fn contains(&self, val: &str) -> bool {
         for node in &self.arena {
             if node.val.eqstr(val) {
                 return true;

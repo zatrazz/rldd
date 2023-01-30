@@ -5,7 +5,7 @@ mod arenatree;
 use crate::pathutils;
 
 // A resolved dependency
-#[derive(PartialEq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub struct DepNode {
     pub path: Option<String>,
     pub name: String,
@@ -14,7 +14,7 @@ pub struct DepNode {
 }
 
 impl arenatree::EqualString for DepNode {
-    fn eqstr(&self, other: &String) -> bool {
+    fn eqstr(&self, other: &str) -> bool {
         if self.mode == DepMode::Preload || self.mode == DepMode::LdLibraryPath {
             pathutils::get_name(&Path::new(other)) == self.name
         } else if self.path.is_none() || !Path::new(other).is_absolute() {
@@ -35,7 +35,7 @@ impl arenatree::EqualString for DepNode {
 pub type DepTree = arenatree::ArenaTree<DepNode>;
 
 // The resolution mode for a dependency, used mostly for printing.
-#[derive(PartialEq, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 #[allow(dead_code)]
 pub enum DepMode {
     Preload,       // Preload library.

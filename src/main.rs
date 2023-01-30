@@ -36,25 +36,25 @@ fn print_deps_children(
         let dep = &deps.arena[*c];
         deptrace.push(children.len() > 1);
         if dep.val.mode == deptree::DepMode::NotFound {
-            p.print_not_found(&dep.val.name, &deptrace);
+            p.print_not_found(&dep.val.name, deptrace);
         } else if dep.val.found {
             p.print_already_found(
                 &dep.val.name,
                 dep.val.path.as_ref().unwrap(),
                 &dep.val.mode.to_string(),
-                &deptrace,
+                deptrace,
             );
         } else {
             p.print_dependency(
                 &dep.val.name,
                 dep.val.path.as_ref().unwrap(),
                 &dep.val.mode.to_string(),
-                &deptrace,
+                deptrace,
             );
         }
         deptrace.pop();
 
-        deptrace.push(children.len() > 1 && !iter.peek().is_none());
+        deptrace.push(children.len() > 1 && iter.peek().is_some());
         print_deps_children(p, deps, &dep.children, deptrace);
         deptrace.pop();
     }
@@ -105,23 +105,23 @@ struct Options {
 
 fn print_error(arg: &String, err: std::io::Error) -> String {
     match err.kind() {
-        std::io::ErrorKind::NotFound => format!("{}: no such file or directory", arg),
-        std::io::ErrorKind::PermissionDenied => format!("{}: permission denied", arg),
-        _ => format!("{}: {}", arg, err.to_string()),
+        std::io::ErrorKind::NotFound => format!("{arg}: no such file or directory"),
+        std::io::ErrorKind::PermissionDenied => format!("{arg}: permission denied"),
+        _ => format!("{arg}: {err}"),
     }
 }
 
 fn main() {
     let opts: Options = argh::from_env();
 
-    let mut printer = printer::create(opts.path, opts.ldd, opts.args.len() == 1);
+    let printer = printer::create(opts.path, opts.ldd, opts.args.len() == 1);
 
     let ld_library_path = search_path::from_string(&opts.library_path, &[':']);
     let ld_preload = search_path::from_preload(&opts.preload);
 
     let mut ctx = create_context();
 
-    if opts.args.len() == 0 {
+    if opts.args.is_empty() {
         println!(
             "{progname}: missing file arguments\n\
             Try `{progname} --help' for more information.",
@@ -139,7 +139,7 @@ fn main() {
             opts.all,
             arg.as_str(),
         ) {
-            Ok(deptree) => print_deps(&mut printer, &deptree),
+            Ok(deptree) => print_deps(&printer, &deptree),
             Err(e) => eprintln!("error: {}", print_error(&arg, e)),
         }
     }

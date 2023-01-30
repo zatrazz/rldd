@@ -5,7 +5,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::{fmt, fs};
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Eq, Debug, PartialEq, Clone)]
 pub struct SearchPath {
     pub path: String,
     pub dev: u64,
@@ -60,7 +60,7 @@ pub fn from_string<S: AsRef<str>>(string: S, delim: &[char]) -> SearchPathVec {
 
 pub fn from_preload<S: AsRef<str>>(string: S) -> SearchPathVec {
     let mut r = SearchPathVec::new();
-    for path in string.as_ref().split(":") {
+    for path in string.as_ref().split(':') {
         let path = match Path::new(path).canonicalize() {
             Ok(path) => path,
             // Maybe print an error message.

@@ -209,7 +209,7 @@ fn read_string<R: Read + Seek>(
 // Read a u32 value in native endianess format.
 fn read_u32<R: Read + Seek>(reader: &mut BufReader<R>) -> Result<u32> {
     let mut buffer = [0; 4];
-    reader.read(&mut buffer[..]).unwrap();
+    reader.read_exact(&mut buffer[..]).unwrap();
     Ok(u32::from_ne_bytes(buffer))
 }
 
@@ -371,8 +371,8 @@ fn parse_ld_so_cache_new<R: Read + Seek>(
 // Return a new best-fit index for HWCAP_SUPPORTED if the HWCAPIDX contains a valid value.
 fn check_hwcap_index(
     hwcapidx: &Option<u32>,
-    hwcap_idxs: &Vec<String>,
-    hwcap_supported: &Vec<&'static str>,
+    hwcap_idxs: &[String],
+    hwcap_supported: &[&'static str],
 ) -> Option<usize> {
     if let Some(hwidx) = hwcapidx {
         let hwcap_value = hwcap_idxs[*hwidx as usize].to_string();
@@ -450,7 +450,7 @@ fn parse_ld_so_cache_glibc_hwcap<R: Read + Seek>(
             }
         }
     }
-    return Ok(r);
+    Ok(r)
 }
 
 pub fn parse_ld_so_cache<P: AsRef<Path>>(

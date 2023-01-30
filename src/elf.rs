@@ -54,6 +54,7 @@ struct ElfInfo {
     ei_class: u8,
     ei_data: u8,
     ei_osabi: u8,
+    #[allow(dead_code)]
     ei_abiver: u8,
     e_machine: u16,
     #[allow(dead_code)]
@@ -172,7 +173,7 @@ fn parse_elf_program_headers<Elf: FileHeader>(
         Ok(mut elc) => {
             elc.interp = parse_elf_interp::<Elf>(endian, data, headers);
             handle_loader(&mut elc);
-            return Ok(elc);
+            Ok(elc)
         }
         Err(e) => Err(e),
     }
@@ -260,7 +261,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
                 runpath: parse_elf_dyn_searchpath(
                     endian, elf, DT_RUNPATH, dynamic, dynstr, origin, platform,
                 ),
-                nodeflibs: nodeflibs,
+                nodeflibs,
                 deps: dtneeded,
                 is_musl: false,
             }),
@@ -309,10 +310,10 @@ fn parse_elf_dyn_str<Elf: FileHeader>(
     None
 }
 
-fn replace_dyn_str(dynstr: &String, token: &str, value: &str) -> String {
-    let newdynstr = dynstr.replace(&format!("${}", token), value);
+fn replace_dyn_str(dynstr: &str, token: &str, value: &str) -> String {
+    let newdynstr = dynstr.replace(&format!("${token}"), value);
     // Also handle ${token}
-    newdynstr.replace(&format!("${{{}}}", token), value)
+    newdynstr.replace(&format!("${{{token}}}"), value)
 }
 
 #[cfg(target_os = "linux")]
@@ -329,7 +330,7 @@ fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
 fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
     _endian: Elf::Endian,
     _elf: &Elf,
-    _dynstr: &mut String,
+    _dynstr: &mut str,
 ) {
 }
 
@@ -408,14 +409,14 @@ fn parse_elf_dyn_flags<Elf: FileHeader>(
     0
 }
 
-fn open_elf_file<'a, P: AsRef<Path>>(
+fn open_elf_file<P: AsRef<Path>>(
     filename: &P,
     melc: Option<&ElfInfo>,
     dtneeded: Option<&String>,
     platform: Option<&String>,
     preload: bool,
 ) -> Result<ElfInfo, std::io::Error> {
-    let file = match fs::File::open(&filename) {
+    let file = match fs::File::open(filename) {
         Ok(file) => file,
         Err(_) => return Err(Error::new(ErrorKind::Other, "Failed to open file")),
     };
@@ -425,12 +426,13 @@ fn open_elf_file<'a, P: AsRef<Path>>(
         Err(_) => return Err(Error::new(ErrorKind::Other, "Failed to map file")),
     };
 
-    let parent = match filename.as_ref().parent().and_then(Path::to_str) {
-        Some(parent) => parent,
-        None => "",
-    };
+    let parent = filename
+        .as_ref()
+        .parent()
+        .and_then(Path::to_str)
+        .unwrap_or("");
 
-    match parse_object(&*mmap, parent, platform) {
+    match parse_object(&mmap, parent, platform) {
         Ok(elc) => {
             if let Some(melc) = melc {
                 // Skip DT_NEEDED and SONAME checks for preload objects.
@@ -440,12 +442,12 @@ fn open_elf_file<'a, P: AsRef<Path>>(
             }
             Ok(elc)
         }
-        Err(e) => return Err(Error::new(ErrorKind::Other, e)),
+        Err(e) => Err(Error::new(ErrorKind::Other, e)),
     }
 }
 
 fn match_elf_name(melc: &ElfInfo, dtneeded: Option<&String>, elc: &ElfInfo) -> bool {
-    if !check_elf_header(&elc) || !match_elf_header(&melc, &elc) {
+    if !check_elf_header(elc) || !match_elf_header(melc, elc) {
         return false;
     }
 
@@ -481,8 +483,7 @@ fn check_elf_header(elc: &ElfInfo) -> bool {
         _ => |osabi, ver, maxver| ver == 0 || (osabi == ELFOSABI_GNU && ver < maxver),
     };
 
-    return check_elf_osabi(elc.ei_osabi)
-        && check_elf_abiversion(elc.ei_osabi, elc.ei_abiver, maxver);
+    check_elf_osabi(elc.ei_osabi) && check_elf_abiversion(elc.ei_osabi, elc.ei_abiver, maxver)
 }
 #[cfg(target_os = "freebsd")]
 fn check_elf_header(elc: &ElfInfo) -> bool {
@@ -627,11 +628,11 @@ pub fn resolve_binary(
 
     let config = Config {
         ld_preload: &preload,
-        ld_library_path: ld_library_path,
-        ld_cache: ld_cache,
-        system_dirs: system_dirs,
+        ld_library_path,
+        ld_cache,
+        system_dirs,
         platform: platform.as_ref(),
-        all: all,
+        all,
     };
 
     let mut deptree = DepTree::new();
@@ -650,7 +651,7 @@ pub fn resolve_binary(
     }
 
     for dep in &elc.deps {
-        resolve_dependency(&config, &dep, &elc, &mut deptree, depp, false);
+        resolve_dependency(&config, dep, &elc, &mut deptree, depp, false);
     }
 
     Ok(deptree)
@@ -682,7 +683,7 @@ fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, binary: &P,
         *ld_cache = ld_config_txt::parse_ld_config_txt(
             &Path::new(&ld_config_path),
             binary,
-            &elc.interp.as_ref().unwrap(),
+            elc.interp.as_ref().unwrap(),
             elc.e_machine,
             elc.ei_data,
         )
@@ -753,7 +754,7 @@ fn resolve_dependency(
                     DepNode {
                         path: entry.path,
                         name: pathutils::get_name(&Path::new(dependency)),
-                        mode: entry.mode.clone(),
+                        mode: entry.mode,
                         found: true,
                     },
                     depp,
@@ -788,7 +789,7 @@ fn resolve_dependency(
         }
 
         for sdep in &dep.elc.deps {
-            resolve_dependency(&config, &sdep, &dep.elc, deptree, c, preload);
+            resolve_dependency(config, sdep, &dep.elc, deptree, c, preload);
         }
     } else {
         let path = Path::new(dependency);
@@ -816,7 +817,7 @@ fn resolve_dependency_1<'a>(
     if path.is_absolute() {
         if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, preload) {
             return Some(ResolvedDependency {
-                elc: elc,
+                elc,
                 path: dtneeded,
                 mode: if preload {
                     DepMode::Preload
@@ -835,7 +836,7 @@ fn resolve_dependency_1<'a>(
             if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false)
             {
                 return Some(ResolvedDependency {
-                    elc: elc,
+                    elc,
                     path: &searchpath.path,
                     mode: DepMode::DtRpath,
                 });
@@ -848,7 +849,7 @@ fn resolve_dependency_1<'a>(
         let path = Path::new(&searchpath.path).join(dtneeded);
         if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false) {
             return Some(ResolvedDependency {
-                elc: elc,
+                elc,
                 path: &searchpath.path,
                 mode: DepMode::LdLibraryPath,
             });
@@ -860,7 +861,7 @@ fn resolve_dependency_1<'a>(
         let path = Path::new(&searchpath.path).join(dtneeded);
         if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false) {
             return Some(ResolvedDependency {
-                elc: elc,
+                elc,
                 path: &searchpath.path,
                 mode: DepMode::DtRunpath,
             });
@@ -884,7 +885,7 @@ fn resolve_dependency_1<'a>(
         let path = Path::new(&searchpath.path).join(dtneeded);
         if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false) {
             return Some(ResolvedDependency {
-                elc: elc,
+                elc,
                 path: &searchpath.path,
                 mode: DepMode::SystemDirs,
             });
@@ -905,8 +906,8 @@ fn resolve_dependency_ld_cache<'a>(
         let pathbuf = Path::new(&path);
         if let Ok(elc) = open_elf_file(&pathbuf, Some(elc), Some(dtneeded), platform, false) {
             return Some(ResolvedDependency {
-                elc: elc,
-                path: path,
+                elc,
+                path,
                 mode: DepMode::LdCache,
             });
         }
@@ -937,7 +938,7 @@ fn resolve_dependency_ld_cache<'a>(
             let path = Path::new(&searchpath.path).join(dtneeded);
             if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), platform, false) {
                 return Some(ResolvedDependency {
-                    elc: elc,
+                    elc,
                     path: &searchpath.path,
                     mode: DepMode::LdCache,
                 });
@@ -954,7 +955,7 @@ fn resolve_dependency_ld_cache<'a>(
         }
 
         for linked_ns in &default_ns.namespaces {
-            if let Some(namespace) = ld_cache.get_namespace(&linked_ns) {
+            if let Some(namespace) = ld_cache.get_namespace(linked_ns) {
                 if !namespace.is_accessible(dtneeded) {
                     continue;
                 }
@@ -983,7 +984,7 @@ fn resolve_dependency_ld_cache<'a>(
         let path = Path::new(&searchpath.path).join(dtneeded);
         if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), platform, false) {
             return Some(ResolvedDependency {
-                elc: elc,
+                elc,
                 path: &searchpath.path,
                 mode: DepMode::LdCache,
             });
