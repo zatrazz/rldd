@@ -54,6 +54,7 @@ struct ElfInfo {
     ei_class: u8,
     ei_data: u8,
     ei_osabi: u8,
+    #[allow(dead_code)]
     ei_abiver: u8,
     e_machine: u16,
     #[allow(dead_code)]
@@ -329,7 +330,7 @@ fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
 fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
     _endian: Elf::Endian,
     _elf: &Elf,
-    _dynstr: &mut String,
+    _dynstr: &mut str,
 ) {
 }
 
@@ -980,7 +981,7 @@ fn resolve_dependency_ld_cache<'a>(
         let path = Path::new(&searchpath.path).join(dtneeded);
         if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), platform, false) {
             return Some(ResolvedDependency {
-                elc: elc,
+                elc,
                 path: &searchpath.path,
                 mode: DepMode::LdCache,
             });
