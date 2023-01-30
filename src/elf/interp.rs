@@ -45,8 +45,7 @@ pub fn is_glibc(interp: &Option<String>) -> bool {
 }
 
 // musl interp is in the form of ld-musl-$(ARCH)$(SUBARCH).so.1
-const MUSL_SUBARCH_MIPS: &[&str] =
-    &["r6", "r6el", "el", "r6-sf", "r6el-sf", "el-sf"];
+const MUSL_SUBARCH_MIPS: &[&str] = &["r6", "r6el", "el", "r6-sf", "r6el-sf", "el-sf"];
 
 const MUSL_SUBARCH_SH: &[&str] = &[
     "eb",

@@ -426,7 +426,11 @@ fn open_elf_file<P: AsRef<Path>>(
         Err(_) => return Err(Error::new(ErrorKind::Other, "Failed to map file")),
     };
 
-    let parent = filename.as_ref().parent().and_then(Path::to_str).unwrap_or("");
+    let parent = filename
+        .as_ref()
+        .parent()
+        .and_then(Path::to_str)
+        .unwrap_or("");
 
     match parse_object(&mmap, parent, platform) {
         Ok(elc) => {
@@ -479,8 +483,7 @@ fn check_elf_header(elc: &ElfInfo) -> bool {
         _ => |osabi, ver, maxver| ver == 0 || (osabi == ELFOSABI_GNU && ver < maxver),
     };
 
-    check_elf_osabi(elc.ei_osabi)
-        && check_elf_abiversion(elc.ei_osabi, elc.ei_abiver, maxver)
+    check_elf_osabi(elc.ei_osabi) && check_elf_abiversion(elc.ei_osabi, elc.ei_abiver, maxver)
 }
 #[cfg(target_os = "freebsd")]
 fn check_elf_header(elc: &ElfInfo) -> bool {

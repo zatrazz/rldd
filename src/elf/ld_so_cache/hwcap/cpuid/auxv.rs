@@ -5,7 +5,7 @@
 // - Provide getauxval similar to libc signature.
 
 use std::fs::File;
-use std::io::{BufReader, Read, Error, ErrorKind};
+use std::io::{BufReader, Error, ErrorKind, Read};
 use std::path::Path;
 
 #[cfg(target_pointer_width = "32")]
@@ -47,8 +47,7 @@ pub struct ProcfsAuxvIter<R: Read> {
 }
 
 fn iterate_path(path: &Path) -> Result<ProcfsAuxvIter<File>, std::io::Error> {
-    let input = File::open(path)
-        .map(BufReader::new)?;
+    let input = File::open(path).map(BufReader::new)?;
 
     let pair_size = 2 * std::mem::size_of::<AuxvType>();
     let buf: Vec<u8> = Vec::with_capacity(pair_size);
@@ -85,7 +84,7 @@ impl<R: Read> Iterator for ProcfsAuxvIter<R> {
 
                     read_bytes += n;
                 }
-                Err(e) => return Some(Err(e))
+                Err(e) => return Some(Err(e)),
             }
         }
 

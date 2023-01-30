@@ -21,11 +21,7 @@ pub struct Printer {
 
 impl Printer {
     pub fn new(pp: bool, ldd: bool, one: bool) -> Self {
-        Self {
-            pp,
-            ldd,
-            one,
-        }
+        Self { pp, ldd, one }
     }
 
     fn write_colorized<S: Into<String>>(

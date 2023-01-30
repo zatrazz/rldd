@@ -113,9 +113,7 @@ pub mod cpuid {
         if hwcap & HWCAP_S390_VX != 0 {
             r.push("z13");
         }
-        if hwcap & HWCAP_S390_VXD != 0
-            && hwcap & HWCAP_S390_VXE != 0
-            && hwcap & HWCAP_S390_GS != 0
+        if hwcap & HWCAP_S390_VXD != 0 && hwcap & HWCAP_S390_VXE != 0 && hwcap & HWCAP_S390_GS != 0
         {
             r.push("z14");
         }
