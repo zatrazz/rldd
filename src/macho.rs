@@ -112,32 +112,33 @@ pub fn resolve_binary(
         found: false,
     });
 
+    let config = Config {
+        cache,
+        library_path,
+        executable_path: &executable_path,
+        all,
+    };
+
     for pload in preload {
         resolve_dependency(
-            cache,
-            library_path,
-            &executable_path,
+            &config,
             &executable_path,
             &omf.rpath,
             &pload.path,
             &mut deptree,
             depp,
-            all,
             true,
         );
     }
 
     for dep in &omf.deps {
         resolve_dependency(
-            cache,
-            library_path,
-            &executable_path,
+            &config,
             &executable_path,
             &omf.rpath,
             dep,
             &mut deptree,
             depp,
-            all,
             false,
         );
     }
@@ -145,33 +146,34 @@ pub fn resolve_binary(
     Ok(deptree)
 }
 
+struct Config<'a> {
+    cache: &'a DyldCache,
+    library_path: &'a search_path::SearchPathVec,
+    executable_path: &'a String,
+    all: bool,
+}
+
 fn resolve_dependency(
-    cache: &DyldCache,
-    library_path: &search_path::SearchPathVec,
-    executable_path: &String,
+    config: &Config,
     loader_path: &str,
     rpaths: &search_path::SearchPathVec,
     dependency: &str,
     deptree: &mut DepTree,
     depp: usize,
-    all: bool,
     preload: bool,
 ) {
-    let mut dependency = dependency.replace("@executable_path", executable_path);
+    let mut dependency = dependency.replace("@executable_path", config.executable_path);
     dependency = dependency.replace("@loader_path", loader_path);
 
     if dependency.contains("@rpath") {
         for rpath in rpaths {
             let mut newdependency = dependency.replace("@rpath", rpath.path.as_str());
             if resolve_dependency_1(
-                cache,
-                library_path,
-                executable_path,
+                config,
                 &mut newdependency,
                 true,
                 deptree,
                 depp,
-                all,
                 preload,
             ) {
                 return;
@@ -181,53 +183,41 @@ fn resolve_dependency(
     }
 
     resolve_dependency_1(
-        cache,
-        library_path,
-        executable_path,
+        config,
         &mut dependency,
         false,
         deptree,
         depp,
-        all,
         preload,
     );
 }
 
 fn resolve_dependency_1(
-    cache: &DyldCache,
-    library_path: &search_path::SearchPathVec,
-    executable_path: &String,
+    config: &Config,
     dependency: &mut String,
     rpath: bool,
     deptree: &mut DepTree,
     depp: usize,
-    all: bool,
     preload: bool,
 ) -> bool {
     let elc = resolve_dependency_2(
-        cache,
-        library_path,
-        executable_path,
+        config,
         dependency,
         rpath,
         deptree,
         depp,
-        all,
         preload,
     );
     if let Some((elc, depd)) = elc {
         let path = pathutils::get_path(&dependency).unwrap_or(String::new());
         for dep in &elc.deps {
             resolve_dependency(
-                cache,
-                library_path,
-                executable_path,
+                config,
                 &path,
                 &elc.rpath,
                 dep,
                 deptree,
                 depd,
-                all,
                 preload,
             );
         }
@@ -264,14 +254,11 @@ fn resolve_overrides<P: AsRef<Path>>(
 }
 
 fn resolve_dependency_2(
-    cache: &DyldCache,
-    library_path: &search_path::SearchPathVec,
-    executable_path: &String,
+    config: &Config,
     dependency: &mut String,
     rpath: bool,
     deptree: &mut DepTree,
     depp: usize,
-    all: bool,
     preload: bool,
 ) -> Option<(MachOInfo, usize)> {
     // To avoid circular dependencies, check if deptree already containts the dependency.
@@ -283,14 +270,14 @@ fn resolve_dependency_2(
 
     // First check overrides: DYLD_LIBRARY_PATH paths.
     if let Some((elc, depd)) =
-        resolve_overrides(library_path, executable_path, &path, deptree, depp)
+        resolve_overrides(config.library_path, config.executable_path, &path, deptree, depp)
     {
         return Some((elc, depd));
     }
 
     // Then try the dyld system cache, if existent.
-    if let Some(elc) = cache.get(dependency, executable_path) {
-        if resolve_dependency_check_found(dependency, deptree, depp, all) {
+    if let Some(elc) = config.cache.get(dependency, config.executable_path) {
+        if resolve_dependency_check_found(dependency, deptree, depp, config.all) {
             return None;
         }
         let name = pathutils::get_name(&path);
@@ -308,7 +295,7 @@ fn resolve_dependency_2(
 
     // The try filesystem.
     let elc = if path.is_absolute() {
-        match open_macho_file(&path, executable_path).ok() {
+        match open_macho_file(&path, config.executable_path).ok() {
             Some(OpenMachOFileResult::Object(obj)) => Some(obj),
             _ => None,
         }
