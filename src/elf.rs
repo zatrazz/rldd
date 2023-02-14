@@ -905,8 +905,8 @@ fn resolve_dependency_ld_cache<'a>(
     use std::path::PathBuf;
     if let Some(path) = ld_cache.get(dtneeded) {
         let mut pathbuf = PathBuf::new();
-        pathbuf.push(&path);
-        pathbuf.push(&dtneeded);
+        pathbuf.push(path);
+        pathbuf.push(dtneeded);
         if let Ok(elc) = open_elf_file(&pathbuf, Some(elc), Some(dtneeded), platform, false) {
             return Some(ResolvedDependency {
                 elc,
