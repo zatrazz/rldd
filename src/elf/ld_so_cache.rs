@@ -5,6 +5,7 @@ use std::mem::{align_of, size_of, transmute};
 use std::path::Path;
 use std::str;
 
+use crate::pathutils;
 use object::elf::*;
 
 mod hwcap;
@@ -354,14 +355,22 @@ fn parse_ld_so_cache_new<R: Read + Seek>(
                 if new_idx < *seen_idx {
                     // If the entry is a newer best fit, update both the cache and the seen map.
                     hwcapseen.insert(key.to_string(), new_idx);
-                    ldsocache.insert(key, value);
+                    ldsocache.insert(
+                        key,
+                        pathutils::get_path(&value)
+                            .ok_or(Error::new(ErrorKind::Other, "Invalid ld.so.cache entry"))?,
+                    );
                 }
             }
         } else {
             if let Some(idx) = check_hwcap_index(&off.2, &hwcap_idxs, &hwcap_supported) {
                 hwcapseen.insert(key.to_string(), idx);
             }
-            ldsocache.insert(key, value);
+            ldsocache.insert(
+                key,
+                pathutils::get_path(&value)
+                    .ok_or(Error::new(ErrorKind::Other, "Invalid ld.so.cache entry"))?,
+            );
         }
     }
 

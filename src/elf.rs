@@ -771,7 +771,7 @@ fn resolve_dependency(
             let p = Path::new(dependency);
             (pathutils::get_path(&p), pathutils::get_name(&p))
         } else {
-            (pathutils::get_path(dep.path), pathutils::get_name(dependency))
+            (Some(dep.path.to_string()), pathutils::get_name(dependency))
         };
         let c = deptree.addnode(
             DepNode {
@@ -902,8 +902,11 @@ fn resolve_dependency_ld_cache<'a>(
     platform: Option<&String>,
     elc: &'a ElfInfo,
 ) -> Option<ResolvedDependency<'a>> {
+    use std::path::PathBuf;
     if let Some(path) = ld_cache.get(dtneeded) {
-        let pathbuf = Path::new(&path);
+        let mut pathbuf = PathBuf::new();
+        pathbuf.push(&path);
+        pathbuf.push(&dtneeded);
         if let Ok(elc) = open_elf_file(&pathbuf, Some(elc), Some(dtneeded), platform, false) {
             return Some(ResolvedDependency {
                 elc,

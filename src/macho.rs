@@ -168,28 +168,14 @@ fn resolve_dependency(
     if dependency.contains("@rpath") {
         for rpath in rpaths {
             let mut newdependency = dependency.replace("@rpath", rpath.path.as_str());
-            if resolve_dependency_1(
-                config,
-                &mut newdependency,
-                true,
-                deptree,
-                depp,
-                preload,
-            ) {
+            if resolve_dependency_1(config, &mut newdependency, true, deptree, depp, preload) {
                 return;
             }
         }
         return;
     }
 
-    resolve_dependency_1(
-        config,
-        &mut dependency,
-        false,
-        deptree,
-        depp,
-        preload,
-    );
+    resolve_dependency_1(config, &mut dependency, false, deptree, depp, preload);
 }
 
 fn resolve_dependency_1(
@@ -200,26 +186,11 @@ fn resolve_dependency_1(
     depp: usize,
     preload: bool,
 ) -> bool {
-    let elc = resolve_dependency_2(
-        config,
-        dependency,
-        rpath,
-        deptree,
-        depp,
-        preload,
-    );
+    let elc = resolve_dependency_2(config, dependency, rpath, deptree, depp, preload);
     if let Some((elc, depd)) = elc {
         let path = pathutils::get_path(&dependency).unwrap_or(String::new());
         for dep in &elc.deps {
-            resolve_dependency(
-                config,
-                &path,
-                &elc.rpath,
-                dep,
-                deptree,
-                depd,
-                preload,
-            );
+            resolve_dependency(config, &path, &elc.rpath, dep, deptree, depd, preload);
         }
         true
     } else {
@@ -269,9 +240,13 @@ fn resolve_dependency_2(
     let path = Path::new(&dependency);
 
     // First check overrides: DYLD_LIBRARY_PATH paths.
-    if let Some((elc, depd)) =
-        resolve_overrides(config.library_path, config.executable_path, &path, deptree, depp)
-    {
+    if let Some((elc, depd)) = resolve_overrides(
+        config.library_path,
+        config.executable_path,
+        &path,
+        deptree,
+        depp,
+    ) {
         return Some((elc, depd));
     }
 
