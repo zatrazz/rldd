@@ -771,7 +771,7 @@ fn resolve_dependency(
             let p = Path::new(dependency);
             (pathutils::get_path(&p), pathutils::get_name(&p))
         } else {
-            (Some(dep.path.to_string()), pathutils::get_name(dependency))
+            (pathutils::get_path(dep.path), pathutils::get_name(dependency))
         };
         let c = deptree.addnode(
             DepNode {
