@@ -24,10 +24,10 @@ pub fn get_slibdir(e_machine: u16, ei_class: u8) -> Result<&'static str, std::io
     const EM_ARCV2: u16 = 195;
 
     match e_machine {
-        EM_AARCH64 | EM_ALPHA | EM_PPC64 | EM_LOONGARCH => Ok("/lib64"),
+        EM_AARCH64 | EM_ALPHA | EM_PPC64 | EM_LOONGARCH | EM_SPARCV9 => Ok("/lib64"),
         EM_ARCV2 | EM_ARM | EM_CSKY | EM_PARISC | EM_386 | EM_68K | EM_MICROBLAZE
         | EM_ALTERA_NIOS2 | EM_OPENRISC | EM_PPC | EM_SH => Ok("/lib"),
-        EM_S390 | EM_SPARC | EM_MIPS | EM_MIPS_RS3_LE => match ei_class {
+        EM_S390 | EM_SPARC | EM_MIPS | EM_MIPS_RS3_LE | EM_SPARC32PLUS => match ei_class {
             ELFCLASS32 => Ok("/lib"),
             ELFCLASS64 => Ok("/lib64"),
             _ => return_error(),
