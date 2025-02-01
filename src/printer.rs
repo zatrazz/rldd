@@ -64,7 +64,7 @@ impl Printer {
         if self.pp {
             if let Some(path) = path {
                 let delim = std::path::MAIN_SEPARATOR.to_string();
-                self.write_colorized(&mut buffer, &color_path, &format!("{path}{delim}"));
+                self.write_colorized(&mut buffer, &color_path, format!("{path}{delim}"));
             }
         }
 
@@ -107,7 +107,7 @@ impl Printer {
         ok!(writer.print(&buffer));
     }
 
-    fn print_preamble(&self, deptrace: &Vec<bool>) {
+    fn print_preamble(&self, deptrace: &[bool]) {
         for v in &deptrace[0..deptrace.len() - 1] {
             print!("{}", if *v { "|  " } else { "   " });
         }
@@ -137,7 +137,7 @@ impl Printer {
         dtneeded: &String,
         path: &String,
         mode: &str,
-        deptrace: &Vec<bool>,
+        deptrace: &[bool],
     ) {
         if self.ldd {
             self.print_ldd(dtneeded, path);
@@ -152,13 +152,13 @@ impl Printer {
         dtneeded: &String,
         path: &String,
         mode: &str,
-        deptrace: &Vec<bool>,
+        deptrace: &[bool],
     ) {
         self.print_preamble(deptrace);
         self.print_entry(dtneeded, path, mode, true)
     }
 
-    pub fn print_not_found(&self, dtneeded: &String, deptrace: &Vec<bool>) {
+    pub fn print_not_found(&self, dtneeded: &String, deptrace: &[bool]) {
         self.print_preamble(deptrace);
         let writer = BufferWriter::stdout(ColorChoice::Always);
         let mut buffer = writer.buffer();

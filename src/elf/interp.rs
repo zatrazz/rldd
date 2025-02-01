@@ -98,7 +98,7 @@ fn is_musl_arch(interp: &str) -> bool {
         return check_name_suffix(interp, "riscv64", Some(&vec!["sf", "-sf-sp", "-sp"]));
     } else if interp.starts_with("sh") {
         return check_name_suffix(interp, "riscv64", Some(&MUSL_SUBARCH_SH.to_vec()));
-    } else if vec!["nt32", "nt64", "or1k", "s390x", "x86_64", "x32", "i386"].contains(&interp) {
+    } else if ["nt32", "nt64", "or1k", "s390x", "x86_64", "x32", "i386"].contains(&interp) {
         return true;
     }
     false

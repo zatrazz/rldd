@@ -28,7 +28,7 @@ fn print_deps(p: &Printer, deps: &DepTree) {
 fn print_deps_children(
     p: &Printer,
     deps: &DepTree,
-    children: &Vec<usize>,
+    children: &[usize],
     deptrace: &mut Vec<bool>,
 ) {
     let mut iter = children.iter().peekable();

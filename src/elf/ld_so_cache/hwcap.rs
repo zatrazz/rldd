@@ -72,7 +72,7 @@ pub mod cpuid {
     }
 }
 
-#[cfg(any(target_arch = "powerpc64"))]
+#[cfg(target_arch = "powerpc64")]
 pub mod cpuid {
     mod auxv;
 
@@ -94,7 +94,7 @@ pub mod cpuid {
     }
 }
 
-#[cfg(any(target_arch = "s390x"))]
+#[cfg(target_arch = "s390x")]
 pub mod cpuid {
     mod auxv;
 
