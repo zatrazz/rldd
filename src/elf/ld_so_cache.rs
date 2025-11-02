@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Result, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Error, Read, Result, Seek, SeekFrom};
 use std::mem::{align_of, size_of, transmute};
 use std::path::Path;
 use std::str;
@@ -201,7 +201,7 @@ fn read_string<R: Read + Seek>(
     reader.seek_relative(cur - *prev_off)?;
     let size = reader.read_until(b'\0', &mut value)?;
     let value = str::from_utf8(&value)
-        .map_err(|_| Error::new(ErrorKind::Other, "Invalid UTF8 value"))
+        .map_err(|_| Error::other("Invalid UTF8 value"))
         .map(|s| s.trim_matches(char::from(0)).to_string())?;
     *prev_off = cur + size as i64;
     Ok(value)
@@ -234,7 +234,7 @@ fn parse_ld_so_cache_old<R: Read + Seek>(
     };
 
     if (cache_size - CACHE_FILE_LEN) / FILE_ENTRY_LEN < hdr.nlibs as usize {
-        return Err(Error::new(ErrorKind::Other, "Invalid cache file"));
+        return Err(Error::other("Invalid cache file"));
     }
 
     let offset = align_cache(CACHE_FILE_LEN + (hdr.nlibs as usize * FILE_ENTRY_LEN));
@@ -243,7 +243,7 @@ fn parse_ld_so_cache_old<R: Read + Seek>(
     }
 
     if hdr.magic != CACHEMAGIC.as_bytes() {
-        return Err(Error::new(ErrorKind::Other, "Invalid magic"));
+        return Err(Error::other("Invalid magic"));
     }
 
     // The new string format starts at a different position than the newer one.
@@ -289,13 +289,13 @@ fn parse_ld_so_cache_new<R: Read + Seek>(
     };
 
     if hdr.magic != CACHEMAGIC_NEW.as_bytes() {
-        return Err(Error::new(ErrorKind::Other, "Invalid new cache magic"));
+        return Err(Error::other("Invalid new cache magic"));
     }
     if hdr.version != CACHE_VERSION.as_bytes() {
-        return Err(Error::new(ErrorKind::Other, "Invalid new cache version"));
+        return Err(Error::other("Invalid new cache version"));
     }
     if !check_cache_new_endian(hdr.flags) {
-        return Err(Error::new(ErrorKind::Other, "Invalid new cache endianness"));
+        return Err(Error::other("Invalid new cache endianness"));
     }
 
     // To optimize file read, create a list of file entries offset (name and path)
@@ -358,7 +358,7 @@ fn parse_ld_so_cache_new<R: Read + Seek>(
                     ldsocache.insert(
                         key,
                         pathutils::get_path(&value)
-                            .ok_or(Error::new(ErrorKind::Other, "Invalid ld.so.cache entry"))?,
+                            .ok_or(Error::other("Invalid ld.so.cache entry"))?,
                     );
                 }
             }
@@ -368,8 +368,7 @@ fn parse_ld_so_cache_new<R: Read + Seek>(
             }
             ldsocache.insert(
                 key,
-                pathutils::get_path(&value)
-                    .ok_or(Error::new(ErrorKind::Other, "Invalid ld.so.cache entry"))?,
+                pathutils::get_path(&value).ok_or(Error::other("Invalid ld.so.cache entry"))?,
             );
         }
     }
@@ -427,10 +426,7 @@ fn parse_ld_so_cache_glibc_hwcap<R: Read + Seek>(
     *prev_off = cur + CACHE_EXTENSION_LEN as i64;
 
     if ext.magic != cache_extension_magic {
-        return Err(Error::new(
-            ErrorKind::Other,
-            "Invalid cache_extension magic",
-        ));
+        return Err(Error::other("Invalid cache_extension magic"));
     }
 
     // Return an empty set if the cache does not have any glibc-hwcap extension.

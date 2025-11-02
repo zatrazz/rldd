@@ -10,10 +10,7 @@ use crate::search_path;
 
 #[allow(dead_code)]
 fn return_error<T>() -> Result<T, std::io::Error> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        "failed to get default system dir",
-    ))
+    Err(std::io::Error::other("failed to get default system dir"))
 }
 
 // Return the default system directory for the architectures and class.  It is hard

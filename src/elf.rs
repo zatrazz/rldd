@@ -1,4 +1,4 @@
-use std::io::{Error, ErrorKind};
+use std::io::Error;
 use std::path::Path;
 use std::{fmt, fs, str};
 
@@ -134,10 +134,7 @@ trait HandleErr<T> {
 
 impl<T, E: fmt::Display> HandleErr<T> for Result<T, E> {
     fn handle_err(self) -> Option<T> {
-        match self {
-            Ok(val) => Some(val),
-            _ => None,
-        }
+        self.ok()
     }
 }
 
@@ -418,12 +415,12 @@ fn open_elf_file<P: AsRef<Path>>(
 ) -> Result<ElfInfo, std::io::Error> {
     let file = match fs::File::open(filename) {
         Ok(file) => file,
-        Err(_) => return Err(Error::new(ErrorKind::Other, "Failed to open file")),
+        Err(_) => return Err(Error::other("Failed to open file")),
     };
 
     let mmap = match unsafe { memmap2::Mmap::map(&file) } {
         Ok(mmap) => mmap,
-        Err(_) => return Err(Error::new(ErrorKind::Other, "Failed to map file")),
+        Err(_) => return Err(Error::other("Failed to map file")),
     };
 
     let parent = filename
@@ -437,12 +434,12 @@ fn open_elf_file<P: AsRef<Path>>(
             if let Some(melc) = melc {
                 // Skip DT_NEEDED and SONAME checks for preload objects.
                 if !preload && !match_elf_name(melc, dtneeded, &elc) {
-                    return Err(Error::new(ErrorKind::Other, "Error parsing ELF object"));
+                    return Err(Error::other("Error parsing ELF object"));
                 }
             }
             Ok(elc)
         }
-        Err(e) => Err(Error::new(ErrorKind::Other, e)),
+        Err(e) => Err(Error::other(e)),
     }
 }
 
@@ -558,10 +555,7 @@ fn resolve_binary_arch(
         return Ok(());
     }
 
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        "musl: failed to get INTERP value",
-    ))
+    Err(std::io::Error::other("musl: failed to get INTERP value"))
 }
 #[cfg(all(target_family = "unix", not(target_os = "linux")))]
 fn resolve_binary_arch(

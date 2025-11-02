@@ -25,12 +25,7 @@ fn print_deps(p: &Printer, deps: &DepTree) {
     print_deps_children(p, deps, &bin.children, &mut deptrace);
 }
 
-fn print_deps_children(
-    p: &Printer,
-    deps: &DepTree,
-    children: &[usize],
-    deptrace: &mut Vec<bool>,
-) {
+fn print_deps_children(p: &Printer, deps: &DepTree, children: &[usize], deptrace: &mut Vec<bool>) {
     let mut iter = children.iter().peekable();
     while let Some(c) = iter.next() {
         let dep = &deps.arena[*c];
