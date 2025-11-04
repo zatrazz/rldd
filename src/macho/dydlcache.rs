@@ -1,5 +1,5 @@
 use std::ffi::CString;
-use std::io::{Error, ErrorKind};
+use std::io::Error;
 
 static MACOS_CATALINA_CACHE_PATH_X86_64: &str = "/var/db/dyld/dyld_shared_cache_x86_64h";
 static MACOS_BIG_SUR_CACHE_PATH_ARM64: &str = "/System/Library/dyld/dyld_shared_cache_arm64e";
@@ -61,7 +61,7 @@ fn osrelease() -> Result<MacOsRelease, std::io::Error> {
     let osrelease = match val.len() {
         0 => Ok("".to_string()),
         l => std::str::from_utf8(&val[..l - 1])
-            .map_err(|_e| Error::new(ErrorKind::Other, "Invalid UTF8 sequence"))
+            .map_err(|_e| Error::other("Invalid UTF8 sequence"))
             .map(|s| s.to_string()),
     }?;
 
@@ -70,7 +70,7 @@ fn osrelease() -> Result<MacOsRelease, std::io::Error> {
         Some("21") => Ok(MacOsRelease::Monterey),
         Some("20") => Ok(MacOsRelease::BigSur),
         Some("19") => Ok(MacOsRelease::Catalina),
-        _ => Err(Error::new(ErrorKind::Other, "Invalid MacOS release")),
+        _ => Err(Error::other("Invalid MacOS release")),
     }
 }
 

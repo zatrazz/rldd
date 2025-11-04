@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{Error, ErrorKind};
+use std::io::Error;
 use std::path::Path;
 use std::{fmt, fs, str};
 
@@ -89,19 +89,13 @@ pub fn resolve_binary(
 ) -> Result<DepTree, std::io::Error> {
     let filename = Path::new(arg).canonicalize()?;
 
-    let executable_path = pathutils::get_path(&filename).ok_or(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("failed to get path of input file {arg}"),
-    ))?;
+    let executable_path = pathutils::get_path(&filename).ok_or(std::io::Error::other(format!(
+        "failed to get path of input file {arg}"
+    )))?;
 
     let omf = match open_macho_file(&filename, &executable_path)? {
         OpenMachOFileResult::Object(obj) => obj,
-        _ => {
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!("Invalid MachO file: {arg}"),
-            ))
-        }
+        _ => return Err(Error::other(format!("Invalid MachO file: {arg}"))),
     };
 
     let mut deptree = DepTree::new();
@@ -348,7 +342,7 @@ fn open_macho_file<P: AsRef<Path>>(
 
     let mmap = match unsafe { memmap2::Mmap::map(&file) } {
         Ok(mmap) => mmap,
-        Err(_) => return Err(Error::new(ErrorKind::Other, "Failed to map file")),
+        Err(_) => return Err(Error::other("Failed to map file")),
     };
 
     match parse_object(&mmap, 0, executable_path) {
@@ -357,7 +351,7 @@ fn open_macho_file<P: AsRef<Path>>(
             images,
             mmap: Some(mmap),
         })),
-        Err(e) => Err(Error::new(ErrorKind::Other, e)),
+        Err(e) => Err(Error::other(e)),
     }
 }
 
@@ -387,10 +381,7 @@ trait HandleErr<T> {
 
 impl<T, E: fmt::Display> HandleErr<T> for Result<T, E> {
     fn handle_err(self) -> Option<T> {
-        match self {
-            Ok(val) => Some(val),
-            _ => None,
-        }
+        self.ok()
     }
 }
 
