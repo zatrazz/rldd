@@ -188,7 +188,7 @@ fn resolve_dependency_1(
 ) -> bool {
     let elc = resolve_dependency_2(config, dependency, rpath, deptree, depp, preload);
     if let Some((elc, depd)) = elc {
-        let path = pathutils::get_path(&dependency).unwrap_or(String::new());
+        let path = pathutils::get_path(&dependency).unwrap_or_default();
         for dep in &elc.deps {
             resolve_dependency(config, &path, &elc.rpath, dep, deptree, depd, preload);
         }
