@@ -11,10 +11,13 @@ static MACOS_VENTURA_CACHE_PATH_X86_64: &str =
 
 #[derive(Debug)]
 enum MacOsRelease {
-    Ventura,
-    Monterey,
-    BigSur,
     Catalina,
+    BigSur,
+    Monterey,
+    Ventura,
+    Sonoma,
+    Sequoia,
+    Tahoe,
 }
 
 fn osrelease() -> Result<MacOsRelease, std::io::Error> {
@@ -66,19 +69,21 @@ fn osrelease() -> Result<MacOsRelease, std::io::Error> {
     }?;
 
     match osrelease.split('.').next() {
-        Some("22") => Ok(MacOsRelease::Ventura),
-        Some("21") => Ok(MacOsRelease::Monterey),
-        Some("20") => Ok(MacOsRelease::BigSur),
         Some("19") => Ok(MacOsRelease::Catalina),
+        Some("20") => Ok(MacOsRelease::BigSur),
+        Some("21") => Ok(MacOsRelease::Monterey),
+        Some("22") => Ok(MacOsRelease::Ventura),
+        Some("23") => Ok(MacOsRelease::Sonoma),
+        Some("24") => Ok(MacOsRelease::Sequoia),
+        Some("25") => Ok(MacOsRelease::Tahoe),
         _ => Err(Error::other("Invalid MacOS release")),
     }
 }
 
 pub fn path() -> Option<&'static str> {
     match osrelease() {
-        Ok(MacOsRelease::Ventura) => match std::env::consts::ARCH {
-            "aarch64" => Some(MACOS_VENTURA_CACHE_PATH_ARM64),
-            "x86_64" => Some(MACOS_VENTURA_CACHE_PATH_X86_64),
+        Ok(MacOsRelease::Catalina) => match std::env::consts::ARCH {
+            "x86_64" => Some(MACOS_CATALINA_CACHE_PATH_X86_64),
             _ => None,
         },
         Ok(MacOsRelease::Monterey) | Ok(MacOsRelease::BigSur) => match std::env::consts::ARCH {
@@ -86,8 +91,12 @@ pub fn path() -> Option<&'static str> {
             "x86_64" => Some(MACOS_BIG_SUR_CACHE_PATH_X86_64),
             _ => None,
         },
-        Ok(MacOsRelease::Catalina) => match std::env::consts::ARCH {
-            "x86_64" => Some(MACOS_CATALINA_CACHE_PATH_X86_64),
+        Ok(MacOsRelease::Ventura
+           | MacOsRelease::Sonoma
+           | MacOsRelease::Sequoia
+           | MacOsRelease::Tahoe) => match std::env::consts::ARCH {
+            "aarch64" => Some(MACOS_VENTURA_CACHE_PATH_ARM64),
+            "x86_64" => Some(MACOS_VENTURA_CACHE_PATH_X86_64),
             _ => None,
         },
         _ => None,
