@@ -411,8 +411,8 @@ fn parse_macho_fat32(
     data: &[u8],
     executable_path: &String,
 ) -> Result<ParseObjectResult, &'static str> {
-    if let Some(arches) = FatHeader::parse_arch32(data).handle_err() {
-        return parse_macho_fat(data, arches, executable_path);
+    if let Some(fat) = MachOFatFile32::parse(data).handle_err() {
+        return parse_macho_fat(data, fat.arches(), executable_path);
     }
     Err("Invalid FAT Mach-O 32 object")
 }
@@ -421,8 +421,8 @@ fn parse_macho_fat64(
     data: &[u8],
     executable_path: &String,
 ) -> Result<ParseObjectResult, &'static str> {
-    if let Some(arches) = FatHeader::parse_arch64(data).handle_err() {
-        return parse_macho_fat(data, arches, executable_path);
+    if let Some(fat) = MachOFatFile64::parse(data).handle_err() {
+        return parse_macho_fat(data, fat.arches(), executable_path);
     }
     Err("Invalid FAT Mach-O 64 object")
 }
@@ -498,7 +498,7 @@ fn parse_dyld_cache(data: &[u8]) -> Result<ParseObjectResult, &'static str> {
 fn parse_dyld_cache_images(
     endian: Endianness,
     data: &[u8],
-    mappings: Option<&[DyldCacheMappingInfo<Endianness>]>,
+    mappings: Option<DyldCacheMappingSlice<Endianness>>,
     images: &[DyldCacheImageInfo<Endianness>],
 ) -> Result<ParseObjectResult, &'static str> {
     let mut cache = ImagesMap::new();
@@ -508,13 +508,51 @@ fn parse_dyld_cache_images(
             .path(endian, data)
             .ok()
             .and_then(|s| str::from_utf8(s).ok().map(|s| s.to_string()));
-        let offset = mappings.and_then(|mappings| image.file_offset(endian, mappings).ok());
+        let offset = mappings.as_ref().and_then(|mappings| {
+            dyld_cache_file_offset(endian, mappings, image.address.get(endian))
+        });
         if let Some(path) = path {
             cache.insert(path, offset);
         }
     }
 
     Ok(ParseObjectResult::Cache(cache))
+}
+
+// Find the file offset of an address in the dyld cache mappings.
+fn dyld_cache_file_offset(
+    endian: Endianness,
+    mappings: &DyldCacheMappingSlice<Endianness>,
+    address: u64,
+) -> Option<u64> {
+    fn mapping_offset(address: u64, start: u64, size: u64, file_offset: u64) -> Option<u64> {
+        let offset = address.checked_sub(start)?;
+        if offset < size {
+            file_offset.checked_add(offset)
+        } else {
+            None
+        }
+    }
+
+    match *mappings {
+        DyldCacheMappingSlice::V1(infos) => infos.iter().find_map(|m| {
+            mapping_offset(
+                address,
+                m.address.get(endian),
+                m.size.get(endian),
+                m.file_offset.get(endian),
+            )
+        }),
+        DyldCacheMappingSlice::V2(infos) => infos.iter().find_map(|m| {
+            mapping_offset(
+                address,
+                m.address.get(endian),
+                m.size.get(endian),
+                m.file_offset.get(endian),
+            )
+        }),
+        _ => None,
+    }
 }
 
 enum LoadCommand {
