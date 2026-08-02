@@ -30,6 +30,7 @@ mod ld_preload;
 mod ld_so_cache;
 #[cfg(target_os = "netbsd")]
 mod ld_so_conf_netbsd;
+mod symbols;
 
 #[cfg(target_os = "linux")]
 type LoaderCache = ld_so_cache::LdCache;
@@ -1006,3 +1007,115 @@ fn resolve_dependency_ld_cache<'a>(
     None
 }
 
+// Symbol resolution mimicking, used to implement the ldd like --data-relocs,
+// --function-relocs, and --unused options.
+
+// An unresolved symbol reference found while processing the dynamic relocations.
+pub struct UndefinedSymbol {
+    pub name: String,
+    // Full path of the object with the undefined reference.
+    pub object: String,
+}
+
+fn deptree_node_path(node: &DepNode) -> Option<String> {
+    node.path
+        .as_ref()
+        .map(|path| Path::new(path).join(&node.name).to_string_lossy().into_owned())
+}
+
+// Build the loader global search scope: the resolved objects from the dependency
+// tree in breadth-first order (the order the loader uses for symbol resolution),
+// with each object dynamic symbol table and relocation references parsed.
+fn build_symbol_scope(deptree: &DepTree) -> Vec<(String, symbols::ObjectSymbols)> {
+    use std::collections::{HashSet, VecDeque};
+
+    let mut scope = Vec::new();
+    let mut seen = HashSet::new();
+
+    let mut queue = VecDeque::from([0usize]);
+    while let Some(idx) = queue.pop_front() {
+        let node = &deptree.arena[idx];
+        queue.extend(node.children.iter());
+
+        // Skip unresolved dependencies and the duplicated entries printed by the
+        // --all option.
+        if node.val.mode == DepMode::NotFound || node.val.found {
+            continue;
+        }
+        let path = match deptree_node_path(&node.val) {
+            Some(path) => path,
+            None => continue,
+        };
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        if let Some(obj) = symbols::parse(&path) {
+            scope.push((path, obj));
+        }
+    }
+    scope
+}
+
+// Reparse the root object, used to obtain the PT_INTERP and DT_NEEDED values.
+fn open_root_elf(deptree: &DepTree) -> Option<ElfInfo> {
+    let root = deptree.arena.first()?;
+    let path = deptree_node_path(&root.val)?;
+    open_elf_file(&path, None, None, None, false).ok()
+}
+
+// The dynamic loader is part of the global scope (libc binds to symbols the
+// loader provides, like _rtld_global), however it might not be present in the
+// dependency tree if no object lists it as an explicit dependency.
+fn append_interp_to_scope(scope: &mut Vec<(String, symbols::ObjectSymbols)>, elc: &ElfInfo) {
+    if let Some(interp) = &elc.interp {
+        let name = pathutils::get_name(&Path::new(interp));
+        if scope
+            .iter()
+            .any(|(path, _)| pathutils::get_name(&Path::new(path)) == name)
+        {
+            return;
+        }
+        if let Some(obj) = symbols::parse(interp) {
+            scope.push((interp.to_string(), obj));
+        }
+    }
+}
+
+// Mimic the loader LD_WARN relocation processing: report the non weak undefined
+// symbol references that no object in the global scope defines.  If PROCESS_PLT
+// is false only the data relocations are processed (--data-relocs), otherwise
+// the DT_JMPREL function relocations are also checked (--function-relocs).
+// Symbol versioning is not taken in consideration.
+pub fn check_undefined_symbols(deptree: &DepTree, process_plt: bool) -> Vec<UndefinedSymbol> {
+    use std::collections::HashSet;
+
+    let mut scope = build_symbol_scope(deptree);
+    if let Some(root_elc) = open_root_elf(deptree) {
+        append_interp_to_scope(&mut scope, &root_elc);
+    }
+
+    let mut defined = HashSet::<&str>::new();
+    for (_, obj) in &scope {
+        for name in &obj.defined {
+            defined.insert(name.as_str());
+        }
+    }
+
+    let mut r = Vec::new();
+    // The loader relocates the objects in the inverse scope order, with the
+    // executable itself being the last one.
+    for (path, obj) in scope.iter().rev() {
+        for sref in &obj.references {
+            if sref.weak || (sref.plt && !process_plt) {
+                continue;
+            }
+            if !defined.contains(sref.name.as_str()) {
+                r.push(UndefinedSymbol {
+                    name: sref.name.clone(),
+                    object: path.clone(),
+                });
+            }
+        }
+    }
+    r
+}

@@ -82,6 +82,11 @@ struct Options {
     #[argh(option)]
     platform: Option<String>,
 
+    /// process data relocations and report undefined symbols.
+    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
+    #[argh(switch, short = 'd')]
+    data_relocs: bool,
+
     /// show the resolved path instead of the library SONAME.
     #[argh(switch, short = 'p')]
     path: bool,
@@ -134,7 +139,16 @@ fn main() {
             opts.all,
             arg.as_str(),
         ) {
-            Ok(deptree) => print_deps(&printer, &deptree),
+            Ok(deptree) => {
+                print_deps(&printer, &deptree);
+
+                #[cfg(all(target_family = "unix", not(target_os = "macos")))]
+                if opts.data_relocs {
+                    for undef in check_undefined_symbols(&deptree, false) {
+                        println!("undefined symbol: {}\t({})", undef.name, undef.object);
+                    }
+                }
+            }
             Err(e) => eprintln!("error: {}", print_error(&arg, e)),
         }
     }
