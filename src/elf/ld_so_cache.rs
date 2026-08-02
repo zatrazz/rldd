@@ -116,12 +116,11 @@ fn check_file_entry_flags(
             _ => false,
         },
         EM_ARM => {
-            if e_flags | EF_ARM_VFP_FLOAT == EF_ARM_VFP_FLOAT {
-                (flags == FLAG_ARM_LIBHF | FLAG_ELF_LIBC6) | (flags == FLAG_ELF_LIBC6)
-            } else if e_flags | EF_ARM_SOFT_FLOAT == EF_ARM_SOFT_FLOAT {
-                (flags == FLAG_ARM_LIBSF | FLAG_ELF_LIBC6) | (flags == FLAG_ELF_LIBC6)
+            if e_flags.contains(EF_ARM_VFP_FLOAT) {
+                (flags == FLAG_ARM_LIBHF | FLAG_ELF_LIBC6) || (flags == FLAG_ELF_LIBC6)
             } else {
-                false
+                // Either EF_ARM_SOFT_FLOAT or no float ABI flag at all.
+                (flags == FLAG_ARM_LIBSF | FLAG_ELF_LIBC6) || (flags == FLAG_ELF_LIBC6)
             }
         }
         EM_IA_64 => match ei_class {
@@ -152,15 +151,11 @@ fn check_file_entry_flags(
             _ => false,
         },
         EM_PPC64 => flags == FLAG_ELF_LIBC6 | FLAG_POWERPC_LIB64,
-        EM_RISCV => {
-            if e_flags | EF_RISCV_FLOAT_ABI_SOFT == EF_RISCV_FLOAT_ABI_SOFT {
-                flags == FLAG_ELF_LIBC6 | FLAG_RISCV_FLOAT_ABI_SOFT
-            } else if e_flags & EF_RISCV_FLOAT_ABI_DOUBLE == EF_RISCV_FLOAT_ABI_DOUBLE {
-                flags == FLAG_ELF_LIBC6 | FLAG_RISCV_FLOAT_ABI_DOUBLE
-            } else {
-                flags == FLAG_ELF_LIBC6
-            }
-        }
+        EM_RISCV => match e_flags & FileFlags(EF_RISCV_FLOAT_ABI) {
+            EF_RISCV_FLOAT_ABI_DOUBLE => flags == FLAG_ELF_LIBC6 | FLAG_RISCV_FLOAT_ABI_DOUBLE,
+            EF_RISCV_FLOAT_ABI_SOFT => flags == FLAG_ELF_LIBC6 | FLAG_RISCV_FLOAT_ABI_SOFT,
+            _ => flags == FLAG_ELF_LIBC6,
+        },
         EM_S390 => match ei_class {
             ELFCLASS32 => flags == FLAG_ELF_LIBC6,
             ELFCLASS64 => flags == FLAG_ELF_LIBC6 | FLAG_S390_LIB64,
