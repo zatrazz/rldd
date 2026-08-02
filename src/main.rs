@@ -92,6 +92,11 @@ struct Options {
     #[argh(switch, short = 'r')]
     function_relocs: bool,
 
+    /// print unused direct dependencies.
+    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
+    #[argh(switch, short = 'u')]
+    unused: bool,
+
     /// show the resolved path instead of the library SONAME.
     #[argh(switch, short = 'p')]
     path: bool,
@@ -135,6 +140,8 @@ fn main() {
         std::process::exit(1);
     };
 
+    let mut exitcode = 0;
+
     for arg in opts.args {
         match resolve_binary(
             &mut ctx,
@@ -145,6 +152,21 @@ fn main() {
             arg.as_str(),
         ) {
             Ok(deptree) => {
+                // Mimic ldd, where --unused suppress both the dependency listing
+                // and the undefined symbols report.
+                #[cfg(all(target_family = "unix", not(target_os = "macos")))]
+                if opts.unused {
+                    let unused = check_unused_dependencies(&deptree);
+                    if !unused.is_empty() {
+                        println!("Unused direct dependencies:");
+                        for path in unused {
+                            println!("\t{path}");
+                        }
+                        exitcode = 1;
+                    }
+                    continue;
+                }
+
                 print_deps(&printer, &deptree);
 
                 #[cfg(all(target_family = "unix", not(target_os = "macos")))]
@@ -154,7 +176,12 @@ fn main() {
                     }
                 }
             }
-            Err(e) => eprintln!("error: {}", print_error(&arg, e)),
+            Err(e) => {
+                eprintln!("error: {}", print_error(&arg, e));
+                exitcode = 1;
+            }
         }
     }
+
+    std::process::exit(exitcode);
 }

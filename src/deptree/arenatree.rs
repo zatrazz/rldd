@@ -59,7 +59,7 @@ where
         idx
     }
 
-    pub fn get(&mut self, val: &str) -> Option<T> {
+    pub fn get(&self, val: &str) -> Option<T> {
         for node in &self.arena {
             if node.val.eqstr(val) {
                 return Some(node.val.clone());

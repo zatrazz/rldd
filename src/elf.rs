@@ -1119,3 +1119,64 @@ pub fn check_undefined_symbols(deptree: &DepTree, process_plt: bool) -> Vec<Unde
     }
     r
 }
+
+// Mimic the loader LD_DEBUG=unused handling: report the executable DT_NEEDED
+// entries that provide no symbol used by the executable own relocations.  Like
+// the loader, only the executable references are taken in consideration, so a
+// direct dependency only used by another shared object is still reported.
+pub fn check_unused_dependencies(deptree: &DepTree) -> Vec<String> {
+    use std::collections::{HashMap, HashSet};
+
+    let root_elc = match open_root_elf(deptree) {
+        Some(elc) => elc,
+        None => return Vec::new(),
+    };
+
+    let mut scope = build_symbol_scope(deptree);
+    append_interp_to_scope(&mut scope, &root_elc);
+
+    // Map each symbol to the first object providing it in the scope order.
+    let mut provider = HashMap::<&str, usize>::new();
+    for (i, (_, obj)) in scope.iter().enumerate() {
+        for name in &obj.defined {
+            provider.entry(name.as_str()).or_insert(i);
+        }
+    }
+
+    let mut used = vec![false; scope.len()];
+    if let Some((_, robj)) = scope.first() {
+        for sref in &robj.references {
+            if let Some(&p) = provider.get(sref.name.as_str()) {
+                used[p] = true;
+            }
+        }
+    }
+
+    let scope_index: HashMap<&str, usize> = scope
+        .iter()
+        .enumerate()
+        .map(|(i, (path, _))| (path.as_str(), i))
+        .collect();
+
+    let mut reported = HashSet::new();
+    let mut r = Vec::new();
+    for dtneeded in &root_elc.deps {
+        let node = match deptree.get(dtneeded) {
+            Some(node) => node,
+            None => continue,
+        };
+        if node.mode == DepMode::NotFound {
+            continue;
+        }
+        let path = match node.path {
+            Some(ref path) => Path::new(path).join(&node.name).to_string_lossy().into_owned(),
+            None => continue,
+        };
+        if let Some(&i) = scope_index.get(path.as_str()) {
+            if !used[i] && reported.insert(path.clone()) {
+                r.push(path);
+            }
+        }
+    }
+    r
+}
