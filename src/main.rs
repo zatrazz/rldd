@@ -117,12 +117,12 @@ fn main() {
     let mut ctx = create_context();
 
     if opts.args.is_empty() {
-        println!(
+        eprintln!(
             "{progname}: missing file arguments\n\
             Try `{progname} --help' for more information.",
             progname = env!("CARGO_PKG_NAME")
         );
-        std::process::exit(0);
+        std::process::exit(1);
     };
 
     for arg in opts.args {
