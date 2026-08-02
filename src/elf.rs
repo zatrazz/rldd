@@ -340,7 +340,7 @@ fn parse_elf_dyn_searchpath<Elf: FileHeader>(
     platform: Option<&String>,
 ) -> search_path::SearchPathVec {
     if let Some(dynstr) = parse_elf_dyn_str::<Elf>(endian, tag, dynamic, dynstr) {
-        // EXpand $ORIGIN, $LIB, and $PLATFORM.
+        // Expand $ORIGIN, $LIB, and $PLATFORM.
         let mut newdynstr = replace_dyn_str(&dynstr, "ORIGIN", origin);
 
         parse_elf_dyn_searchpath_lib(endian, elf, &mut newdynstr);
@@ -349,7 +349,7 @@ fn parse_elf_dyn_searchpath<Elf: FileHeader>(
             Some(platform) => platform.to_string(),
             None => platform::get(elf.e_machine(endian), elf.e_ident().data),
         };
-        let newdynstr = replace_dyn_str(&newdynstr, "$PLATFORM", platform.as_str());
+        let newdynstr = replace_dyn_str(&newdynstr, "PLATFORM", platform.as_str());
 
         return search_path::from_string(newdynstr, &[':']);
     }
