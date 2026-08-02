@@ -154,11 +154,19 @@ impl Printer {
         mode: &str,
         deptrace: &[bool],
     ) {
+        // The ldd mode only prints unique dependencies.
+        if self.ldd {
+            return;
+        }
         self.print_preamble(deptrace);
         self.print_entry(dtneeded, path, mode, true)
     }
 
     pub fn print_not_found(&self, dtneeded: &String, deptrace: &[bool]) {
+        if self.ldd {
+            println!("        {dtneeded} => not found");
+            return;
+        }
         self.print_preamble(deptrace);
         let writer = BufferWriter::stdout(ColorChoice::Always);
         let mut buffer = writer.buffer();
