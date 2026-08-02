@@ -14,6 +14,19 @@ Use the '-a' option to print all dependencies (including already resolved ones),
 
 The '-l' option mimics the ldd output, with unique libraries one per line.
 
+## Relocation checks (ELF only)
+
+Like ldd, the dynamic relocations can be processed to report unresolved symbol
+references or unused dependencies (the resolution is done by symbol name, symbol
+versioning is not taken in consideration):
+
+- '-d' processes the data relocations and reports the undefined symbols that no
+  loaded object defines.
+- '-r' processes both the data and the function (PLT) relocations.
+- '-u' prints the direct dependencies that provide no symbol used by the binary
+  own relocations (like ldd, it suppresses the dependency listing and exits with
+  status 1 when unused dependencies are found).
+
 
 ## Building from source
 
