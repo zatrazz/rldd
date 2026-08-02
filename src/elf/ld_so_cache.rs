@@ -104,7 +104,12 @@ const FLAG_MIPS64_LIBN64_NAN2008: i32 = 0x0e00;
 const FLAG_RISCV_FLOAT_ABI_SOFT: i32 = 0x0f00;
 const FLAG_RISCV_FLOAT_ABI_DOUBLE: i32 = 0x1000;
 
-fn check_file_entry_flags(flags: i32, ei_class: u8, e_machine: u16, e_flags: u32) -> bool {
+fn check_file_entry_flags(
+    flags: i32,
+    ei_class: FileClass,
+    e_machine: Machine,
+    e_flags: FileFlags,
+) -> bool {
     match e_machine {
         EM_AARCH64 => match ei_class {
             ELFCLASS64 => flags == FLAG_ELF_LIBC6 | FLAG_AARCH64_LIB64,
@@ -223,9 +228,9 @@ pub type LdCache = HashMap<String, String>;
 fn parse_ld_so_cache_old<R: Read + Seek>(
     reader: &mut BufReader<R>,
     cache_size: usize,
-    ei_class: u8,
-    e_machine: u16,
-    e_flags: u32,
+    ei_class: FileClass,
+    e_machine: Machine,
+    e_flags: FileFlags,
 ) -> Result<LdCache> {
     let hdr: cache_file = {
         let mut h = [0u8; CACHE_FILE_LEN];
@@ -277,9 +282,9 @@ fn parse_ld_so_cache_old<R: Read + Seek>(
 fn parse_ld_so_cache_new<R: Read + Seek>(
     reader: &mut BufReader<R>,
     initial: usize,
-    ei_class: u8,
-    e_machine: u16,
-    e_flags: u32,
+    ei_class: FileClass,
+    e_machine: Machine,
+    e_flags: FileFlags,
 ) -> Result<LdCache> {
     reader.seek(SeekFrom::Start(initial as u64))?;
     let hdr: cache_file_new = {
@@ -368,7 +373,8 @@ fn parse_ld_so_cache_new<R: Read + Seek>(
             }
             ldsocache.insert(
                 key,
-                pathutils::get_path(&value).ok_or(Error::other("Invalid ld.so.cache entry"))?,
+                pathutils::get_path(&value)
+                    .ok_or(Error::other("Invalid ld.so.cache entry"))?,
             );
         }
     }
@@ -426,7 +432,9 @@ fn parse_ld_so_cache_glibc_hwcap<R: Read + Seek>(
     *prev_off = cur + CACHE_EXTENSION_LEN as i64;
 
     if ext.magic != cache_extension_magic {
-        return Err(Error::other("Invalid cache_extension magic"));
+        return Err(Error::other(
+            "Invalid cache_extension magic",
+        ));
     }
 
     // Return an empty set if the cache does not have any glibc-hwcap extension.
@@ -460,9 +468,9 @@ fn parse_ld_so_cache_glibc_hwcap<R: Read + Seek>(
 
 pub fn parse_ld_so_cache<P: AsRef<Path>>(
     filename: &P,
-    ei_class: u8,
-    e_machine: u16,
-    e_flags: u32,
+    ei_class: FileClass,
+    e_machine: Machine,
+    e_flags: FileFlags,
 ) -> Result<LdCache> {
     let file = File::open(filename)?;
     let size = file.metadata()?.len() as usize;

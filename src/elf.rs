@@ -51,14 +51,14 @@ type DepsVec = Vec<String>;
 // - nodeflibs: set if DF_1_NODEFLIB from DT_FLAGS_1 is set.
 #[derive(Debug)]
 struct ElfInfo {
-    ei_class: u8,
-    ei_data: u8,
-    ei_osabi: u8,
+    ei_class: FileClass,
+    ei_data: DataEncoding,
+    ei_osabi: OsAbi,
     #[allow(dead_code)]
     ei_abiver: u8,
-    e_machine: u16,
+    e_machine: Machine,
     #[allow(dead_code)]
-    e_flags: u32,
+    e_flags: FileFlags,
 
     interp: Option<String>,
     soname: Option<String>,
@@ -225,10 +225,10 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
 
         // To obtain the DT_NEEDED name we first need to find the DT_STRTAB/DT_STRSZ.
         dynamic.iter().for_each(|d| {
-            let tag = d.d_tag(endian).into();
-            if tag == DT_STRTAB.into() {
+            let tag = d.d_tag(endian);
+            if tag == DT_STRTAB {
                 strtab = d.d_val(endian).into();
-            } else if tag == DT_STRSZ.into() {
+            } else if tag == DT_STRSZ {
                 strsz = d.d_val(endian).into();
             }
         });
@@ -238,9 +238,8 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
             None => return Err("Failure to parse the string table"),
         };
 
-        let df_1_nodeflib = u64::from(DF_1_NODEFLIB);
-        let dt_flags_1 = parse_elf_dyn_flags::<Elf>(endian, DT_FLAGS_1, dynamic);
-        let nodeflibs = dt_flags_1 & df_1_nodeflib == df_1_nodeflib;
+        let dt_flags_1 = DynamicFlags1(parse_elf_dyn_flags::<Elf>(endian, DT_FLAGS_1, dynamic));
+        let nodeflibs = dt_flags_1.contains(DF_1_NODEFLIB);
 
         return match parse_elf_dtneeded::<Elf>(endian, dynamic, dynstr) {
             Ok(dtneeded) => Ok(ElfInfo {
@@ -285,16 +284,16 @@ fn parse_elf_stringtable<'a, Elf: FileHeader>(
 
 fn parse_elf_dyn_str<Elf: FileHeader>(
     endian: Elf::Endian,
-    tag: u32,
+    tag: DynamicTag,
     dynamic: &[Elf::Dyn],
     dynstr: StringTable,
 ) -> Option<String> {
     for d in dynamic {
-        if d.d_tag(endian).into() == DT_NULL.into() {
+        if d.d_tag(endian) == DT_NULL {
             break;
         }
 
-        if d.tag32(endian).is_none() || d.d_tag(endian).into() != tag.into() {
+        if d.tag32(endian).is_none() || d.d_tag(endian) != tag {
             continue;
         }
 
@@ -334,7 +333,7 @@ fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
 fn parse_elf_dyn_searchpath<Elf: FileHeader>(
     endian: Elf::Endian,
     elf: &Elf,
-    tag: u32,
+    tag: DynamicTag,
     dynamic: &[Elf::Dyn],
     dynstr: StringTable,
     origin: &str,
@@ -364,14 +363,11 @@ fn parse_elf_dtneeded<Elf: FileHeader>(
 ) -> Result<DepsVec, &'static str> {
     let mut dtneeded = DepsVec::new();
     for d in dynamic {
-        if d.d_tag(endian).into() == DT_NULL.into() {
+        if d.d_tag(endian) == DT_NULL {
             break;
         }
 
-        if d.tag32(endian).is_none()
-            || !d.is_string(endian)
-            || d.d_tag(endian).into() != DT_NEEDED.into()
-        {
+        if d.tag32(endian).is_none() || !d.is_string(endian) || d.d_tag(endian) != DT_NEEDED {
             continue;
         }
 
@@ -389,15 +385,15 @@ fn parse_elf_dtneeded<Elf: FileHeader>(
 
 fn parse_elf_dyn_flags<Elf: FileHeader>(
     endian: Elf::Endian,
-    tag: u32,
+    tag: DynamicTag,
     dynamic: &[Elf::Dyn],
 ) -> u64 {
     for d in dynamic {
-        if d.d_tag(endian).into() == DT_NULL.into() {
+        if d.d_tag(endian) == DT_NULL {
             break;
         }
 
-        if d.tag32(endian).is_none() || d.d_tag(endian).into() != tag.into() {
+        if d.tag32(endian).is_none() || d.d_tag(endian) != tag {
             continue;
         }
 
@@ -465,19 +461,19 @@ fn check_elf_header(elc: &ElfInfo) -> bool {
     };
 
     let check_elf_osabi = match elc.e_machine {
-        EM_ARM => {
-            |osabi| osabi == ELFOSABI_SYSV || osabi == ELFOSABI_GNU || osabi == ELFOSABI_ARM_AEABI
-        }
-        _ => |osabi| osabi == ELFOSABI_SYSV || osabi == ELFOSABI_GNU,
+        EM_ARM => |osabi: OsAbi| {
+            osabi == ELFOSABI_SYSV || osabi == ELFOSABI_GNU || osabi == ELFOSABI_ARM_AEABI
+        },
+        _ => |osabi: OsAbi| osabi == ELFOSABI_SYSV || osabi == ELFOSABI_GNU,
     };
 
     let check_elf_abiversion = match elc.e_machine {
-        EM_MIPS => |osabi, ver, maxver| {
+        EM_MIPS => |osabi: OsAbi, ver: u8, maxver: u8| {
             ver == 0
                 || (osabi == ELFOSABI_SYSV && ver < 6)
                 || (osabi == ELFOSABI_GNU && ver < maxver)
         },
-        _ => |osabi, ver, maxver| ver == 0 || (osabi == ELFOSABI_GNU && ver < maxver),
+        _ => |osabi: OsAbi, ver: u8, maxver: u8| ver == 0 || (osabi == ELFOSABI_GNU && ver < maxver),
     };
 
     check_elf_osabi(elc.ei_osabi) && check_elf_abiversion(elc.ei_osabi, elc.ei_abiver, maxver)
@@ -555,7 +551,9 @@ fn resolve_binary_arch(
         return Ok(());
     }
 
-    Err(std::io::Error::other("musl: failed to get INTERP value"))
+    Err(std::io::Error::other(
+        "musl: failed to get INTERP value",
+    ))
 }
 #[cfg(all(target_family = "unix", not(target_os = "linux")))]
 fn resolve_binary_arch(
@@ -989,3 +987,4 @@ fn resolve_dependency_ld_cache<'a>(
     }
     None
 }
+

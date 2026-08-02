@@ -10,15 +10,17 @@ use crate::search_path;
 
 #[allow(dead_code)]
 fn return_error<T>() -> Result<T, std::io::Error> {
-    Err(std::io::Error::other("failed to get default system dir"))
+    Err(std::io::Error::other(
+        "failed to get default system dir",
+    ))
 }
 
 // Return the default system directory for the architectures and class.  It is hard
 // wired on glibc install for each triplet (the $slibdir).
 #[cfg(target_os = "linux")]
-pub fn get_slibdir(e_machine: u16, ei_class: u8) -> Result<&'static str, std::io::Error> {
+pub fn get_slibdir(e_machine: Machine, ei_class: FileClass) -> Result<&'static str, std::io::Error> {
     // Not all machines are supported by object crate.
-    const EM_ARCV2: u16 = 195;
+    const EM_ARCV2: Machine = Machine(195);
 
     match e_machine {
         EM_AARCH64 | EM_ALPHA | EM_PPC64 | EM_LOONGARCH | EM_SPARCV9 => Ok("/lib64"),
@@ -46,8 +48,8 @@ pub fn get_slibdir(e_machine: u16, ei_class: u8) -> Result<&'static str, std::io
 #[cfg(target_os = "linux")]
 pub fn get_system_dirs(
     _interp: &Option<String>,
-    e_machine: u16,
-    ei_class: u8,
+    e_machine: Machine,
+    ei_class: FileClass,
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
     let path = get_slibdir(e_machine, ei_class)?;
     Ok(vec![
@@ -70,8 +72,8 @@ pub fn get_system_dirs(
 #[cfg(target_os = "android")]
 pub fn get_system_dirs(
     interp: &Option<String>,
-    e_machine: u16,
-    ei_class: u8,
+    e_machine: Machine,
+    ei_class: FileClass,
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
     use crate::elf::android;
 
@@ -165,8 +167,8 @@ pub fn get_system_dirs(
 #[cfg(target_os = "freebsd")]
 pub fn get_system_dirs(
     _interp: &Option<String>,
-    _e_machine: u16,
-    _ei_class: u8,
+    _e_machine: object::elf::Machine,
+    _ei_class: object::elf::FileClass,
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
     Ok(vec![search_path::SearchPath {
         path: "/lib".to_string(),
@@ -178,8 +180,8 @@ pub fn get_system_dirs(
 #[cfg(any(target_os = "openbsd", target_os = "netbsd"))]
 pub fn get_system_dirs(
     _interp: &Option<String>,
-    _e_machine: u16,
-    _ei_class: u8,
+    _e_machine: object::elf::Machine,
+    _ei_class: object::elf::FileClass,
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
     Ok(vec![search_path::SearchPath {
         path: "/usr/lib".to_string(),
@@ -191,8 +193,8 @@ pub fn get_system_dirs(
 #[cfg(any(target_os = "illumos", target_os = "solaris"))]
 pub fn get_system_dirs(
     _interp: &Option<String>,
-    e_machine: u16,
-    _ei_class: u8,
+    e_machine: Machine,
+    _ei_class: FileClass,
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
     match e_machine {
         EM_386 => Ok(vec![

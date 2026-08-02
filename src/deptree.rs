@@ -23,7 +23,7 @@ impl arenatree::EqualString for DepNode {
             *other
                 == format!(
                     "{}{}{}",
-                    &self.path.as_ref().unwrap(),
+                    self.path.as_ref().unwrap(),
                     std::path::MAIN_SEPARATOR,
                     self.name
                 )
