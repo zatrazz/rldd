@@ -7,6 +7,8 @@ use std::path::Path;
 use crate::elf::android::*;
 use crate::search_path;
 
+use object::elf::{FileClass, Machine};
+
 pub type NamespaceLinkingConfigVec = Vec<String>;
 
 #[derive(Debug)]
@@ -138,8 +140,8 @@ impl Properties {
     fn get_paths<S: AsRef<str>>(
         &self,
         name: S,
-        e_machine: u16,
-        ei_class: u8,
+        e_machine: Machine,
+        ei_class: FileClass,
     ) -> search_path::SearchPathVec {
         let mut path = self.get_string(name);
 
@@ -176,8 +178,8 @@ fn get_vndk_version_str(delimiter: char) -> String {
 
 pub fn get_ld_config_path<P: AsRef<Path>>(
     executable: &P,
-    e_machine: u16,
-    ei_class: u8,
+    e_machine: Machine,
+    ei_class: FileClass,
 ) -> Option<String> {
     fn get_ld_config_vndk_path() -> String {
         if get_property_bool("ro.vndk.lite", false).unwrap() {
@@ -191,7 +193,7 @@ pub fn get_ld_config_path<P: AsRef<Path>>(
         Some("/system/etc/ld.config.txt".to_string())
     }
 
-    fn get_vndk_ld_config_path(e_machine: u16, ei_class: u8, linkerconfig: bool) -> Option<String> {
+    fn get_vndk_ld_config_path(e_machine: Machine, ei_class: FileClass, linkerconfig: bool) -> Option<String> {
         if let Some(abi) = abi_string(e_machine, ei_class) {
             let ld_config_arch = format!("/system/etc/ld.config.{abi}.txt");
             if Path::new(&ld_config_arch).exists() {
@@ -285,8 +287,8 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>, S: AsRef<str>>(
     filename: &P2,
     binary: &P1,
     interp: S,
-    e_machine: u16,
-    ei_class: u8,
+    e_machine: Machine,
+    ei_class: FileClass,
 ) -> Result<LdCache, &'static str> {
     let is_asan = is_asan(interp);
     let release = get_release().map_err(|_| "invalid android release")?;

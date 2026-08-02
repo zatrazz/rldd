@@ -54,9 +54,11 @@ pub fn get_property<S1: AsRef<str>, S2: AsRef<str>>(
         return Err(std::io::Error::last_os_error());
     }
 
-    match val.len() {
+    // The returned value is the length of the property value, zero meaning an
+    // unset or empty property.
+    match ret as usize {
         0 => Ok(default.as_ref().to_string()),
-        l => std::str::from_utf8(&val[..l - 1])
+        l => std::str::from_utf8(&val[..l.min(PROP_VALUE_MAX)])
             .map_err(|_e| Error::new(ErrorKind::Other, "Invalid UTF8 sequence"))
             .map(|s| s.trim_matches(char::from(0)).to_string()),
     }
@@ -108,7 +110,7 @@ pub fn is_asan<S: AsRef<str>>(interp: S) -> bool {
     )
 }
 
-pub fn libpath(e_machine: u16, ei_class: u8) -> Option<&'static str> {
+pub fn libpath(e_machine: Machine, ei_class: FileClass) -> Option<&'static str> {
     match e_machine {
         EM_AARCH64 | EM_X86_64 => Some("lib64"),
         EM_ARM | EM_386 => Some("lib"),
@@ -121,7 +123,7 @@ pub fn libpath(e_machine: u16, ei_class: u8) -> Option<&'static str> {
     }
 }
 
-pub fn abi_string(e_machine: u16, ei_class: u8) -> Option<&'static str> {
+pub fn abi_string(e_machine: Machine, ei_class: FileClass) -> Option<&'static str> {
     match e_machine {
         EM_AARCH64 => Some("arm64"),
         EM_ARM => Some("arm"),

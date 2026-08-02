@@ -681,7 +681,7 @@ fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, _binary: &P
 #[cfg(target_os = "android")]
 fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, binary: &P, elc: &ElfInfo) {
     if let Some(ld_config_path) =
-        ld_config_txt::get_ld_config_path(binary, elc.e_machine, elc.ei_data)
+        ld_config_txt::get_ld_config_path(binary, elc.e_machine, elc.ei_class)
     {
         // On Android 10 and forward each executable might have a associated ld.config.txt
         // file in different paths, so we need to reload for each argument.
@@ -690,7 +690,7 @@ fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, binary: &P,
             binary,
             elc.interp.as_ref().unwrap(),
             elc.e_machine,
-            elc.ei_data,
+            elc.ei_class,
         )
         .ok();
     }
