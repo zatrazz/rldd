@@ -87,6 +87,11 @@ struct Options {
     #[argh(switch, short = 'd')]
     data_relocs: bool,
 
+    /// process data and function relocations and report undefined symbols.
+    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
+    #[argh(switch, short = 'r')]
+    function_relocs: bool,
+
     /// show the resolved path instead of the library SONAME.
     #[argh(switch, short = 'p')]
     path: bool,
@@ -143,8 +148,8 @@ fn main() {
                 print_deps(&printer, &deptree);
 
                 #[cfg(all(target_family = "unix", not(target_os = "macos")))]
-                if opts.data_relocs {
-                    for undef in check_undefined_symbols(&deptree, false) {
+                if opts.data_relocs || opts.function_relocs {
+                    for undef in check_undefined_symbols(&deptree, opts.function_relocs) {
                         println!("undefined symbol: {}\t({})", undef.name, undef.object);
                     }
                 }
