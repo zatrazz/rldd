@@ -185,8 +185,8 @@ fn parse_elf_interp<Elf: FileHeader>(
         Some(hdr) => {
             let offset = hdr.p_offset(endian).into() as usize;
             let fsize = hdr.p_filesz(endian).into() as usize;
-            str::from_utf8(&data[offset..offset + fsize])
-                .ok()
+            data.get(offset..offset.checked_add(fsize)?)
+                .and_then(|interp| str::from_utf8(interp).ok())
                 .map(|s| s.trim_matches(char::from(0)).to_string())
         }
         None => None,
