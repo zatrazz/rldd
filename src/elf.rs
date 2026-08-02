@@ -64,6 +64,10 @@ struct ElfInfo {
     soname: Option<String>,
     rpath: search_path::SearchPathVec,
     runpath: search_path::SearchPathVec,
+    // Whether DT_RUNPATH is present.  It can not be derived from the runpath field,
+    // since non existent directories are filtered out while the loader semantics
+    // (ignoring DT_RPATH) only depend on the tag presence.
+    has_runpath: bool,
     nodeflibs: bool,
     is_musl: bool,
 
@@ -257,6 +261,8 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
                 runpath: parse_elf_dyn_searchpath(
                     endian, elf, DT_RUNPATH, dynamic, dynstr, origin, platform,
                 ),
+                has_runpath: parse_elf_dyn_str::<Elf>(endian, DT_RUNPATH, dynamic, dynstr)
+                    .is_some(),
                 nodeflibs,
                 deps: dtneeded,
                 is_musl: false,
@@ -588,7 +594,13 @@ pub fn resolve_binary(
     // the binary can not dereference the procfs entry.
     let filename = Path::new(arg).canonicalize()?;
 
-    let elc = open_elf_file(&filename, None, None, platform.as_ref(), false)?;
+    let mut elc = open_elf_file(&filename, None, None, platform.as_ref(), false)?;
+
+    // DT_RPATH is ignored if the object also defines DT_RUNPATH (the latter only
+    // applies to the object own dependencies, so it is not propagated).
+    if elc.has_runpath {
+        elc.rpath.clear();
+    }
 
     // The cache/hints/config file is usually an optional file and failing to open it
     // does not incur on a resolution failure.
@@ -775,10 +787,14 @@ fn resolve_dependency(
             depp,
         );
 
-        // Use parent R_PATH if dependency does not define it.
-        if dep.elc.rpath.is_empty() {
-            dep.elc.rpath.extend(elc.rpath.clone());
+        // The loader searches the DT_RPATH of the object itself and then walks up
+        // the chain of loading objects (up to the executable).  An object DT_RPATH
+        // is ignored if the object also defines DT_RUNPATH, however the ancestors
+        // DT_RPATH still applies to the object dependencies.
+        if dep.elc.has_runpath {
+            dep.elc.rpath.clear();
         }
+        dep.elc.rpath.extend(elc.rpath.clone());
 
         for sdep in &dep.elc.deps {
             resolve_dependency(config, sdep, &dep.elc, deptree, c, preload);
@@ -821,8 +837,10 @@ fn resolve_dependency_1<'a>(
         return None;
     }
 
-    // Consider DT_RPATH iff DT_RUNPATH is not set.
-    if elc.runpath.is_empty() {
+    // The loader skips any DT_RPATH search (including the inherited one) if the
+    // object issuing the load has a DT_RUNPATH.  The rpath field holds the object
+    // own DT_RPATH along with the one inherited from the loading objects chain.
+    if !elc.has_runpath {
         for searchpath in &elc.rpath {
             let path = Path::new(&searchpath.path).join(dtneeded);
             if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false)
