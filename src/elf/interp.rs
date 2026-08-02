@@ -32,16 +32,13 @@ const GLIBC_INTERP: &[&str] = &[
 ];
 
 pub fn is_glibc(interp: &Option<String>) -> bool {
-    /*
-    if let Some(interp) = get_interp_name(interp) {
-        return GLIBC_INTERP.contains(&interp);
+    match interp {
+        Some(interp) => GLIBC_INTERP.contains(&pathutils::get_name(&Path::new(interp)).as_str()),
+        // Shared libraries do not have a PT_INTERP segment, so assume the system
+        // loader (glibc) to resolve their dependencies (it also mimics ldd, which
+        // always uses the system loader).
+        None => true,
     }
-    false
-    */
-    if let Some(interp) = interp {
-        return GLIBC_INTERP.contains(&pathutils::get_name(&Path::new(interp)).as_str());
-    }
-    false
 }
 
 // musl interp is in the form of ld-musl-$(ARCH)$(SUBARCH).so.1
