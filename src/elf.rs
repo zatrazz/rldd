@@ -819,11 +819,15 @@ fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, binary: &P,
     }
 }
 #[cfg(target_os = "freebsd")]
-fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, _binary: &P, _elc: &ElfInfo) {
-    if ld_cache.is_none() {
-        *ld_cache =
-            ld_hints_freebsd::parse_ld_so_hints(&Path::new("/var/run/ld-elf.so.hints")).ok();
-    }
+fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, _binary: &P, elc: &ElfInfo) {
+    // The 32-bit compat objects use a separate hints file (the rtld
+    // COMPAT_libcompat suffix), so the cache is reloaded for each binary.
+    let hints = if cfg!(target_pointer_width = "64") && elc.ei_class == ELFCLASS32 {
+        "/var/run/ld-elf32.so.hints"
+    } else {
+        "/var/run/ld-elf.so.hints"
+    };
+    *ld_cache = ld_hints_freebsd::parse_ld_so_hints(&Path::new(hints)).ok();
 }
 #[cfg(target_os = "openbsd")]
 fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, _binary: &P, _ecl: &ElfInfo) {

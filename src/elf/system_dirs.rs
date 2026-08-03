@@ -168,10 +168,17 @@ pub fn get_system_dirs(
 pub fn get_system_dirs(
     _interp: &Option<String>,
     _e_machine: object::elf::Machine,
-    _ei_class: object::elf::FileClass,
+    ei_class: object::elf::FileClass,
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
-    // The rtld STANDARD_LIBRARY_PATH.
-    Ok(["/lib/casper", "/lib", "/usr/lib"]
+    // The rtld STANDARD_LIBRARY_PATH, with the COMPAT_libcompat suffix for
+    // the 32-bit compat objects.
+    let dirs: &[&str] =
+        if cfg!(target_pointer_width = "64") && ei_class == object::elf::ELFCLASS32 {
+            &["/lib/casper", "/lib32", "/usr/lib32"]
+        } else {
+            &["/lib/casper", "/lib", "/usr/lib"]
+        };
+    Ok(dirs
         .iter()
         .map(|path| search_path::SearchPath {
             path: path.to_string(),
