@@ -26,7 +26,10 @@ impl DyldCache {
     // Retrieve a dynamic object information from the dyld system cache.
     fn get(&self, name: &str, executable_path: &String) -> Option<MachOInfo> {
         match self.image(name)? {
-            Some((data, offset)) => parse_object(data, offset, executable_path).ok(),
+            Some((data, offset)) => {
+                let loader_path = pathutils::get_path(&Path::new(name)).unwrap_or_default();
+                parse_object(data, offset, executable_path, &loader_path).ok()
+            }
             // For images not covered by any cache mapping, return a default
             // object without any dependencies.
             None => Some(MachOInfo::default()),
@@ -425,13 +428,16 @@ fn open_macho_file<P: AsRef<Path>>(
         Err(_) => return Err(Error::new(ErrorKind::Other, "Failed to map file")),
     };
 
-    parse_object(&mmap, 0, executable_path).map_err(|e| Error::new(ErrorKind::Other, e))
+    let loader_path = pathutils::get_path(filename).unwrap_or_default();
+    parse_object(&mmap, 0, executable_path, &loader_path)
+        .map_err(|e| Error::new(ErrorKind::Other, e))
 }
 
 fn parse_object(
     data: &[u8],
     offset: u64,
     executable_path: &String,
+    loader_path: &str,
 ) -> Result<MachOInfo, &'static str> {
     let kind = match object::FileKind::parse_at(data, offset) {
         Ok(file) => file,
@@ -439,10 +445,10 @@ fn parse_object(
     };
 
     match kind {
-        object::FileKind::MachO32 => parse_macho32(data, offset, executable_path),
-        object::FileKind::MachO64 => parse_macho64(data, offset, executable_path),
-        object::FileKind::MachOFat32 => parse_macho_fat32(data, executable_path),
-        object::FileKind::MachOFat64 => parse_macho_fat64(data, executable_path),
+        object::FileKind::MachO32 => parse_macho32(data, offset, executable_path, loader_path),
+        object::FileKind::MachO64 => parse_macho64(data, offset, executable_path, loader_path),
+        object::FileKind::MachOFat32 => parse_macho_fat32(data, executable_path, loader_path),
+        object::FileKind::MachOFat64 => parse_macho_fat64(data, executable_path, loader_path),
         _ => Err("Invalid object"),
     }
 }
@@ -464,9 +470,10 @@ fn parse_macho32(
     data: &[u8],
     offset: u64,
     executable_path: &str,
+    loader_path: &str,
 ) -> Result<MachOInfo, &'static str> {
     if let Some(macho) = MachHeader32::parse(data, offset).handle_err() {
-        return parse_macho(macho, data, offset, executable_path);
+        return parse_macho(macho, data, offset, executable_path, loader_path);
     }
     Err("Invalid Mach-O 32 object")
 }
@@ -475,9 +482,10 @@ fn parse_macho64(
     data: &[u8],
     offset: u64,
     executable_path: &str,
+    loader_path: &str,
 ) -> Result<MachOInfo, &'static str> {
     if let Some(macho) = MachHeader64::parse(data, offset).handle_err() {
-        return parse_macho(macho, data, offset, executable_path);
+        return parse_macho(macho, data, offset, executable_path, loader_path);
     }
     Err("Invalid Mach-O 64 object")
 }
@@ -485,9 +493,10 @@ fn parse_macho64(
 fn parse_macho_fat32(
     data: &[u8],
     executable_path: &String,
+    loader_path: &str,
 ) -> Result<MachOInfo, &'static str> {
     if let Some(fat) = MachOFatFile32::parse(data).handle_err() {
-        return parse_macho_fat(data, fat.arches(), executable_path);
+        return parse_macho_fat(data, fat.arches(), executable_path, loader_path);
     }
     Err("Invalid FAT Mach-O 32 object")
 }
@@ -495,9 +504,10 @@ fn parse_macho_fat32(
 fn parse_macho_fat64(
     data: &[u8],
     executable_path: &String,
+    loader_path: &str,
 ) -> Result<MachOInfo, &'static str> {
     if let Some(fat) = MachOFatFile64::parse(data).handle_err() {
-        return parse_macho_fat(data, fat.arches(), executable_path);
+        return parse_macho_fat(data, fat.arches(), executable_path, loader_path);
     }
     Err("Invalid FAT Mach-O 64 object")
 }
@@ -519,11 +529,12 @@ fn parse_macho_fat<FatArch: object::read::macho::FatArch>(
     data: &[u8],
     arches: &[FatArch],
     executable_path: &String,
+    loader_path: &str,
 ) -> Result<MachOInfo, &'static str> {
     for arch in arches {
         if check_current_arch(arch.architecture()) {
             if let Some(fatdata) = arch.data(data).handle_err() {
-                return parse_object(fatdata, 0, executable_path);
+                return parse_object(fatdata, 0, executable_path, loader_path);
             }
         }
     }
@@ -535,6 +546,7 @@ fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
     data: &[u8],
     offset: u64,
     executable_path: &str,
+    loader_path: &str,
 ) -> Result<MachOInfo, &'static str> {
     let mut deps = DepsVec::new();
     let mut rpath = search_path::SearchPathVec::new();
@@ -545,7 +557,9 @@ fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
                 match parse_load_command::<Mach>(endian, command) {
                     Some((LoadCommand::Dylib, dylib)) => deps.push(dylib),
                     Some((LoadCommand::Rpath, path)) => {
-                        let path = path.replace("@executable_path", executable_path);
+                        let path = path
+                            .replace("@executable_path", executable_path)
+                            .replace("@loader_path", loader_path);
                         rpath.add_path(path.as_str());
                     }
                     _ => {}
