@@ -193,8 +193,17 @@ fn resolve_dependency(
 
     if let Some((elc, depd, path)) = find_dependency(config, rpaths, &dependency, deptree, depp, preload)
     {
+        // The run-path list for the object own dependencies: the object
+        // LC_RPATH entries followed by the ones inherited from the loading
+        // chain, mimicking the dyld run-path stack.
+        let mut newrpaths = elc.rpath.clone();
+        for rpath in rpaths {
+            if !newrpaths.contains(rpath) {
+                newrpaths.push(rpath.clone());
+            }
+        }
         for dep in &elc.deps {
-            resolve_dependency(config, &path, &elc.rpath, dep, deptree, depd, preload);
+            resolve_dependency(config, &path, &newrpaths, dep, deptree, depd, preload);
         }
     }
 }
