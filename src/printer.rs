@@ -17,11 +17,17 @@ pub struct Printer {
     pp: bool,
     ldd: bool,
     one: bool,
+    verbose: bool,
 }
 
 impl Printer {
-    pub fn new(pp: bool, ldd: bool, one: bool) -> Self {
-        Self { pp, ldd, one }
+    pub fn new(pp: bool, ldd: bool, one: bool, verbose: bool) -> Self {
+        Self {
+            pp,
+            ldd,
+            one,
+            verbose,
+        }
     }
 
     fn write_colorized<S: Into<String>>(
@@ -162,7 +168,7 @@ impl Printer {
         self.print_entry(dtneeded, path, mode, true)
     }
 
-    pub fn print_not_found(&self, dtneeded: &String, deptrace: &[bool]) {
+    pub fn print_not_found(&self, dtneeded: &String, searched: &[String], deptrace: &[bool]) {
         if self.ldd {
             println!("        {dtneeded} => not found");
             return;
@@ -178,9 +184,18 @@ impl Printer {
             format!("{dtneeded} not found"),
         );
         ok!(writer.print(&buffer));
+
+        if self.verbose {
+            for location in searched {
+                for v in deptrace {
+                    print!("{}", if *v { "|  " } else { "   " });
+                }
+                println!("   searched {location}");
+            }
+        }
     }
 }
 
-pub fn create(pp: bool, ldd: bool, one: bool) -> Printer {
-    Printer::new(pp, ldd, one)
+pub fn create(pp: bool, ldd: bool, one: bool, verbose: bool) -> Printer {
+    Printer::new(pp, ldd, one, verbose)
 }

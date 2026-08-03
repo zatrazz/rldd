@@ -5,12 +5,15 @@ mod arenatree;
 use crate::pathutils;
 
 // A resolved dependency
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug, Default)]
 pub struct DepNode {
     pub path: Option<String>,
     pub name: String,
     pub mode: DepMode,
     pub found: bool,
+    // The locations searched when the dependency is not found, printed in
+    // verbose mode.
+    pub searched: Vec<String>,
 }
 
 impl arenatree::EqualString for DepNode {
@@ -35,7 +38,7 @@ impl arenatree::EqualString for DepNode {
 pub type DepTree = arenatree::ArenaTree<DepNode>;
 
 // The resolution mode for a dependency, used mostly for printing.
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
 #[allow(dead_code)]
 pub enum DepMode {
     Preload,       // Preload library.
@@ -46,6 +49,7 @@ pub enum DepMode {
     LdCache,       // Loader cache (ld.so.cache, etc.).
     SystemDirs,    // Default system directory (i.e '/lib64').
     Executable,    // The root executable/library.
+    #[default]
     NotFound,
 }
 

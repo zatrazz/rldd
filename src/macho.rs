@@ -106,24 +106,8 @@ pub fn resolve_binary(
             \x20 library path: {}\n\
             \x20 dyld cache: {} images",
             filename.display(),
-            if omf.rpath.is_empty() {
-                "(none)".to_string()
-            } else {
-                omf.rpath
-                    .iter()
-                    .map(|path| path.path.as_str())
-                    .collect::<Vec<&str>>()
-                    .join(":")
-            },
-            if library_path.is_empty() {
-                "(none)".to_string()
-            } else {
-                library_path
-                    .iter()
-                    .map(|path| path.path.as_str())
-                    .collect::<Vec<&str>>()
-                    .join(":")
-            },
+            search_path::format_list(&omf.rpath),
+            search_path::format_list(library_path),
             cache.images.len(),
         );
     }
@@ -134,6 +118,7 @@ pub fn resolve_binary(
         name: pathutils::get_name(&filename),
         mode: DepMode::Executable,
         found: false,
+        searched: Vec::new(),
     });
 
     let config = Config {
@@ -239,6 +224,7 @@ fn resolve_overrides<P: AsRef<Path>>(
                     name: filename,
                     mode: DepMode::LdLibraryPath,
                     found: false,
+                    searched: Vec::new(),
                 },
                 depp,
             );
@@ -286,6 +272,7 @@ fn resolve_dependency_2(
                 name,
                 mode: DepMode::LdCache,
                 found: false,
+                searched: Vec::new(),
             },
             depp,
         );
@@ -305,12 +292,22 @@ fn resolve_dependency_2(
     let path = if elc.is_none() {
         // The dependency library does not exist.
         if !rpath {
+            let mut searched = Vec::new();
+            if !config.library_path.is_empty() {
+                searched.push(format!(
+                    "library path: {}",
+                    search_path::format_list(config.library_path)
+                ));
+            }
+            searched.push("dyld cache".to_string());
+            searched.push(dependency.to_string());
             deptree.addnode(
                 DepNode {
                     path: pathutils::get_path(&path),
                     name: pathutils::get_name(&path),
                     mode: DepMode::NotFound,
                     found: false,
+                    searched,
                 },
                 depp,
             );
@@ -333,6 +330,7 @@ fn resolve_dependency_2(
                 DepMode::Direct
             },
             found: false,
+            searched: Vec::new(),
         },
         depp,
     );
@@ -354,6 +352,7 @@ fn resolve_dependency_check_found(
                     name: entry.name,
                     mode: entry.mode,
                     found: true,
+                    searched: Vec::new(),
                 },
                 depp,
             );

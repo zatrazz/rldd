@@ -72,3 +72,15 @@ pub fn from_preload<S: AsRef<str>>(string: S) -> SearchPathVec {
     }
     r
 }
+
+// Format a search path list for diagnostics printing.
+pub fn format_list(searchpaths: &SearchPathVec) -> String {
+    if searchpaths.is_empty() {
+        return "(none)".to_string();
+    }
+    searchpaths
+        .iter()
+        .map(|path| path.path.as_str())
+        .collect::<Vec<&str>>()
+        .join(":")
+}

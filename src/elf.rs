@@ -529,17 +529,6 @@ struct Config<'a> {
     all: bool,
 }
 
-fn format_search_path_list(searchpaths: &search_path::SearchPathVec) -> String {
-    if searchpaths.is_empty() {
-        return "(none)".to_string();
-    }
-    searchpaths
-        .iter()
-        .map(|path| path.path.as_str())
-        .collect::<Vec<&str>>()
-        .join(":")
-}
-
 #[cfg(target_os = "linux")]
 fn format_ld_cache(ld_cache: &Option<LoaderCache>) -> String {
     match ld_cache {
@@ -560,9 +549,37 @@ fn format_ld_cache(ld_cache: &Option<LoaderCache>) -> String {
 ))]
 fn format_ld_cache(ld_cache: &Option<LoaderCache>) -> String {
     match ld_cache {
-        Some(ld_cache) => format_search_path_list(ld_cache),
+        Some(ld_cache) => search_path::format_list(ld_cache),
         None => "(none)".to_string(),
     }
+}
+
+fn push_searched(r: &mut Vec<String>, name: &str, searchpaths: &search_path::SearchPathVec) {
+    if !searchpaths.is_empty() {
+        r.push(format!("{name}: {}", search_path::format_list(searchpaths)));
+    }
+}
+
+// Describe the locations searched while failing to resolve a dependency, shown
+// on the not found diagnostics in verbose mode.
+fn searched_locations(config: &Config, elc: &ElfInfo, dependency: &str) -> Vec<String> {
+    let mut r = Vec::new();
+    if Path::new(dependency).is_absolute() {
+        r.push(dependency.to_string());
+        return r;
+    }
+    if !elc.has_runpath {
+        push_searched(&mut r, "rpath", &elc.rpath);
+    }
+    push_searched(&mut r, "library path", config.ld_library_path);
+    push_searched(&mut r, "runpath", &elc.runpath);
+    if !elc.nodeflibs {
+        if config.ld_cache.is_some() {
+            r.push(format!("cache {}", DepMode::LdCache));
+        }
+        push_searched(&mut r, "default paths", &config.system_dirs);
+    }
+    r
 }
 
 fn print_search_path_information<P: AsRef<Path>>(filename: &P, config: &Config, elc: &ElfInfo) {
@@ -575,13 +592,13 @@ fn print_search_path_information<P: AsRef<Path>>(filename: &P, config: &Config, 
         \x20 cache ({}): {}\n\
         \x20 default paths: {}",
         filename.as_ref().display(),
-        format_search_path_list(&elc.rpath),
-        format_search_path_list(config.ld_preload),
-        format_search_path_list(config.ld_library_path),
-        format_search_path_list(&elc.runpath),
+        search_path::format_list(&elc.rpath),
+        search_path::format_list(config.ld_preload),
+        search_path::format_list(config.ld_library_path),
+        search_path::format_list(&elc.runpath),
         DepMode::LdCache,
         format_ld_cache(config.ld_cache),
-        format_search_path_list(&config.system_dirs),
+        search_path::format_list(&config.system_dirs),
     );
 }
 
@@ -609,6 +626,7 @@ fn resolve_binary_arch(
                 name: pathutils::get_name(&path),
                 mode: DepMode::SystemDirs,
                 found: true,
+                searched: Vec::new(),
             },
             depp,
         );
@@ -709,6 +727,7 @@ pub fn resolve_binary(
         name: pathutils::get_name(&filename),
         mode: DepMode::Executable,
         found: false,
+        searched: Vec::new(),
     });
 
     resolve_binary_arch(&elc, &mut deptree, depp)?;
@@ -823,6 +842,7 @@ fn resolve_dependency(
                         name: pathutils::get_name(&Path::new(dependency)),
                         mode: entry.mode,
                         found: true,
+                        searched: Vec::new(),
                     },
                     depp,
                 );
@@ -846,6 +866,7 @@ fn resolve_dependency(
                 name: r.1,
                 mode: dep.mode,
                 found: false,
+                searched: Vec::new(),
             },
             depp,
         );
@@ -870,6 +891,7 @@ fn resolve_dependency(
                 name: pathutils::get_name(&path),
                 mode: DepMode::NotFound,
                 found: false,
+                searched: searched_locations(config, elc, dependency),
             },
             depp,
         );

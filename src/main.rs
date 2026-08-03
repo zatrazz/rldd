@@ -31,7 +31,7 @@ fn print_deps_children(p: &Printer, deps: &DepTree, children: &[usize], deptrace
         let dep = &deps.arena[*c];
         deptrace.push(children.len() > 1);
         if dep.val.mode == deptree::DepMode::NotFound {
-            p.print_not_found(&dep.val.name, deptrace);
+            p.print_not_found(&dep.val.name, &dep.val.searched, deptrace);
         } else if dep.val.found {
             p.print_already_found(
                 &dep.val.name,
@@ -128,7 +128,7 @@ fn print_error(arg: &String, err: std::io::Error) -> String {
 fn main() {
     let opts: Options = argh::from_env();
 
-    let printer = printer::create(opts.path, opts.ldd, opts.args.len() == 1);
+    let printer = printer::create(opts.path, opts.ldd, opts.args.len() == 1, opts.verbose);
 
     let ld_library_path = search_path::from_string(&opts.library_path, &[':']);
     let ld_preload = search_path::from_preload(&opts.preload);
