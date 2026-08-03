@@ -79,9 +79,11 @@ pub fn create_context() -> DyldCache {
     DyldCache::default()
 }
 
-// The dyld builtin fallback framework path used when the environment variable
-// is not set (the DYLD_FALLBACK_FRAMEWORK_PATH default from dyld4).
+// The dyld builtin fallback paths used when the environment variables are not
+// set (the DYLD_FALLBACK_FRAMEWORK_PATH and DYLD_FALLBACK_LIBRARY_PATH
+// defaults from dyld4).
 const DEFAULT_FALLBACK_FRAMEWORK_PATH: &str = "/System/Library/Frameworks";
+const DEFAULT_FALLBACK_LIBRARY_PATH: &str = "/usr/local/lib:/usr/lib";
 
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_binary(
@@ -90,6 +92,7 @@ pub fn resolve_binary(
     library_path: &search_path::SearchPathVec,
     framework_path: &search_path::SearchPathVec,
     fallback_framework_path: &Option<String>,
+    fallback_library_path: &Option<String>,
     all: bool,
     verbose: bool,
     arg: &str,
@@ -133,12 +136,19 @@ pub fn resolve_binary(
             .unwrap_or(DEFAULT_FALLBACK_FRAMEWORK_PATH),
         &[':'],
     );
+    let fallback_library_path = search_path::from_string(
+        fallback_library_path
+            .as_deref()
+            .unwrap_or(DEFAULT_FALLBACK_LIBRARY_PATH),
+        &[':'],
+    );
 
     let config = Config {
         cache,
         library_path,
         framework_path,
         fallback_framework_path,
+        fallback_library_path,
         executable_path: &executable_path,
         all,
     };
@@ -175,6 +185,7 @@ struct Config<'a> {
     library_path: &'a search_path::SearchPathVec,
     framework_path: &'a search_path::SearchPathVec,
     fallback_framework_path: search_path::SearchPathVec,
+    fallback_library_path: search_path::SearchPathVec,
     executable_path: &'a String,
     all: bool,
 }
@@ -367,6 +378,16 @@ fn resolve_dependency_2(
             ) {
                 return Some((elc, depd));
             }
+        }
+        if let Some((elc, depd)) = resolve_search_paths(
+            config,
+            &config.fallback_library_path,
+            &pathutils::get_name(&path),
+            DepMode::DyldFallbackLibraryPath,
+            deptree,
+            depp,
+        ) {
+            return Some((elc, depd));
         }
 
         // The dependency library does not exist.

@@ -79,6 +79,12 @@ struct Options {
     #[argh(option)]
     fallback_framework_path: Option<String>,
 
+    /// assume the DYLD_FALLBACK_LIBRARY_PATH is set (default to the dyld
+    /// builtin fallback).
+    #[cfg(target_os = "macos")]
+    #[argh(option)]
+    fallback_library_path: Option<String>,
+
     /// assume the LD_PRELOAD is set.
     #[argh(option, default = "\"\".to_string()")]
     #[cfg(all(target_family = "unix", not(target_os = "macos")))]
@@ -188,6 +194,7 @@ fn main() {
             &ld_library_path,
             &framework_path,
             &opts.fallback_framework_path,
+            &opts.fallback_library_path,
             opts.all,
             opts.verbose,
             arg.as_str(),
