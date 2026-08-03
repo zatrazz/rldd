@@ -187,7 +187,7 @@ fn resolve_dependency(
 
     // To avoid circular dependencies, check if deptree already contains the
     // dependency.
-    if deptree.contains(&dependency) {
+    if check_already_resolved(config, &dependency, deptree, depp) {
         return;
     }
 
@@ -197,6 +197,32 @@ fn resolve_dependency(
             resolve_dependency(config, &path, &elc.rpath, dep, deptree, depd, preload);
         }
     }
+}
+
+// Check if the dependency was already resolved, adding an already found
+// node when the -a option is used.
+fn check_already_resolved(
+    config: &Config,
+    dependency: &str,
+    deptree: &mut DepTree,
+    depp: usize,
+) -> bool {
+    if let Some(entry) = deptree.get(dependency) {
+        if config.all {
+            deptree.addnode(
+                DepNode {
+                    path: entry.path,
+                    name: entry.name,
+                    mode: entry.mode,
+                    found: true,
+                    searched: Vec::new(),
+                },
+                depp,
+            );
+        }
+        return true;
+    }
+    false
 }
 
 // Resolve DEPENDENCY following the dyld search order:
@@ -334,7 +360,7 @@ fn resolve_path(
 ) -> ResolveResult {
     // The expanded @rpath candidates require their own check against the
     // dependency tree, since the recorded nodes hold the resolved path.
-    if deptree.contains(dependency) {
+    if check_already_resolved(config, dependency, deptree, depp) {
         return ResolveResult::Skip;
     }
 
@@ -364,7 +390,7 @@ fn resolve_path(
     let Ok(path) = path.canonicalize() else {
         return ResolveResult::Miss;
     };
-    if deptree.contains(&path.to_string_lossy()) {
+    if check_already_resolved(config, &path.to_string_lossy(), deptree, depp) {
         return ResolveResult::Skip;
     }
     let Ok(elc) = open_macho_file(&path, config.executable_path) else {
