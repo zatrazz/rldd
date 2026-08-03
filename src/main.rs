@@ -83,17 +83,17 @@ struct Options {
     platform: Option<String>,
 
     /// process data relocations and report undefined symbols.
-    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
+    #[cfg(target_os = "linux")]
     #[argh(switch, short = 'd')]
     data_relocs: bool,
 
     /// process data and function relocations and report undefined symbols.
-    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
+    #[cfg(target_os = "linux")]
     #[argh(switch, short = 'r')]
     function_relocs: bool,
 
     /// print unused direct dependencies.
-    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
+    #[cfg(target_os = "linux")]
     #[argh(switch, short = 'u')]
     unused: bool,
 
@@ -154,7 +154,7 @@ fn main() {
             Ok(deptree) => {
                 // Mimic ldd, where --unused suppress both the dependency listing
                 // and the undefined symbols report.
-                #[cfg(all(target_family = "unix", not(target_os = "macos")))]
+                #[cfg(target_os = "linux")]
                 if opts.unused {
                     let unused = check_unused_dependencies(&deptree);
                     if !unused.is_empty() {
@@ -169,7 +169,7 @@ fn main() {
 
                 print_deps(&printer, &deptree);
 
-                #[cfg(all(target_family = "unix", not(target_os = "macos")))]
+                #[cfg(target_os = "linux")]
                 if opts.data_relocs || opts.function_relocs {
                     for undef in check_undefined_symbols(&deptree, opts.function_relocs) {
                         println!("undefined symbol: {}\t({})", undef.name, undef.object);

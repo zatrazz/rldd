@@ -14,11 +14,12 @@ Use the '-a' option to print all dependencies (including already resolved ones),
 
 The '-l' option mimics the ldd output, with unique libraries one per line.
 
-## Relocation checks (ELF only)
+## Relocation checks (Linux only)
 
 Like ldd, the dynamic relocations can be processed to report unresolved symbol
 references or unused dependencies (the resolution is done by symbol name, symbol
-versioning is not taken in consideration):
+versioning is not taken in consideration).  The checks mimic the glibc loader
+and are only supported on Linux:
 
 - '-d' processes the data relocations and reports the undefined symbols that no
   loaded object defines.

@@ -30,6 +30,7 @@ mod ld_preload;
 mod ld_so_cache;
 #[cfg(target_os = "netbsd")]
 mod ld_so_conf_netbsd;
+#[cfg(target_os = "linux")]
 mod symbols;
 
 #[cfg(target_os = "linux")]
@@ -1008,15 +1009,19 @@ fn resolve_dependency_ld_cache<'a>(
 }
 
 // Symbol resolution mimicking, used to implement the ldd like --data-relocs,
-// --function-relocs, and --unused options.
+// --function-relocs, and --unused options.  The checks mimic the glibc loader
+// and are only enabled on Linux; on Android the linker provides the loader
+// symbols with mangled names, while the BSD run-time linkers were not verified.
 
 // An unresolved symbol reference found while processing the dynamic relocations.
+#[cfg(target_os = "linux")]
 pub struct UndefinedSymbol {
     pub name: String,
     // Full path of the object with the undefined reference.
     pub object: String,
 }
 
+#[cfg(target_os = "linux")]
 fn deptree_node_path(node: &DepNode) -> Option<String> {
     node.path
         .as_ref()
@@ -1026,6 +1031,7 @@ fn deptree_node_path(node: &DepNode) -> Option<String> {
 // Build the loader global search scope: the resolved objects from the dependency
 // tree in breadth-first order (the order the loader uses for symbol resolution),
 // with each object dynamic symbol table and relocation references parsed.
+#[cfg(target_os = "linux")]
 fn build_symbol_scope(deptree: &DepTree) -> Vec<(String, symbols::ObjectSymbols)> {
     use std::collections::{HashSet, VecDeque};
 
@@ -1057,6 +1063,7 @@ fn build_symbol_scope(deptree: &DepTree) -> Vec<(String, symbols::ObjectSymbols)
 }
 
 // Reparse the root object, used to obtain the PT_INTERP and DT_NEEDED values.
+#[cfg(target_os = "linux")]
 fn open_root_elf(deptree: &DepTree) -> Option<ElfInfo> {
     let root = deptree.arena.first()?;
     let path = deptree_node_path(&root.val)?;
@@ -1066,6 +1073,7 @@ fn open_root_elf(deptree: &DepTree) -> Option<ElfInfo> {
 // The dynamic loader is part of the global scope (libc binds to symbols the
 // loader provides, like _rtld_global), however it might not be present in the
 // dependency tree if no object lists it as an explicit dependency.
+#[cfg(target_os = "linux")]
 fn append_interp_to_scope(scope: &mut Vec<(String, symbols::ObjectSymbols)>, elc: &ElfInfo) {
     if let Some(interp) = &elc.interp {
         let name = pathutils::get_name(&Path::new(interp));
@@ -1086,6 +1094,7 @@ fn append_interp_to_scope(scope: &mut Vec<(String, symbols::ObjectSymbols)>, elc
 // is false only the data relocations are processed (--data-relocs), otherwise
 // the DT_JMPREL function relocations are also checked (--function-relocs).
 // Symbol versioning is not taken in consideration.
+#[cfg(target_os = "linux")]
 pub fn check_undefined_symbols(deptree: &DepTree, process_plt: bool) -> Vec<UndefinedSymbol> {
     use std::collections::HashSet;
 
@@ -1124,6 +1133,7 @@ pub fn check_undefined_symbols(deptree: &DepTree, process_plt: bool) -> Vec<Unde
 // entries that provide no symbol used by the executable own relocations.  Like
 // the loader, only the executable references are taken in consideration, so a
 // direct dependency only used by another shared object is still reported.
+#[cfg(target_os = "linux")]
 pub fn check_unused_dependencies(deptree: &DepTree) -> Vec<String> {
     use std::collections::{HashMap, HashSet};
 
