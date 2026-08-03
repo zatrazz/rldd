@@ -891,6 +891,15 @@ fn dependency_path(dir: &str, dtneeded: &str) -> std::path::PathBuf {
     Path::new(dir).join(dtneeded)
 }
 
+#[cfg(target_os = "linux")]
+fn rpath_search(elc: &ElfInfo) -> bool {
+    !elc.has_runpath
+}
+#[cfg(all(target_family = "unix", not(target_os = "linux")))]
+fn rpath_search(_elc: &ElfInfo) -> bool {
+    true
+}
+
 // Returned from resolve_dependency_1 with resolved information.
 #[derive(Debug)]
 struct ResolvedDependency<'a> {
@@ -1006,15 +1015,21 @@ fn resolve_dependencies(
                 item.depp,
             );
 
-            // The loader searches the DT_RPATH of the object itself and then
-            // walks up the chain of loading objects (up to the executable).
-            // An object DT_RPATH is ignored if the object also defines
-            // DT_RUNPATH, however the ancestors DT_RPATH still applies to the
-            // object dependencies.
+            // The DT_RPATH scope used for the indirect dependencies is system
+            // specific: the glibc loader searches the object own DT_RPATH and
+            // then walks up the chain of loading objects (up to the
+            // executable), the FreeBSD and OpenBSD loaders search the object
+            // own DT_RPATH and then the main object one, while the NetBSD
+            // loader only searches the requesting object DT_RPATH.  In all
+            // cases an object DT_RPATH is ignored if the object also defines
+            // DT_RUNPATH, without affecting the inherited part.
             if dep.elc.has_runpath {
                 dep.elc.rpath.clear();
             }
+            #[cfg(target_os = "linux")]
             dep.elc.rpath.extend(elc.rpath.clone());
+            #[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
+            dep.elc.rpath.extend(parents[0].0.rpath.clone());
 
             let parent = parents.len();
             for sdep in &dep.elc.deps {
@@ -1068,10 +1083,12 @@ fn resolve_dependency_1<'a>(
         return None;
     }
 
-    // The loader skips any DT_RPATH search (including the inherited one) if the
-    // object issuing the load has a DT_RUNPATH.  The rpath field holds the object
-    // own DT_RPATH along with the one inherited from the loading objects chain.
-    if !elc.has_runpath {
+    // The rpath field holds the object own DT_RPATH along with any inherited
+    // part.  The glibc loader skips the whole search (including the inherited
+    // chain) if the object issuing the load has a DT_RUNPATH, while the BSD
+    // loaders still search the main object DT_RPATH (the object own rpath is
+    // already cleared on DT_RUNPATH presence).
+    if rpath_search(elc) {
         for searchpath in &elc.rpath {
             let path = dependency_path(&searchpath.path, dtneeded);
             if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false)
