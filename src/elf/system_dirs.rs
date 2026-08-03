@@ -62,7 +62,7 @@ pub fn get_system_dirs(
         // way to obtain it on runtime.
         // TODO: Add an option to override it.
         search_path::SearchPath {
-            path: format!("/usr/{path}"),
+            path: format!("/usr{path}"),
             dev: 0,
             ino: 0,
         },
