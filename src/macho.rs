@@ -14,7 +14,7 @@ use crate::pathutils;
 use crate::search_path;
 use crate::search_path::*;
 
-mod dydlcache;
+mod dyldcache;
 
 type ImagesMap = HashMap<String, Option<u64>>;
 
@@ -68,7 +68,7 @@ impl DyldCache {
 // libraries, so file does not exist in the file system it is then checked against the
 // cache.
 pub fn create_context() -> DyldCache {
-    if let Some(path) = dydlcache::path() {
+    if let Some(path) = dyldcache::path() {
         if let Ok(OpenMachOFileResult::Cache(cache)) =
             open_macho_file(&Path::new(path), &String::new())
         {
