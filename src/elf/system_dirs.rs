@@ -170,11 +170,15 @@ pub fn get_system_dirs(
     _e_machine: object::elf::Machine,
     _ei_class: object::elf::FileClass,
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
-    Ok(vec![search_path::SearchPath {
-        path: "/lib".to_string(),
-        dev: 0,
-        ino: 0,
-    }])
+    // The rtld STANDARD_LIBRARY_PATH.
+    Ok(["/lib/casper", "/lib", "/usr/lib"]
+        .iter()
+        .map(|path| search_path::SearchPath {
+            path: path.to_string(),
+            dev: 0,
+            ino: 0,
+        })
+        .collect())
 }
 
 #[cfg(any(target_os = "openbsd", target_os = "netbsd"))]
