@@ -765,22 +765,8 @@ pub fn resolve_binary(
 
     resolve_binary_arch(&elc, &mut deptree, depp)?;
 
-    let refpath = filename.to_string_lossy();
-    for ld_preload in config.ld_preload {
-        resolve_dependency(
-            &config,
-            &ld_preload.path,
-            &refpath,
-            &elc,
-            &mut deptree,
-            depp,
-            true,
-        );
-    }
-
-    for dep in &elc.deps {
-        resolve_dependency(&config, dep, &refpath, &elc, &mut deptree, depp, false);
-    }
+    let refpath = filename.to_string_lossy().into_owned();
+    resolve_dependencies(&config, elc, refpath, &mut deptree, depp);
 
     Ok(deptree)
 }
@@ -916,93 +902,144 @@ struct ResolvedDependency<'a> {
     mode: DepMode,
 }
 
-fn resolve_dependency(
-    config: &Config,
-    dependency: &String,
-    refpath: &str,
-    elc: &ElfInfo,
-    deptree: &mut DepTree,
+// A pending dependency to resolve: the DT_NEEDED name along the index of the
+// loading object information (on the parents vector) and the dependency tree
+// node to attach the resolution result.
+struct WorkItem {
+    dependency: String,
+    parent: usize,
     depp: usize,
     preload: bool,
+}
+
+// Resolve the dependencies in breadth-first order, mimicking the loader: each
+// object DT_NEEDED list is fully processed before the dependencies own
+// dependencies, so a shared dependency is attributed to the first object that
+// requests it in load order (which defines the search path used).
+fn resolve_dependencies(
+    config: &Config,
+    root_elc: ElfInfo,
+    root_refpath: String,
+    deptree: &mut DepTree,
+    root_depp: usize,
 ) {
-    // FreeBSD libmap.conf may remap the dependency name based on the
-    // referencing object path.
-    let dependency = &libmap_dependency(config, refpath, dependency);
+    use std::collections::VecDeque;
 
-    if elc.is_musl && dependency == "libc.so" {
-        return;
+    // The already loaded objects information, used to resolve their own
+    // dependencies (rpath chain and libmap reference path).
+    let mut parents: Vec<(ElfInfo, String)> = Vec::new();
+
+    let mut queue = VecDeque::new();
+    for searchpath in config.ld_preload {
+        queue.push_back(WorkItem {
+            dependency: searchpath.path.clone(),
+            parent: 0,
+            depp: root_depp,
+            preload: true,
+        });
     }
+    for dep in &root_elc.deps {
+        queue.push_back(WorkItem {
+            dependency: dep.clone(),
+            parent: 0,
+            depp: root_depp,
+            preload: false,
+        });
+    }
+    parents.push((root_elc, root_refpath));
 
-    // If DF_1_NODEFLIB is set ignore the search cache in the case a dependency could
-    // resolve the library.
-    if !elc.nodeflibs {
-        if let Some(entry) = deptree.get(dependency) {
-            if config.all {
-                deptree.addnode(
-                    DepNode {
-                        path: entry.path,
-                        name: pathutils::get_name(&Path::new(dependency)),
-                        mode: entry.mode,
-                        found: true,
-                        searched: Vec::new(),
-                    },
-                    depp,
-                );
+    while let Some(item) = queue.pop_front() {
+        let (elc, refpath) = &parents[item.parent];
+
+        // FreeBSD libmap.conf may remap the dependency name based on the
+        // referencing object path.
+        let dependency = &libmap_dependency(config, refpath, &item.dependency);
+
+        if elc.is_musl && dependency == "libc.so" {
+            continue;
+        }
+
+        // If DF_1_NODEFLIB is set ignore the search cache in the case a
+        // dependency could resolve the library.
+        if !elc.nodeflibs {
+            if let Some(entry) = deptree.get(dependency) {
+                if config.all {
+                    deptree.addnode(
+                        DepNode {
+                            path: entry.path,
+                            name: pathutils::get_name(&Path::new(dependency)),
+                            mode: entry.mode,
+                            found: true,
+                            searched: Vec::new(),
+                        },
+                        item.depp,
+                    );
+                }
+                continue;
             }
-            return;
         }
-    }
 
-    if let Some(mut dep) = resolve_dependency_1(dependency, config, elc, preload) {
-        let r = if dep.mode == DepMode::Direct {
-            // Decompose the direct object path in path and filename so when print the dependencies
-            // only the file name is showed in default mode.
-            let p = Path::new(dependency);
-            (pathutils::get_path(&p), pathutils::get_name(&p))
+        if let Some(mut dep) = resolve_dependency_1(dependency, config, elc, item.preload) {
+            let r = if dep.mode == DepMode::Direct {
+                // Decompose the direct object path in path and filename so when
+                // print the dependencies only the file name is showed in
+                // default mode.
+                let p = Path::new(dependency);
+                (pathutils::get_path(&p), pathutils::get_name(&p))
+            } else {
+                (Some(dep.path.to_string()), dep.filename.clone())
+            };
+            // The resolved path of this dependency, used as the reference path
+            // for its own dependencies resolution.
+            let depref = match &r.0 {
+                Some(path) => format!("{}{}{}", path, std::path::MAIN_SEPARATOR, r.1),
+                None => r.1.clone(),
+            };
+            let c = deptree.addnode(
+                DepNode {
+                    path: r.0,
+                    name: r.1,
+                    mode: dep.mode,
+                    found: false,
+                    searched: Vec::new(),
+                },
+                item.depp,
+            );
+
+            // The loader searches the DT_RPATH of the object itself and then
+            // walks up the chain of loading objects (up to the executable).
+            // An object DT_RPATH is ignored if the object also defines
+            // DT_RUNPATH, however the ancestors DT_RPATH still applies to the
+            // object dependencies.
+            if dep.elc.has_runpath {
+                dep.elc.rpath.clear();
+            }
+            dep.elc.rpath.extend(elc.rpath.clone());
+
+            let parent = parents.len();
+            for sdep in &dep.elc.deps {
+                queue.push_back(WorkItem {
+                    dependency: sdep.clone(),
+                    parent,
+                    depp: c,
+                    preload: item.preload,
+                });
+            }
+            parents.push((dep.elc, depref));
         } else {
-            (Some(dep.path.to_string()), dep.filename.clone())
-        };
-        // The resolved path of this dependency, used as the reference path for
-        // its own dependencies resolution.
-        let depref = match &r.0 {
-            Some(path) => format!("{}{}{}", path, std::path::MAIN_SEPARATOR, r.1),
-            None => r.1.clone(),
-        };
-        let c = deptree.addnode(
-            DepNode {
-                path: r.0,
-                name: r.1,
-                mode: dep.mode,
-                found: false,
-                searched: Vec::new(),
-            },
-            depp,
-        );
-
-        // The loader searches the DT_RPATH of the object itself and then walks up
-        // the chain of loading objects (up to the executable).  An object DT_RPATH
-        // is ignored if the object also defines DT_RUNPATH, however the ancestors
-        // DT_RPATH still applies to the object dependencies.
-        if dep.elc.has_runpath {
-            dep.elc.rpath.clear();
+            let path = Path::new(dependency);
+            let searched = searched_locations(config, elc, dependency);
+            deptree.addnode(
+                DepNode {
+                    path: pathutils::get_path(&path),
+                    name: pathutils::get_name(&path),
+                    mode: DepMode::NotFound,
+                    found: false,
+                    searched,
+                },
+                item.depp,
+            );
         }
-        dep.elc.rpath.extend(elc.rpath.clone());
-
-        for sdep in &dep.elc.deps {
-            resolve_dependency(config, sdep, &depref, &dep.elc, deptree, c, preload);
-        }
-    } else {
-        let path = Path::new(dependency);
-        deptree.addnode(
-            DepNode {
-                path: pathutils::get_path(&path),
-                name: pathutils::get_name(&path),
-                mode: DepMode::NotFound,
-                found: false,
-                searched: searched_locations(config, elc, dependency),
-            },
-            depp,
-        );
     }
 }
 
