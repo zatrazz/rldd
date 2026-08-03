@@ -65,6 +65,8 @@ struct ElfInfo {
     e_flags: FileFlags,
 
     interp: Option<String>,
+    // Not used on OpenBSD, where the loader ignores DT_SONAME.
+    #[cfg_attr(target_os = "openbsd", allow(dead_code))]
     soname: Option<String>,
     rpath: search_path::SearchPathVec,
     runpath: search_path::SearchPathVec,
@@ -509,11 +511,19 @@ fn match_elf_header(a1: &ElfInfo, a2: &ElfInfo) -> bool {
     a1.ei_class == a2.ei_class && a1.ei_data == a2.ei_data && a1.e_machine == a2.e_machine
 }
 
+#[cfg(not(target_os = "openbsd"))]
 fn match_elf_soname(dtneeded: &String, elc: &ElfInfo) -> bool {
     let soname = &elc.soname;
     if let Some(soname) = soname {
         return dtneeded == soname;
     }
+    true
+}
+// The OpenBSD loader does not take DT_SONAME in consideration, the resolution
+// is done by file name with major/minor version matching (so a DT_NEEDED with
+// an older minor is satisfied by a newer minor with a different DT_SONAME).
+#[cfg(target_os = "openbsd")]
+fn match_elf_soname(_dtneeded: &String, _elc: &ElfInfo) -> bool {
     true
 }
 
@@ -843,11 +853,62 @@ fn load_ld_so_preload(_interp: &Option<String>) -> search_path::SearchPathVec {
     search_path::SearchPathVec::new()
 }
 
+// Return the path candidate for a dependency on a search directory.  OpenBSD
+// shared objects do not have a DT_SONAME and the DT_NEEDED entries carry the
+// full libname.so.major.minor name, with the loader matching the major version
+// and picking the best minor available on the directory.
+#[cfg(target_os = "openbsd")]
+fn dependency_path(dir: &str, dtneeded: &str) -> std::path::PathBuf {
+    fn parse_version(name: &str) -> Option<(&str, u64)> {
+        let idx = name.find(".so.")?;
+        let stem = &name[..idx + 3];
+        // The version might be either major.minor or only the major.
+        let major = match name[idx + 4..].split_once('.') {
+            Some((major, minor)) => {
+                minor.parse::<u64>().ok()?;
+                major
+            }
+            None => &name[idx + 4..],
+        };
+        Some((stem, major.parse().ok()?))
+    }
+
+    if let Some((stem, major)) = parse_version(dtneeded) {
+        let prefix = format!("{stem}.{major}.");
+        let mut best: Option<(u64, std::path::PathBuf)> = None;
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if let Some(minor) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|filename| filename.strip_prefix(&prefix))
+                    .and_then(|minor| minor.parse::<u64>().ok())
+                {
+                    if best.as_ref().is_none_or(|(m, _)| minor > *m) {
+                        best = Some((minor, entry.path()));
+                    }
+                }
+            }
+        }
+        if let Some((_, path)) = best {
+            return path;
+        }
+    }
+    Path::new(dir).join(dtneeded)
+}
+#[cfg(all(target_family = "unix", not(target_os = "openbsd")))]
+fn dependency_path(dir: &str, dtneeded: &str) -> std::path::PathBuf {
+    Path::new(dir).join(dtneeded)
+}
+
 // Returned from resolve_dependency_1 with resolved information.
 #[derive(Debug)]
 struct ResolvedDependency<'a> {
     elc: ElfInfo,
     path: &'a String,
+    // The resolved file name, which might differ from the DT_NEEDED entry
+    // (for instance on OpenBSD minor version matching).
+    filename: String,
     mode: DepMode,
 }
 
@@ -895,7 +956,7 @@ fn resolve_dependency(
             let p = Path::new(dependency);
             (pathutils::get_path(&p), pathutils::get_name(&p))
         } else {
-            (Some(dep.path.to_string()), pathutils::get_name(dependency))
+            (Some(dep.path.to_string()), dep.filename.clone())
         };
         // The resolved path of this dependency, used as the reference path for
         // its own dependencies resolution.
@@ -955,6 +1016,7 @@ fn resolve_dependency_1<'a>(
             return Some(ResolvedDependency {
                 elc,
                 path: dtneeded,
+                filename: pathutils::get_name(&path),
                 mode: if preload {
                     DepMode::Preload
                 } else {
@@ -970,12 +1032,13 @@ fn resolve_dependency_1<'a>(
     // own DT_RPATH along with the one inherited from the loading objects chain.
     if !elc.has_runpath {
         for searchpath in &elc.rpath {
-            let path = Path::new(&searchpath.path).join(dtneeded);
+            let path = dependency_path(&searchpath.path, dtneeded);
             if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false)
             {
                 return Some(ResolvedDependency {
                     elc,
                     path: &searchpath.path,
+                    filename: pathutils::get_name(&path),
                     mode: DepMode::DtRpath,
                 });
             }
@@ -984,11 +1047,12 @@ fn resolve_dependency_1<'a>(
 
     // Check LD_LIBRARY_PATH paths.
     for searchpath in config.ld_library_path {
-        let path = Path::new(&searchpath.path).join(dtneeded);
+        let path = dependency_path(&searchpath.path, dtneeded);
         if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false) {
             return Some(ResolvedDependency {
                 elc,
                 path: &searchpath.path,
+                filename: pathutils::get_name(&path),
                 mode: DepMode::LdLibraryPath,
             });
         }
@@ -996,11 +1060,12 @@ fn resolve_dependency_1<'a>(
 
     // Check DT_RUNPATH.
     for searchpath in &elc.runpath {
-        let path = Path::new(&searchpath.path).join(dtneeded);
+        let path = dependency_path(&searchpath.path, dtneeded);
         if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false) {
             return Some(ResolvedDependency {
                 elc,
                 path: &searchpath.path,
+                filename: pathutils::get_name(&path),
                 mode: DepMode::DtRunpath,
             });
         }
@@ -1020,11 +1085,12 @@ fn resolve_dependency_1<'a>(
 
     // Finally the system directories.
     for searchpath in &config.system_dirs {
-        let path = Path::new(&searchpath.path).join(dtneeded);
+        let path = dependency_path(&searchpath.path, dtneeded);
         if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false) {
             return Some(ResolvedDependency {
                 elc,
                 path: &searchpath.path,
+                filename: pathutils::get_name(&path),
                 mode: DepMode::SystemDirs,
             });
         }
@@ -1049,6 +1115,7 @@ fn resolve_dependency_ld_cache<'a>(
             return Some(ResolvedDependency {
                 elc,
                 path,
+                filename: pathutils::get_name(&pathbuf),
                 mode: DepMode::LdCache,
             });
         }
@@ -1081,6 +1148,7 @@ fn resolve_dependency_ld_cache<'a>(
                 return Some(ResolvedDependency {
                     elc,
                     path: &searchpath.path,
+                    filename: pathutils::get_name(&path),
                     mode: DepMode::LdCache,
                 });
             }
@@ -1122,11 +1190,12 @@ fn resolve_dependency_ld_cache<'a>(
     elc: &'a ElfInfo,
 ) -> Option<ResolvedDependency<'a>> {
     for searchpath in ld_cache {
-        let path = Path::new(&searchpath.path).join(dtneeded);
+        let path = dependency_path(&searchpath.path, dtneeded);
         if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), platform, false) {
             return Some(ResolvedDependency {
                 elc,
                 path: &searchpath.path,
+                filename: pathutils::get_name(&path),
                 mode: DepMode::LdCache,
             });
         }
