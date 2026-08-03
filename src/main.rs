@@ -117,6 +117,16 @@ struct Options {
     args: Vec<String>,
 }
 
+#[cfg(target_os = "linux")]
+fn print_version_errors(arg: &str, errors: &[elf::VersionError]) {
+    for error in errors {
+        println!(
+            "{arg}: {}: version `{}' not found (required by {})",
+            error.object, error.version, error.required_by
+        );
+    }
+}
+
 fn print_error(arg: &String, err: std::io::Error) -> String {
     match err.kind() {
         std::io::ErrorKind::NotFound => format!("{arg}: no such file or directory"),
@@ -161,10 +171,11 @@ fn main() {
                 // and the undefined symbols report.
                 #[cfg(target_os = "linux")]
                 if opts.unused {
-                    let unused = check_unused_dependencies(&deptree);
-                    if !unused.is_empty() {
+                    let relocs = check_relocations(&deptree, true, true);
+                    print_version_errors(&arg, &relocs.version_errors);
+                    if !relocs.unused.is_empty() {
                         println!("Unused direct dependencies:");
-                        for path in unused {
+                        for path in relocs.unused {
                             println!("\t{path}");
                         }
                         exitcode = 1;
@@ -172,14 +183,24 @@ fn main() {
                     continue;
                 }
 
-                print_deps(&printer, &deptree);
-
                 #[cfg(target_os = "linux")]
                 if opts.data_relocs || opts.function_relocs {
-                    for undef in check_undefined_symbols(&deptree, opts.function_relocs) {
-                        println!("undefined symbol: {}\t({})", undef.name, undef.object);
+                    let relocs = check_relocations(&deptree, opts.function_relocs, false);
+                    // The loader prints the version check errors before the
+                    // dependency listing.
+                    print_version_errors(&arg, &relocs.version_errors);
+                    print_deps(&printer, &deptree);
+                    for undef in relocs.undefined {
+                        let version = match undef.version {
+                            Some(version) => format!(", version {version}"),
+                            None => String::new(),
+                        };
+                        println!("undefined symbol: {}{version}\t({})", undef.name, undef.object);
                     }
+                    continue;
                 }
+
+                print_deps(&printer, &deptree);
             }
             Err(e) => {
                 eprintln!("error: {}", print_error(&arg, e));

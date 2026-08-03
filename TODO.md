@@ -6,7 +6,6 @@
 
 ### TODO
 
-- [ ] Take symbol versioning in consideration on the -d/-r/-u relocation checks.
 
 ## MachO
 
@@ -15,6 +14,7 @@
 
 ## Done
 
+- [x] Take symbol versioning in consideration on the -d/-r/-u relocation checks.
 - [x] FreeBSD: Add [libmap.conf](https://www.freebsd.org/cgi/man.cgi?libmap.conf) support.
 - [x] Add search path information for -v option.
 - [x] Print the searched locations for not found libraries in verbose mode.

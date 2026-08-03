@@ -1143,8 +1143,29 @@ fn resolve_dependency_ld_cache<'a>(
 #[cfg(target_os = "linux")]
 pub struct UndefinedSymbol {
     pub name: String,
+    // The required symbol version, if any.
+    pub version: Option<String>,
     // Full path of the object with the undefined reference.
     pub object: String,
+}
+
+// A version definition required by some object that the dependency providing
+// it does not define (the loader version check).
+#[cfg(target_os = "linux")]
+pub struct VersionError {
+    // Full path of the object that should provide the version.
+    pub object: String,
+    pub version: String,
+    // Full path of the object requiring the version.
+    pub required_by: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+pub struct RelocCheckResult {
+    pub version_errors: Vec<VersionError>,
+    pub undefined: Vec<UndefinedSymbol>,
+    pub unused: Vec<String>,
 }
 
 #[cfg(target_os = "linux")]
@@ -1215,74 +1236,104 @@ fn append_interp_to_scope(scope: &mut Vec<(String, symbols::ObjectSymbols)>, elc
     }
 }
 
-// Mimic the loader LD_WARN relocation processing: report the non weak undefined
-// symbol references that no object in the global scope defines.  If PROCESS_PLT
-// is false only the data relocations are processed (--data-relocs), otherwise
-// the DT_JMPREL function relocations are also checked (--function-relocs).
-// Symbol versioning is not taken in consideration.
+// Mimic the loader relocation processing and version checking, used to
+// implement the ldd like --data-relocs, --function-relocs, and --unused
+// options:
+// - version_errors: version definitions required by some object that the
+//   dependency providing them does not define (always computed).
+// - undefined: non weak undefined symbol references that no object in the
+//   global scope satisfies.  If PROCESS_PLT is false the DT_JMPREL function
+//   relocations are only processed for bind-now objects, as the loader does
+//   in LD_WARN mode.
+// - unused: the executable DT_NEEDED entries that provide no symbol used by
+//   the executable own relocations (computed iff CHECK_UNUSED is set).
 #[cfg(target_os = "linux")]
-pub fn check_undefined_symbols(deptree: &DepTree, process_plt: bool) -> Vec<UndefinedSymbol> {
-    use std::collections::HashSet;
+pub fn check_relocations(
+    deptree: &DepTree,
+    process_plt: bool,
+    check_unused: bool,
+) -> RelocCheckResult {
+    use std::collections::{HashMap, HashSet};
+
+    let mut r = RelocCheckResult::default();
+
+    let root_elc = open_root_elf(deptree);
 
     let mut scope = build_symbol_scope(deptree);
-    if let Some(root_elc) = open_root_elf(deptree) {
-        append_interp_to_scope(&mut scope, &root_elc);
+    if let Some(root_elc) = &root_elc {
+        append_interp_to_scope(&mut scope, root_elc);
     }
 
-    let mut defined = HashSet::<&str>::new();
-    for (_, obj) in &scope {
-        for name in &obj.defined {
-            defined.insert(name.as_str());
+    // Whether the OBJ object provides a definition satisfying the REF
+    // reference, following the loader lookup rules: a versioned reference is
+    // satisfied by a matching version definition or by any definition from an
+    // object without version information.
+    fn satisfies(obj: &symbols::ObjectSymbols, sref: &symbols::SymbolRef) -> bool {
+        match &sref.version {
+            Some(version) => {
+                obj.defined_versioned
+                    .contains(&(sref.name.clone(), version.clone()))
+                    || (!obj.has_verdef && obj.defined.contains(&sref.name))
+            }
+            None => obj.defined.contains(&sref.name),
         }
     }
 
-    let mut r = Vec::new();
+    // The loader version check (mimicking _dl_check_all_versions): for each
+    // required version, check whether the object providing it (matched by file
+    // name) actually defines it.
+    for (opath, obj) in &scope {
+        for need in &obj.verneeded {
+            if need.weak {
+                continue;
+            }
+            if let Some((dpath, dobj)) = scope
+                .iter()
+                .find(|(path, _)| pathutils::get_name(&Path::new(path)) == need.file)
+            {
+                if !dobj.verdef_names.contains(&need.version) {
+                    r.version_errors.push(VersionError {
+                        object: dpath.clone(),
+                        version: need.version.clone(),
+                        required_by: opath.clone(),
+                    });
+                }
+            }
+        }
+    }
+
     // The loader relocates the objects in the inverse scope order, with the
     // executable itself being the last one.
     for (path, obj) in scope.iter().rev() {
         for sref in &obj.references {
-            if sref.weak || (sref.plt && !process_plt) {
+            if sref.weak || (sref.plt && !process_plt && !obj.bind_now) {
                 continue;
             }
-            if !defined.contains(sref.name.as_str()) {
-                r.push(UndefinedSymbol {
+            if !scope.iter().any(|(_, o)| satisfies(o, sref)) {
+                r.undefined.push(UndefinedSymbol {
                     name: sref.name.clone(),
+                    version: sref.version.clone(),
                     object: path.clone(),
                 });
             }
         }
     }
-    r
-}
 
-// Mimic the loader LD_DEBUG=unused handling: report the executable DT_NEEDED
-// entries that provide no symbol used by the executable own relocations.  Like
-// the loader, only the executable references are taken in consideration, so a
-// direct dependency only used by another shared object is still reported.
-#[cfg(target_os = "linux")]
-pub fn check_unused_dependencies(deptree: &DepTree) -> Vec<String> {
-    use std::collections::{HashMap, HashSet};
-
-    let root_elc = match open_root_elf(deptree) {
-        Some(elc) => elc,
-        None => return Vec::new(),
+    if !check_unused {
+        return r;
+    }
+    let Some(root_elc) = root_elc else {
+        return r;
     };
 
-    let mut scope = build_symbol_scope(deptree);
-    append_interp_to_scope(&mut scope, &root_elc);
-
-    // Map each symbol to the first object providing it in the scope order.
-    let mut provider = HashMap::<&str, usize>::new();
-    for (i, (_, obj)) in scope.iter().enumerate() {
-        for name in &obj.defined {
-            provider.entry(name.as_str()).or_insert(i);
-        }
-    }
-
+    // Only the executable own references mark the dependencies as used (the
+    // loader with LD_DEBUG=unused only relocates the main executable), with
+    // the first object satisfying the reference in the scope order being the
+    // one marked.
     let mut used = vec![false; scope.len()];
     if let Some((_, robj)) = scope.first() {
         for sref in &robj.references {
-            if let Some(&p) = provider.get(sref.name.as_str()) {
+            if let Some(p) = scope.iter().position(|(_, o)| satisfies(o, sref)) {
                 used[p] = true;
             }
         }
@@ -1295,7 +1346,6 @@ pub fn check_unused_dependencies(deptree: &DepTree) -> Vec<String> {
         .collect();
 
     let mut reported = HashSet::new();
-    let mut r = Vec::new();
     for dtneeded in &root_elc.deps {
         let node = match deptree.get(dtneeded) {
             Some(node) => node,
@@ -1305,12 +1355,15 @@ pub fn check_unused_dependencies(deptree: &DepTree) -> Vec<String> {
             continue;
         }
         let path = match node.path {
-            Some(ref path) => Path::new(path).join(&node.name).to_string_lossy().into_owned(),
+            Some(ref path) => Path::new(path)
+                .join(&node.name)
+                .to_string_lossy()
+                .into_owned(),
             None => continue,
         };
         if let Some(&i) = scope_index.get(path.as_str()) {
             if !used[i] && reported.insert(path.clone()) {
-                r.push(path);
+                r.unused.push(path);
             }
         }
     }
