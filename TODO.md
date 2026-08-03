@@ -9,11 +9,11 @@
 
 ## MachO
 
-- [ ] Implement DYLD_FRAMEWORK_PATH and DYLD_FALLBACK_FRAMEWORK_PATH.
 - [ ] Implement DYLD_FALLBACK_LIBRARY_PATH.
 
 ## Done
 
+- [x] MachO: Implement DYLD_FRAMEWORK_PATH and DYLD_FALLBACK_FRAMEWORK_PATH.
 - [x] Take symbol versioning in consideration on the -d/-r/-u relocation checks.
 - [x] FreeBSD: Add [libmap.conf](https://www.freebsd.org/cgi/man.cgi?libmap.conf) support.
 - [x] Add search path information for -v option.

@@ -79,11 +79,17 @@ pub fn create_context() -> DyldCache {
     DyldCache::default()
 }
 
+// The dyld builtin fallback framework path used when the environment variable
+// is not set (the DYLD_FALLBACK_FRAMEWORK_PATH default from dyld4).
+const DEFAULT_FALLBACK_FRAMEWORK_PATH: &str = "/System/Library/Frameworks";
+
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_binary(
     cache: &mut DyldCache,
     preload: &search_path::SearchPathVec,
     library_path: &search_path::SearchPathVec,
-    _platform: &Option<String>,
+    framework_path: &search_path::SearchPathVec,
+    fallback_framework_path: &Option<String>,
     all: bool,
     verbose: bool,
     arg: &str,
@@ -121,9 +127,18 @@ pub fn resolve_binary(
         searched: Vec::new(),
     });
 
+    let fallback_framework_path = search_path::from_string(
+        fallback_framework_path
+            .as_deref()
+            .unwrap_or(DEFAULT_FALLBACK_FRAMEWORK_PATH),
+        &[':'],
+    );
+
     let config = Config {
         cache,
         library_path,
+        framework_path,
+        fallback_framework_path,
         executable_path: &executable_path,
         all,
     };
@@ -158,8 +173,32 @@ pub fn resolve_binary(
 struct Config<'a> {
     cache: &'a DyldCache,
     library_path: &'a search_path::SearchPathVec,
+    framework_path: &'a search_path::SearchPathVec,
+    fallback_framework_path: search_path::SearchPathVec,
     executable_path: &'a String,
     all: bool,
+}
+
+// Return the framework partial path (Name.framework/Name or
+// Name.framework/Versions/X/Name) if the install path looks like a framework,
+// mimicking the dyld getFrameworkPartialPath check.
+fn framework_partial_path(dependency: &str) -> Option<&str> {
+    let leaf = dependency.rsplit('/').next()?;
+    let marker = ".framework/";
+    let idx = dependency.rfind(marker)?;
+    let start = dependency[..idx].rfind('/').map(|i| i + 1).unwrap_or(0);
+    let name = &dependency[start..idx];
+    let rest = &dependency[idx + marker.len()..];
+    let valid = rest == leaf
+        || rest
+            .strip_prefix("Versions/")
+            .and_then(|version| version.split_once('/'))
+            .is_some_and(|(_, l)| l == leaf);
+    if valid && name == leaf {
+        Some(&dependency[start..])
+    } else {
+        None
+    }
 }
 
 fn resolve_dependency(
@@ -207,22 +246,34 @@ fn resolve_dependency_1(
     }
 }
 
-fn resolve_overrides<P: AsRef<Path>>(
-    library_path: &search_path::SearchPathVec,
-    executable_path: &String,
-    path: &P,
+// Search NAME (either a leaf name or a framework partial path) on the
+// SEARCHPATHS directories, checking both the dyld cache and the filesystem.
+fn resolve_search_paths(
+    config: &Config,
+    searchpaths: &search_path::SearchPathVec,
+    name: &str,
+    mode: DepMode,
     deptree: &mut DepTree,
     depp: usize,
 ) -> Option<(MachOInfo, usize)> {
-    let filename = pathutils::get_name(&path);
-    for searchpath in library_path {
-        let newpath = Path::new(&searchpath.path).join(&filename);
-        if let Ok(OpenMachOFileResult::Object(elc)) = open_macho_file(&newpath, executable_path) {
+    for searchpath in searchpaths {
+        let newpath = Path::new(&searchpath.path).join(name);
+        let elc = match config
+            .cache
+            .get(&newpath.to_string_lossy().to_string(), config.executable_path)
+        {
+            Some(elc) => Some(elc),
+            None => match open_macho_file(&newpath, config.executable_path) {
+                Ok(OpenMachOFileResult::Object(elc)) => Some(elc),
+                _ => None,
+            },
+        };
+        if let Some(elc) = elc {
             let depd = deptree.addnode(
                 DepNode {
                     path: pathutils::get_path(&newpath),
-                    name: filename,
-                    mode: DepMode::LdLibraryPath,
+                    name: pathutils::get_name(&newpath),
+                    mode,
                     found: false,
                     searched: Vec::new(),
                 },
@@ -249,11 +300,25 @@ fn resolve_dependency_2(
 
     let path = Path::new(&dependency);
 
-    // First check overrides: DYLD_LIBRARY_PATH paths.
-    if let Some((elc, depd)) = resolve_overrides(
+    // First check the overrides: DYLD_FRAMEWORK_PATH for framework paths and
+    // then DYLD_LIBRARY_PATH.
+    if let Some(partial) = framework_partial_path(dependency) {
+        if let Some((elc, depd)) = resolve_search_paths(
+            config,
+            config.framework_path,
+            partial,
+            DepMode::DyldFrameworkPath,
+            deptree,
+            depp,
+        ) {
+            return Some((elc, depd));
+        }
+    }
+    if let Some((elc, depd)) = resolve_search_paths(
+        config,
         config.library_path,
-        config.executable_path,
-        &path,
+        &pathutils::get_name(&path),
+        DepMode::LdLibraryPath,
         deptree,
         depp,
     ) {
@@ -290,6 +355,20 @@ fn resolve_dependency_2(
     };
 
     let path = if elc.is_none() {
+        // Before reporting a not found dependency, try the fallback paths.
+        if let Some(partial) = framework_partial_path(dependency) {
+            if let Some((elc, depd)) = resolve_search_paths(
+                config,
+                &config.fallback_framework_path,
+                partial,
+                DepMode::DyldFallbackFrameworkPath,
+                deptree,
+                depp,
+            ) {
+                return Some((elc, depd));
+            }
+        }
+
         // The dependency library does not exist.
         if !rpath {
             let mut searched = Vec::new();

@@ -63,10 +63,21 @@ struct Options {
     #[argh(option, default = "\"\".to_string()")]
     library_path: String,
 
-    /// assume the DYLD_FRAMEWORK_PATH is set.
+    /// assume the DYLD_LIBRARY_PATH is set.
     #[cfg(target_os = "macos")]
     #[argh(option, default = "\"\".to_string()")]
     library_path: String,
+
+    /// assume the DYLD_FRAMEWORK_PATH is set.
+    #[cfg(target_os = "macos")]
+    #[argh(option, default = "\"\".to_string()")]
+    framework_path: String,
+
+    /// assume the DYLD_FALLBACK_FRAMEWORK_PATH is set (default to the dyld
+    /// builtin fallback).
+    #[cfg(target_os = "macos")]
+    #[argh(option)]
+    fallback_framework_path: Option<String>,
 
     /// assume the LD_PRELOAD is set.
     #[argh(option, default = "\"\".to_string()")]
@@ -79,6 +90,7 @@ struct Options {
     preload: String,
 
     /// set the value of $PLATFORM in rpath/runpath expansion.
+    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
     #[argh(option)]
     platform: Option<String>,
 
@@ -141,6 +153,8 @@ fn main() {
     let printer = printer::create(opts.path, opts.ldd, opts.args.len() == 1, opts.verbose);
 
     let ld_library_path = search_path::from_string(&opts.library_path, &[':']);
+    #[cfg(target_os = "macos")]
+    let framework_path = search_path::from_string(&opts.framework_path, &[':']);
     let ld_preload = search_path::from_preload(&opts.preload);
 
     let mut ctx = create_context();
@@ -157,7 +171,8 @@ fn main() {
     let mut exitcode = 0;
 
     for arg in opts.args {
-        match resolve_binary(
+        #[cfg(all(target_family = "unix", not(target_os = "macos")))]
+        let resolved = resolve_binary(
             &mut ctx,
             &ld_preload,
             &ld_library_path,
@@ -165,7 +180,19 @@ fn main() {
             opts.all,
             opts.verbose,
             arg.as_str(),
-        ) {
+        );
+        #[cfg(target_os = "macos")]
+        let resolved = resolve_binary(
+            &mut ctx,
+            &ld_preload,
+            &ld_library_path,
+            &framework_path,
+            &opts.fallback_framework_path,
+            opts.all,
+            opts.verbose,
+            arg.as_str(),
+        );
+        match resolved {
             Ok(deptree) => {
                 // Mimic ldd, where --unused suppress both the dependency listing
                 // and the undefined symbols report.

@@ -45,6 +45,8 @@ pub enum DepMode {
     Direct,        // DT_SONAME refers to an aboslute path.
     DtRpath,       // DT_RPATH.
     LdLibraryPath, // LD_LIBRARY_PATH.
+    DyldFrameworkPath, // DYLD_FRAMEWORK_PATH.
+    DyldFallbackFrameworkPath, // DYLD_FALLBACK_FRAMEWORK_PATH.
     DtRunpath,     // DT_RUNPATH.
     LdCache,       // Loader cache (ld.so.cache, etc.).
     SystemDirs,    // Default system directory (i.e '/lib64').
@@ -63,6 +65,8 @@ impl fmt::Display for DepMode {
             DepMode::LdLibraryPath => write!(f, "[LD_LIBRARY_PATH]"),
             #[cfg(target_os = "macos")]
             DepMode::LdLibraryPath => write!(f, "[DYLD_LIBRARY_PATH]"),
+            DepMode::DyldFrameworkPath => write!(f, "[DYLD_FRAMEWORK_PATH]"),
+            DepMode::DyldFallbackFrameworkPath => write!(f, "[DYLD_FALLBACK_FRAMEWORK_PATH]"),
             DepMode::DtRunpath => write!(f, "[runpath]"),
             #[cfg(target_os = "linux")]
             DepMode::LdCache => write!(f, "[ld.so.cache]"),
