@@ -572,7 +572,7 @@ fn parse_load_command<Mach: MachHeader>(
 ) -> Option<(LoadCommand, String)> {
     if let Ok(variant) = command.variant() {
         match variant {
-            LoadCommandVariant::Dylib(x) | LoadCommandVariant::IdDylib(x) => {
+            LoadCommandVariant::Dylib(x) => {
                 if let Some(dylib) = parse_string(command.string(endian, x.dylib.name).ok()) {
                     return Some((LoadCommand::Dylib, dylib));
                 };
