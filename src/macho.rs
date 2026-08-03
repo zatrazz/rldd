@@ -1,6 +1,6 @@
-use std::io::{Error, ErrorKind};
+use std::io::Error;
 use std::path::Path;
-use std::{fmt, fs, str};
+use std::{fs, str};
 
 use object::macho::*;
 use object::read::macho::*;
@@ -24,7 +24,7 @@ struct MachOInfo {
 
 impl DyldCache {
     // Retrieve a dynamic object information from the dyld system cache.
-    fn get(&self, name: &str, executable_path: &String) -> Option<MachOInfo> {
+    fn get(&self, name: &str, executable_path: &str) -> Option<MachOInfo> {
         match self.image(name)? {
             Some((data, offset)) => {
                 let loader_path = pathutils::get_path(&Path::new(name)).unwrap_or_default();
@@ -61,10 +61,9 @@ pub fn resolve_binary(
 ) -> Result<DepTree, std::io::Error> {
     let filename = Path::new(arg).canonicalize()?;
 
-    let executable_path = pathutils::get_path(&filename).ok_or(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("failed to get path of input file {arg}"),
-    ))?;
+    let executable_path = pathutils::get_path(&filename).ok_or(std::io::Error::other(format!(
+        "failed to get path of input file {arg}"
+    )))?;
 
     let omf = open_macho_file(&filename, &executable_path)?;
 
@@ -156,7 +155,7 @@ struct Config<'a> {
     framework_path: &'a search_path::SearchPathVec,
     fallback_framework_path: search_path::SearchPathVec,
     fallback_library_path: search_path::SearchPathVec,
-    executable_path: &'a String,
+    executable_path: &'a str,
     all: bool,
 }
 
@@ -506,24 +505,23 @@ fn resolve_search_paths(
 
 fn open_macho_file<P: AsRef<Path>>(
     filename: &P,
-    executable_path: &String,
+    executable_path: &str,
 ) -> Result<MachOInfo, std::io::Error> {
     let file = fs::File::open(filename)?;
 
     let mmap = match unsafe { memmap2::Mmap::map(&file) } {
         Ok(mmap) => mmap,
-        Err(_) => return Err(Error::new(ErrorKind::Other, "Failed to map file")),
+        Err(_) => return Err(Error::other("Failed to map file")),
     };
 
     let loader_path = pathutils::get_path(filename).unwrap_or_default();
-    parse_object(&mmap, 0, executable_path, &loader_path)
-        .map_err(|e| Error::new(ErrorKind::Other, e))
+    parse_object(&mmap, 0, executable_path, &loader_path).map_err(Error::other)
 }
 
 fn parse_object(
     data: &[u8],
     offset: u64,
-    executable_path: &String,
+    executable_path: &str,
     loader_path: &str,
 ) -> Result<MachOInfo, &'static str> {
     let kind = match object::FileKind::parse_at(data, offset) {
@@ -540,26 +538,13 @@ fn parse_object(
     }
 }
 
-trait HandleErr<T> {
-    fn handle_err(self) -> Option<T>;
-}
-
-impl<T, E: fmt::Display> HandleErr<T> for Result<T, E> {
-    fn handle_err(self) -> Option<T> {
-        match self {
-            Ok(val) => Some(val),
-            _ => None,
-        }
-    }
-}
-
 fn parse_macho32(
     data: &[u8],
     offset: u64,
     executable_path: &str,
     loader_path: &str,
 ) -> Result<MachOInfo, &'static str> {
-    if let Some(macho) = MachHeader32::parse(data, offset).handle_err() {
+    if let Ok(macho) = MachHeader32::parse(data, offset) {
         return parse_macho(macho, data, offset, executable_path, loader_path);
     }
     Err("Invalid Mach-O 32 object")
@@ -571,7 +556,7 @@ fn parse_macho64(
     executable_path: &str,
     loader_path: &str,
 ) -> Result<MachOInfo, &'static str> {
-    if let Some(macho) = MachHeader64::parse(data, offset).handle_err() {
+    if let Ok(macho) = MachHeader64::parse(data, offset) {
         return parse_macho(macho, data, offset, executable_path, loader_path);
     }
     Err("Invalid Mach-O 64 object")
@@ -579,10 +564,10 @@ fn parse_macho64(
 
 fn parse_macho_fat32(
     data: &[u8],
-    executable_path: &String,
+    executable_path: &str,
     loader_path: &str,
 ) -> Result<MachOInfo, &'static str> {
-    if let Some(fat) = MachOFatFile32::parse(data).handle_err() {
+    if let Ok(fat) = MachOFatFile32::parse(data) {
         return parse_macho_fat(data, fat.arches(), executable_path, loader_path);
     }
     Err("Invalid FAT Mach-O 32 object")
@@ -590,10 +575,10 @@ fn parse_macho_fat32(
 
 fn parse_macho_fat64(
     data: &[u8],
-    executable_path: &String,
+    executable_path: &str,
     loader_path: &str,
 ) -> Result<MachOInfo, &'static str> {
-    if let Some(fat) = MachOFatFile64::parse(data).handle_err() {
+    if let Ok(fat) = MachOFatFile64::parse(data) {
         return parse_macho_fat(data, fat.arches(), executable_path, loader_path);
     }
     Err("Invalid FAT Mach-O 64 object")
@@ -615,12 +600,12 @@ fn check_current_arch(arch: object::Architecture) -> bool {
 fn parse_macho_fat<FatArch: object::read::macho::FatArch>(
     data: &[u8],
     arches: &[FatArch],
-    executable_path: &String,
+    executable_path: &str,
     loader_path: &str,
 ) -> Result<MachOInfo, &'static str> {
     for arch in arches {
         if check_current_arch(arch.architecture()) {
-            if let Some(fatdata) = arch.data(data).handle_err() {
+            if let Ok(fatdata) = arch.data(data) {
                 return parse_object(fatdata, 0, executable_path, loader_path);
             }
         }
