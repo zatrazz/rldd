@@ -95,10 +95,34 @@ fn try_load() -> Option<DyldCache> {
                 .position(|d| d.as_ptr() == data.as_ptr())
                 .map(|idx| (idx, offset))
         });
+        // The cache records framework images under the versioned path
+        // (Foo.framework/Versions/A/Foo), while install names may reference
+        // the unversioned convention (Foo.framework/Foo) whose symlink
+        // target only exists inside the cache.  Register the unversioned
+        // alias so both forms resolve, like dyld does.
+        if let Some(alias) = unversioned_framework_alias(name) {
+            images.entry(alias).or_insert(entry);
+        }
         images.insert(name.to_string(), entry);
     }
 
     Some(DyldCache { files, images })
+}
+
+// Return the unversioned framework path (Foo.framework/Foo) for a versioned
+// framework image path (Foo.framework/Versions/A/Foo).
+fn unversioned_framework_alias(name: &str) -> Option<String> {
+    let (dir, leaf) = name.rsplit_once('/')?;
+    let (fwdir, version) = dir.rsplit_once("/Versions/")?;
+    if version.contains('/') || !fwdir.ends_with(".framework") {
+        return None;
+    }
+    let fwname = fwdir.rsplit('/').next()?.strip_suffix(".framework")?;
+    if fwname == leaf {
+        Some(format!("{fwdir}/{leaf}"))
+    } else {
+        None
+    }
 }
 
 fn mmap_file(path: &str) -> Option<Mmap> {
