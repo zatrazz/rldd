@@ -22,6 +22,8 @@ mod interp;
 mod ld_config_txt;
 #[cfg(target_os = "freebsd")]
 mod ld_hints_freebsd;
+#[cfg(target_os = "freebsd")]
+mod ld_libmap_freebsd;
 #[cfg(target_os = "openbsd")]
 mod ld_hints_openbsd;
 #[cfg(target_os = "linux")]
@@ -527,6 +529,25 @@ struct Config<'a> {
     system_dirs: search_path::SearchPathVec,
     platform: Option<&'a String>,
     all: bool,
+    #[cfg(target_os = "freebsd")]
+    libmap: Option<ld_libmap_freebsd::LibMap>,
+}
+
+// Remap the dependency name using the libmap.conf mappings for the referencing
+// object path (FreeBSD only).
+#[cfg(target_os = "freebsd")]
+fn libmap_dependency(config: &Config, refpath: &str, dependency: &String) -> String {
+    match &config.libmap {
+        Some(libmap) => libmap
+            .lookup(refpath, dependency)
+            .map(|target| target.to_string())
+            .unwrap_or_else(|| dependency.to_string()),
+        None => dependency.to_string(),
+    }
+}
+#[cfg(all(target_family = "unix", not(target_os = "freebsd")))]
+fn libmap_dependency(_config: &Config, _refpath: &str, dependency: &String) -> String {
+    dependency.to_string()
 }
 
 #[cfg(target_os = "linux")]
@@ -714,6 +735,8 @@ pub fn resolve_binary(
         system_dirs,
         platform: platform.as_ref(),
         all,
+        #[cfg(target_os = "freebsd")]
+        libmap: ld_libmap_freebsd::parse_libmap(&Path::new("/etc/libmap.conf")),
     };
 
     if verbose {
@@ -732,12 +755,21 @@ pub fn resolve_binary(
 
     resolve_binary_arch(&elc, &mut deptree, depp)?;
 
+    let refpath = filename.to_string_lossy();
     for ld_preload in config.ld_preload {
-        resolve_dependency(&config, &ld_preload.path, &elc, &mut deptree, depp, true);
+        resolve_dependency(
+            &config,
+            &ld_preload.path,
+            &refpath,
+            &elc,
+            &mut deptree,
+            depp,
+            true,
+        );
     }
 
     for dep in &elc.deps {
-        resolve_dependency(&config, dep, &elc, &mut deptree, depp, false);
+        resolve_dependency(&config, dep, &refpath, &elc, &mut deptree, depp, false);
     }
 
     Ok(deptree)
@@ -822,11 +854,16 @@ struct ResolvedDependency<'a> {
 fn resolve_dependency(
     config: &Config,
     dependency: &String,
+    refpath: &str,
     elc: &ElfInfo,
     deptree: &mut DepTree,
     depp: usize,
     preload: bool,
 ) {
+    // FreeBSD libmap.conf may remap the dependency name based on the
+    // referencing object path.
+    let dependency = &libmap_dependency(config, refpath, dependency);
+
     if elc.is_musl && dependency == "libc.so" {
         return;
     }
@@ -860,6 +897,12 @@ fn resolve_dependency(
         } else {
             (Some(dep.path.to_string()), pathutils::get_name(dependency))
         };
+        // The resolved path of this dependency, used as the reference path for
+        // its own dependencies resolution.
+        let depref = match &r.0 {
+            Some(path) => format!("{}{}{}", path, std::path::MAIN_SEPARATOR, r.1),
+            None => r.1.clone(),
+        };
         let c = deptree.addnode(
             DepNode {
                 path: r.0,
@@ -881,7 +924,7 @@ fn resolve_dependency(
         dep.elc.rpath.extend(elc.rpath.clone());
 
         for sdep in &dep.elc.deps {
-            resolve_dependency(config, sdep, &dep.elc, deptree, c, preload);
+            resolve_dependency(config, sdep, &depref, &dep.elc, deptree, c, preload);
         }
     } else {
         let path = Path::new(dependency);

@@ -6,7 +6,6 @@
 
 ### TODO
 
-- [ ] FreeBSD: Add [libmap.conf](https://www.freebsd.org/cgi/man.cgi?libmap.conf) support.  This is used to filter and map origins to new targets.
 - [ ] Take symbol versioning in consideration on the -d/-r/-u relocation checks.
 
 ## MachO
@@ -16,6 +15,7 @@
 
 ## Done
 
+- [x] FreeBSD: Add [libmap.conf](https://www.freebsd.org/cgi/man.cgi?libmap.conf) support.
 - [x] Add search path information for -v option.
 - [x] Print the searched locations for not found libraries in verbose mode.
 - [x] MachO: Add initial MacOSX support.
