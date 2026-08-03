@@ -1,9 +1,6 @@
-use std::collections::HashMap;
-use std::io::Error;
+use std::io::{Error, ErrorKind};
 use std::path::Path;
 use std::{fmt, fs, str};
-
-use memmap2::Mmap;
 
 use object::macho::*;
 use object::read::macho::*;
@@ -15,16 +12,8 @@ use crate::search_path;
 use crate::search_path::*;
 
 mod dyldcache;
+pub use dyldcache::DyldCache;
 
-type ImagesMap = HashMap<String, Option<u64>>;
-
-#[derive(Default)]
-pub struct DyldCache {
-    images: ImagesMap,
-    mmap: Option<Mmap>,
-}
-
-type MachObj = MachOInfo;
 type DepsVec = Vec<String>;
 
 #[derive(Default, Debug)]
@@ -33,50 +22,20 @@ struct MachOInfo {
     deps: DepsVec,
 }
 
-// Return type for the parse_* functions.
-enum ParseObjectResult {
-    Object(MachObj),
-    Cache(ImagesMap),
-}
-
-// Return type for the open_macho_file.
-enum OpenMachOFileResult {
-    Object(MachObj),
-    Cache(DyldCache),
-}
-
 impl DyldCache {
     // Retrieve a dynamic object information from the dyld system cache.
-    fn get(&self, name: &String, executable_path: &String) -> Option<MachOInfo> {
-        if let (Some(mmap), Some(offset)) = (self.mmap.as_ref(), self.images.get(name)) {
-            if let Some(offset) = offset {
-                return match parse_object(mmap, *offset, executable_path) {
-                    Ok(ParseObjectResult::Object(obj)) => Some(obj),
-                    _ => None,
-                };
-            } else {
-                // For object with invalid offset, return an default object without any
-                // dependencies.
-                return Some(MachOInfo::default());
-            }
-        };
-        None
+    fn get(&self, name: &str, executable_path: &String) -> Option<MachOInfo> {
+        match self.image(name)? {
+            Some((data, offset)) => parse_object(data, offset, executable_path).ok(),
+            // For images not covered by any cache mapping, return a default
+            // object without any dependencies.
+            None => Some(MachOInfo::default()),
+        }
     }
 }
 
-// macOS starting with BigSur only provides a generated cache of all built in dynamic
-// libraries, so file does not exist in the file system it is then checked against the
-// cache.
 pub fn create_context() -> DyldCache {
-    if let Some(path) = dyldcache::path() {
-        if let Ok(OpenMachOFileResult::Cache(cache)) =
-            open_macho_file(&Path::new(path), &String::new())
-        {
-            return cache;
-        }
-    }
-
-    DyldCache::default()
+    dyldcache::load()
 }
 
 // The dyld builtin fallback paths used when the environment variables are not
@@ -99,14 +58,12 @@ pub fn resolve_binary(
 ) -> Result<DepTree, std::io::Error> {
     let filename = Path::new(arg).canonicalize()?;
 
-    let executable_path = pathutils::get_path(&filename).ok_or(std::io::Error::other(format!(
-        "failed to get path of input file {arg}"
-    )))?;
+    let executable_path = pathutils::get_path(&filename).ok_or(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        format!("failed to get path of input file {arg}"),
+    ))?;
 
-    let omf = match open_macho_file(&filename, &executable_path)? {
-        OpenMachOFileResult::Object(obj) => obj,
-        _ => return Err(Error::other(format!("Invalid MachO file: {arg}"))),
-    };
+    let omf = open_macho_file(&filename, &executable_path)?;
 
     if verbose {
         println!(
@@ -117,7 +74,7 @@ pub fn resolve_binary(
             filename.display(),
             search_path::format_list(&omf.rpath),
             search_path::format_list(library_path),
-            cache.images.len(),
+            cache.len(),
         );
     }
 
@@ -247,7 +204,7 @@ fn resolve_dependency_1(
 ) -> bool {
     let elc = resolve_dependency_2(config, dependency, rpath, deptree, depp, preload);
     if let Some((elc, depd)) = elc {
-        let path = pathutils::get_path(&dependency).unwrap_or_default();
+        let path = pathutils::get_path(&dependency).unwrap_or(String::new());
         for dep in &elc.deps {
             resolve_dependency(config, &path, &elc.rpath, dep, deptree, depd, preload);
         }
@@ -274,10 +231,7 @@ fn resolve_search_paths(
             .get(&newpath.to_string_lossy().to_string(), config.executable_path)
         {
             Some(elc) => Some(elc),
-            None => match open_macho_file(&newpath, config.executable_path) {
-                Ok(OpenMachOFileResult::Object(elc)) => Some(elc),
-                _ => None,
-            },
+            None => open_macho_file(&newpath, config.executable_path).ok(),
         };
         if let Some(elc) = elc {
             let depd = deptree.addnode(
@@ -357,10 +311,7 @@ fn resolve_dependency_2(
 
     // The try filesystem.
     let elc = if path.is_absolute() {
-        match open_macho_file(&path, config.executable_path).ok() {
-            Some(OpenMachOFileResult::Object(obj)) => Some(obj),
-            _ => None,
-        }
+        open_macho_file(&path, config.executable_path).ok()
     } else {
         None
     };
@@ -466,29 +417,22 @@ fn resolve_dependency_check_found(
 fn open_macho_file<P: AsRef<Path>>(
     filename: &P,
     executable_path: &String,
-) -> Result<OpenMachOFileResult, std::io::Error> {
+) -> Result<MachOInfo, std::io::Error> {
     let file = fs::File::open(filename)?;
 
     let mmap = match unsafe { memmap2::Mmap::map(&file) } {
         Ok(mmap) => mmap,
-        Err(_) => return Err(Error::other("Failed to map file")),
+        Err(_) => return Err(Error::new(ErrorKind::Other, "Failed to map file")),
     };
 
-    match parse_object(&mmap, 0, executable_path) {
-        Ok(ParseObjectResult::Object(omf)) => Ok(OpenMachOFileResult::Object(omf)),
-        Ok(ParseObjectResult::Cache(images)) => Ok(OpenMachOFileResult::Cache(DyldCache {
-            images,
-            mmap: Some(mmap),
-        })),
-        Err(e) => Err(Error::other(e)),
-    }
+    parse_object(&mmap, 0, executable_path).map_err(|e| Error::new(ErrorKind::Other, e))
 }
 
 fn parse_object(
     data: &[u8],
     offset: u64,
     executable_path: &String,
-) -> Result<ParseObjectResult, &'static str> {
+) -> Result<MachOInfo, &'static str> {
     let kind = match object::FileKind::parse_at(data, offset) {
         Ok(file) => file,
         Err(_err) => return Err("Failed to parse file"),
@@ -499,7 +443,6 @@ fn parse_object(
         object::FileKind::MachO64 => parse_macho64(data, offset, executable_path),
         object::FileKind::MachOFat32 => parse_macho_fat32(data, executable_path),
         object::FileKind::MachOFat64 => parse_macho_fat64(data, executable_path),
-        object::FileKind::DyldCache => parse_dyld_cache(data),
         _ => Err("Invalid object"),
     }
 }
@@ -510,7 +453,10 @@ trait HandleErr<T> {
 
 impl<T, E: fmt::Display> HandleErr<T> for Result<T, E> {
     fn handle_err(self) -> Option<T> {
-        self.ok()
+        match self {
+            Ok(val) => Some(val),
+            _ => None,
+        }
     }
 }
 
@@ -518,7 +464,7 @@ fn parse_macho32(
     data: &[u8],
     offset: u64,
     executable_path: &str,
-) -> Result<ParseObjectResult, &'static str> {
+) -> Result<MachOInfo, &'static str> {
     if let Some(macho) = MachHeader32::parse(data, offset).handle_err() {
         return parse_macho(macho, data, offset, executable_path);
     }
@@ -529,7 +475,7 @@ fn parse_macho64(
     data: &[u8],
     offset: u64,
     executable_path: &str,
-) -> Result<ParseObjectResult, &'static str> {
+) -> Result<MachOInfo, &'static str> {
     if let Some(macho) = MachHeader64::parse(data, offset).handle_err() {
         return parse_macho(macho, data, offset, executable_path);
     }
@@ -539,7 +485,7 @@ fn parse_macho64(
 fn parse_macho_fat32(
     data: &[u8],
     executable_path: &String,
-) -> Result<ParseObjectResult, &'static str> {
+) -> Result<MachOInfo, &'static str> {
     if let Some(fat) = MachOFatFile32::parse(data).handle_err() {
         return parse_macho_fat(data, fat.arches(), executable_path);
     }
@@ -549,7 +495,7 @@ fn parse_macho_fat32(
 fn parse_macho_fat64(
     data: &[u8],
     executable_path: &String,
-) -> Result<ParseObjectResult, &'static str> {
+) -> Result<MachOInfo, &'static str> {
     if let Some(fat) = MachOFatFile64::parse(data).handle_err() {
         return parse_macho_fat(data, fat.arches(), executable_path);
     }
@@ -573,7 +519,7 @@ fn parse_macho_fat<FatArch: object::read::macho::FatArch>(
     data: &[u8],
     arches: &[FatArch],
     executable_path: &String,
-) -> Result<ParseObjectResult, &'static str> {
+) -> Result<MachOInfo, &'static str> {
     for arch in arches {
         if check_current_arch(arch.architecture()) {
             if let Some(fatdata) = arch.data(data).handle_err() {
@@ -589,7 +535,7 @@ fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
     data: &[u8],
     offset: u64,
     executable_path: &str,
-) -> Result<ParseObjectResult, &'static str> {
+) -> Result<MachOInfo, &'static str> {
     let mut deps = DepsVec::new();
     let mut rpath = search_path::SearchPathVec::new();
 
@@ -608,80 +554,7 @@ fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
         }
     }
 
-    Ok(ParseObjectResult::Object(MachOInfo { rpath, deps }))
-}
-
-fn parse_dyld_cache(data: &[u8]) -> Result<ParseObjectResult, &'static str> {
-    if let Some(header) = DyldCacheHeader::<Endianness>::parse(data).handle_err() {
-        if let Some((_, endian)) = header.parse_magic().handle_err() {
-            if let Some(images) = header.images(endian, data).handle_err() {
-                let mappings = header.mappings(endian, data).handle_err();
-                return parse_dyld_cache_images(endian, data, mappings, images);
-            }
-        }
-    }
-
-    Err("Invalid dyld cache")
-}
-
-fn parse_dyld_cache_images(
-    endian: Endianness,
-    data: &[u8],
-    mappings: Option<DyldCacheMappingSlice<Endianness>>,
-    images: &[DyldCacheImageInfo<Endianness>],
-) -> Result<ParseObjectResult, &'static str> {
-    let mut cache = ImagesMap::new();
-
-    for image in images {
-        let path = image
-            .path(endian, data)
-            .ok()
-            .and_then(|s| str::from_utf8(s).ok().map(|s| s.to_string()));
-        let offset = mappings.as_ref().and_then(|mappings| {
-            dyld_cache_file_offset(endian, mappings, image.address.get(endian))
-        });
-        if let Some(path) = path {
-            cache.insert(path, offset);
-        }
-    }
-
-    Ok(ParseObjectResult::Cache(cache))
-}
-
-// Find the file offset of an address in the dyld cache mappings.
-fn dyld_cache_file_offset(
-    endian: Endianness,
-    mappings: &DyldCacheMappingSlice<Endianness>,
-    address: u64,
-) -> Option<u64> {
-    fn mapping_offset(address: u64, start: u64, size: u64, file_offset: u64) -> Option<u64> {
-        let offset = address.checked_sub(start)?;
-        if offset < size {
-            file_offset.checked_add(offset)
-        } else {
-            None
-        }
-    }
-
-    match *mappings {
-        DyldCacheMappingSlice::V1(infos) => infos.iter().find_map(|m| {
-            mapping_offset(
-                address,
-                m.address.get(endian),
-                m.size.get(endian),
-                m.file_offset.get(endian),
-            )
-        }),
-        DyldCacheMappingSlice::V2(infos) => infos.iter().find_map(|m| {
-            mapping_offset(
-                address,
-                m.address.get(endian),
-                m.size.get(endian),
-                m.file_offset.get(endian),
-            )
-        }),
-        _ => None,
-    }
+    Ok(MachOInfo { rpath, deps })
 }
 
 enum LoadCommand {
