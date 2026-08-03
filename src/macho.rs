@@ -85,6 +85,7 @@ pub fn resolve_binary(
     library_path: &search_path::SearchPathVec,
     _platform: &Option<String>,
     all: bool,
+    verbose: bool,
     arg: &str,
 ) -> Result<DepTree, std::io::Error> {
     let filename = Path::new(arg).canonicalize()?;
@@ -97,6 +98,35 @@ pub fn resolve_binary(
         OpenMachOFileResult::Object(obj) => obj,
         _ => return Err(Error::other(format!("Invalid MachO file: {arg}"))),
     };
+
+    if verbose {
+        println!(
+            "{}: search path information\n\
+            \x20 rpath: {}\n\
+            \x20 library path: {}\n\
+            \x20 dyld cache: {} images",
+            filename.display(),
+            if omf.rpath.is_empty() {
+                "(none)".to_string()
+            } else {
+                omf.rpath
+                    .iter()
+                    .map(|path| path.path.as_str())
+                    .collect::<Vec<&str>>()
+                    .join(":")
+            },
+            if library_path.is_empty() {
+                "(none)".to_string()
+            } else {
+                library_path
+                    .iter()
+                    .map(|path| path.path.as_str())
+                    .collect::<Vec<&str>>()
+                    .join(":")
+            },
+            cache.images.len(),
+        );
+    }
 
     let mut deptree = DepTree::new();
     let depp = deptree.addroot(DepNode {

@@ -529,6 +529,62 @@ struct Config<'a> {
     all: bool,
 }
 
+fn format_search_path_list(searchpaths: &search_path::SearchPathVec) -> String {
+    if searchpaths.is_empty() {
+        return "(none)".to_string();
+    }
+    searchpaths
+        .iter()
+        .map(|path| path.path.as_str())
+        .collect::<Vec<&str>>()
+        .join(":")
+}
+
+#[cfg(target_os = "linux")]
+fn format_ld_cache(ld_cache: &Option<LoaderCache>) -> String {
+    match ld_cache {
+        Some(ld_cache) => format!("{} entries", ld_cache.len()),
+        None => "(none)".to_string(),
+    }
+}
+#[cfg(target_os = "android")]
+fn format_ld_cache(ld_cache: &Option<LoaderCache>) -> String {
+    match ld_cache {
+        Some(ld_cache) => format!("{} namespaces", ld_cache.namespaces_count()),
+        None => "(none)".to_string(),
+    }
+}
+#[cfg(all(
+    target_family = "unix",
+    not(any(target_os = "linux", target_os = "android"))
+))]
+fn format_ld_cache(ld_cache: &Option<LoaderCache>) -> String {
+    match ld_cache {
+        Some(ld_cache) => format_search_path_list(ld_cache),
+        None => "(none)".to_string(),
+    }
+}
+
+fn print_search_path_information<P: AsRef<Path>>(filename: &P, config: &Config, elc: &ElfInfo) {
+    println!(
+        "{}: search path information\n\
+        \x20 rpath: {}\n\
+        \x20 preload: {}\n\
+        \x20 library path: {}\n\
+        \x20 runpath: {}\n\
+        \x20 cache ({}): {}\n\
+        \x20 default paths: {}",
+        filename.as_ref().display(),
+        format_search_path_list(&elc.rpath),
+        format_search_path_list(config.ld_preload),
+        format_search_path_list(config.ld_library_path),
+        format_search_path_list(&elc.runpath),
+        DepMode::LdCache,
+        format_ld_cache(config.ld_cache),
+        format_search_path_list(&config.system_dirs),
+    );
+}
+
 // Function that mimic the dynamic loader resolution.
 #[cfg(target_os = "linux")]
 fn resolve_binary_arch(
@@ -584,6 +640,7 @@ pub fn resolve_binary(
     ld_library_path: &search_path::SearchPathVec,
     platform: &Option<String>,
     all: bool,
+    verbose: bool,
     arg: &str,
 ) -> Result<DepTree, std::io::Error> {
     // On glibc/Linux the RTLD_DI_ORIGIN for the executable itself (used for $ORIGIN
@@ -640,6 +697,10 @@ pub fn resolve_binary(
         platform: platform.as_ref(),
         all,
     };
+
+    if verbose {
+        print_search_path_information(&filename, &config, &elc);
+    }
 
     let mut deptree = DepTree::new();
 

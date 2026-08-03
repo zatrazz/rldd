@@ -3,7 +3,6 @@
 ## Generic
 
 - [ ] Add better debug messages for not found libraries.
-- [ ] Add better search patch information for -v option.
 
 ## ELF
 
@@ -19,6 +18,7 @@
 
 ## Done
 
+- [x] Add search path information for -v option.
 - [x] MachO: Add initial MacOSX support.
 - [x] MachO: Resolve the dyld cache dependencies.  It requires not only parsing the cache entries, but the entries itself.
 - [x] Linux: read /etc/ld.so.cache instead of parsing /etd/ld.so.conf.

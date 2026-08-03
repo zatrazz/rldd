@@ -62,6 +62,10 @@ impl LdCache {
         self.namespaces_config.get(name.as_ref())
     }
 
+    pub fn namespaces_count(&self) -> usize {
+        self.namespaces_config.len()
+    }
+
     fn config_set(&self) -> HashSet<String> {
         self.namespaces_config.keys().cloned().collect()
     }

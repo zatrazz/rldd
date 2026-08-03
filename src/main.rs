@@ -97,6 +97,10 @@ struct Options {
     #[argh(switch, short = 'u')]
     unused: bool,
 
+    /// print search path information.
+    #[argh(switch, short = 'v')]
+    verbose: bool,
+
     /// show the resolved path instead of the library SONAME.
     #[argh(switch, short = 'p')]
     path: bool,
@@ -149,6 +153,7 @@ fn main() {
             &ld_library_path,
             &opts.platform,
             opts.all,
+            opts.verbose,
             arg.as_str(),
         ) {
             Ok(deptree) => {
