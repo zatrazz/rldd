@@ -181,40 +181,207 @@ fn resolve_dependency(
     depp: usize,
     preload: bool,
 ) {
-    let mut dependency = dependency.replace("@executable_path", config.executable_path);
-    dependency = dependency.replace("@loader_path", loader_path);
+    let dependency = dependency
+        .replace("@executable_path", config.executable_path)
+        .replace("@loader_path", loader_path);
 
-    if dependency.contains("@rpath") {
-        for rpath in rpaths {
-            let mut newdependency = dependency.replace("@rpath", rpath.path.as_str());
-            if resolve_dependency_1(config, &mut newdependency, true, deptree, depp, preload) {
-                return;
-            }
-        }
+    // To avoid circular dependencies, check if deptree already contains the
+    // dependency.
+    if deptree.contains(&dependency) {
         return;
     }
 
-    resolve_dependency_1(config, &mut dependency, false, deptree, depp, preload);
-}
-
-fn resolve_dependency_1(
-    config: &Config,
-    dependency: &mut String,
-    rpath: bool,
-    deptree: &mut DepTree,
-    depp: usize,
-    preload: bool,
-) -> bool {
-    let elc = resolve_dependency_2(config, dependency, rpath, deptree, depp, preload);
-    if let Some((elc, depd)) = elc {
-        let path = pathutils::get_path(&dependency).unwrap_or(String::new());
+    if let Some((elc, depd, path)) = find_dependency(config, rpaths, &dependency, deptree, depp, preload)
+    {
         for dep in &elc.deps {
             resolve_dependency(config, &path, &elc.rpath, dep, deptree, depd, preload);
         }
-        true
-    } else {
-        false
     }
+}
+
+// Resolve DEPENDENCY following the dyld search order:
+//
+// 1. The environment path overrides;
+// 2. The install name itself (with @rpath expanded against the run-path list
+//    when present.
+// 3. The fallback paths.
+fn find_dependency(
+    config: &Config,
+    rpaths: &search_path::SearchPathVec,
+    dependency: &str,
+    deptree: &mut DepTree,
+    depp: usize,
+    preload: bool,
+) -> Option<(MachOInfo, usize, String)> {
+    // DYLD_FRAMEWORK_PATH with the framework partial path and then
+    // DYLD_LIBRARY_PATH with the leaf name.
+    let partial = framework_partial_path(dependency);
+    if let Some(partial) = partial {
+        if let Some(r) = resolve_search_paths(
+            config,
+            config.framework_path,
+            partial,
+            DepMode::DyldFrameworkPath,
+            deptree,
+            depp,
+        ) {
+            return Some(r);
+        }
+    }
+    let leaf = pathutils::get_name(&Path::new(dependency));
+    if let Some(r) = resolve_search_paths(
+        config,
+        config.library_path,
+        &leaf,
+        DepMode::LdLibraryPath,
+        deptree,
+        depp,
+    ) {
+        return Some(r);
+    }
+
+    // Then the install name, either literally or through the run-path list.
+    if dependency.contains("@rpath") {
+        for rpath in rpaths {
+            let expanded = dependency.replace("@rpath", rpath.path.as_str());
+            match resolve_path(config, &expanded, DepMode::DtRpath, deptree, depp) {
+                ResolveResult::Found(r) => return Some(r),
+                ResolveResult::Skip => return None,
+                ResolveResult::Miss => {}
+            }
+        }
+    } else {
+        let mode = if preload {
+            DepMode::Preload
+        } else {
+            DepMode::Direct
+        };
+        match resolve_path(config, dependency, mode, deptree, depp) {
+            ResolveResult::Found(r) => return Some(r),
+            ResolveResult::Skip => return None,
+            ResolveResult::Miss => {}
+        }
+    }
+
+    // Now the fallback paths.
+    if let Some(partial) = partial {
+        if let Some(r) = resolve_search_paths(
+            config,
+            &config.fallback_framework_path,
+            partial,
+            DepMode::DyldFallbackFrameworkPath,
+            deptree,
+            depp,
+        ) {
+            return Some(r);
+        }
+    }
+    if let Some(r) = resolve_search_paths(
+        config,
+        &config.fallback_library_path,
+        &leaf,
+        DepMode::DyldFallbackLibraryPath,
+        deptree,
+        depp,
+    ) {
+        return Some(r);
+    }
+
+    let path = Path::new(dependency);
+    deptree.addnode(
+        DepNode {
+            path: pathutils::get_path(&path),
+            name: pathutils::get_name(&path),
+            mode: DepMode::NotFound,
+            found: false,
+            searched: searched_locations(config, dependency),
+        },
+        depp,
+    );
+    None
+}
+
+fn searched_locations(config: &Config, dependency: &str) -> Vec<String> {
+    let mut searched = Vec::new();
+    if !config.library_path.is_empty() {
+        searched.push(format!(
+            "library path: {}",
+            search_path::format_list(config.library_path)
+        ));
+    }
+    searched.push("dyld cache".to_string());
+    searched.push(dependency.to_string());
+    searched
+}
+
+enum ResolveResult {
+    // Found and added to the dependency tree.
+    Found((MachOInfo, usize, String)),
+    // Already present in the dependency tree.
+    Skip,
+    // Not found through this candidate path.
+    Miss,
+}
+
+// Try to resolve a candidate path against the dyld cache and then the filesystem,
+// adding a node to the dependency tree when found.
+fn resolve_path(
+    config: &Config,
+    dependency: &str,
+    mode: DepMode,
+    deptree: &mut DepTree,
+    depp: usize,
+) -> ResolveResult {
+    // The expanded @rpath candidates require their own check against the
+    // dependency tree, since the recorded nodes hold the resolved path.
+    if deptree.contains(dependency) {
+        return ResolveResult::Skip;
+    }
+
+    // Try the dyld system cache, if existent.
+    if let Some(elc) = config.cache.get(dependency, config.executable_path) {
+        let path = Path::new(dependency);
+        let dir = pathutils::get_path(&path);
+        let depd = deptree.addnode(
+            DepNode {
+                path: dir.clone(),
+                name: pathutils::get_name(&path),
+                mode: DepMode::LdCache,
+                found: false,
+                searched: Vec::new(),
+            },
+            depp,
+        );
+        return ResolveResult::Found((elc, depd, dir.unwrap_or_default()));
+    }
+
+    // Then the filesystem, only for absolute paths.
+    let path = Path::new(dependency);
+    if !path.is_absolute() {
+        return ResolveResult::Miss;
+    }
+    // The canonicalization also checks the file existence.
+    let Ok(path) = path.canonicalize() else {
+        return ResolveResult::Miss;
+    };
+    if deptree.contains(&path.to_string_lossy()) {
+        return ResolveResult::Skip;
+    }
+    let Ok(elc) = open_macho_file(&path, config.executable_path) else {
+        return ResolveResult::Miss;
+    };
+    let dir = pathutils::get_path(&path);
+    let depd = deptree.addnode(
+        DepNode {
+            path: dir.clone(),
+            name: pathutils::get_name(&path),
+            mode,
+            found: false,
+            searched: Vec::new(),
+        },
+        depp,
+    );
+    ResolveResult::Found((elc, depd, dir.unwrap_or_default()))
 }
 
 // Search NAME (either a leaf name or a framework partial path) on the
@@ -226,20 +393,21 @@ fn resolve_search_paths(
     mode: DepMode,
     deptree: &mut DepTree,
     depp: usize,
-) -> Option<(MachOInfo, usize)> {
+) -> Option<(MachOInfo, usize, String)> {
     for searchpath in searchpaths {
         let newpath = Path::new(&searchpath.path).join(name);
         let elc = match config
             .cache
-            .get(&newpath.to_string_lossy().to_string(), config.executable_path)
+            .get(&newpath.to_string_lossy(), config.executable_path)
         {
             Some(elc) => Some(elc),
             None => open_macho_file(&newpath, config.executable_path).ok(),
         };
         if let Some(elc) = elc {
+            let dir = pathutils::get_path(&newpath);
             let depd = deptree.addnode(
                 DepNode {
-                    path: pathutils::get_path(&newpath),
+                    path: dir.clone(),
                     name: pathutils::get_name(&newpath),
                     mode,
                     found: false,
@@ -247,174 +415,10 @@ fn resolve_search_paths(
                 },
                 depp,
             );
-            return Some((elc, depd));
+            return Some((elc, depd, dir.unwrap_or_default()));
         }
     }
     None
-}
-
-fn resolve_dependency_2(
-    config: &Config,
-    dependency: &mut String,
-    rpath: bool,
-    deptree: &mut DepTree,
-    depp: usize,
-    preload: bool,
-) -> Option<(MachOInfo, usize)> {
-    // To avoid circular dependencies, check if deptree already containts the dependency.
-    if deptree.contains(dependency) {
-        return None;
-    }
-
-    let path = Path::new(&dependency);
-
-    // First check the overrides: DYLD_FRAMEWORK_PATH for framework paths and
-    // then DYLD_LIBRARY_PATH.
-    if let Some(partial) = framework_partial_path(dependency) {
-        if let Some((elc, depd)) = resolve_search_paths(
-            config,
-            config.framework_path,
-            partial,
-            DepMode::DyldFrameworkPath,
-            deptree,
-            depp,
-        ) {
-            return Some((elc, depd));
-        }
-    }
-    if let Some((elc, depd)) = resolve_search_paths(
-        config,
-        config.library_path,
-        &pathutils::get_name(&path),
-        DepMode::LdLibraryPath,
-        deptree,
-        depp,
-    ) {
-        return Some((elc, depd));
-    }
-
-    // Then try the dyld system cache, if existent.
-    if let Some(elc) = config.cache.get(dependency, config.executable_path) {
-        if resolve_dependency_check_found(dependency, deptree, depp, config.all) {
-            return None;
-        }
-        let name = pathutils::get_name(&path);
-        let depd = deptree.addnode(
-            DepNode {
-                path: pathutils::get_path(&path),
-                name,
-                mode: DepMode::LdCache,
-                found: false,
-                searched: Vec::new(),
-            },
-            depp,
-        );
-        return Some((elc, depd));
-    }
-
-    // The try filesystem.
-    let elc = if path.is_absolute() {
-        open_macho_file(&path, config.executable_path).ok()
-    } else {
-        None
-    };
-
-    let path = if elc.is_none() {
-        // Before reporting a not found dependency, try the fallback paths.
-        if let Some(partial) = framework_partial_path(dependency) {
-            if let Some((elc, depd)) = resolve_search_paths(
-                config,
-                &config.fallback_framework_path,
-                partial,
-                DepMode::DyldFallbackFrameworkPath,
-                deptree,
-                depp,
-            ) {
-                return Some((elc, depd));
-            }
-        }
-        if let Some((elc, depd)) = resolve_search_paths(
-            config,
-            &config.fallback_library_path,
-            &pathutils::get_name(&path),
-            DepMode::DyldFallbackLibraryPath,
-            deptree,
-            depp,
-        ) {
-            return Some((elc, depd));
-        }
-
-        // The dependency library does not exist.
-        if !rpath {
-            let mut searched = Vec::new();
-            if !config.library_path.is_empty() {
-                searched.push(format!(
-                    "library path: {}",
-                    search_path::format_list(config.library_path)
-                ));
-            }
-            searched.push("dyld cache".to_string());
-            searched.push(dependency.to_string());
-            deptree.addnode(
-                DepNode {
-                    path: pathutils::get_path(&path),
-                    name: pathutils::get_name(&path),
-                    mode: DepMode::NotFound,
-                    found: false,
-                    searched,
-                },
-                depp,
-            );
-        }
-        return None;
-    } else {
-        path.canonicalize().unwrap()
-    };
-
-    // Update the dependency path for the case of rpath substitution.
-    *dependency = path.to_string_lossy().to_string();
-
-    let depd = deptree.addnode(
-        DepNode {
-            path: pathutils::get_path(&path),
-            name: pathutils::get_name(&path),
-            mode: if preload {
-                DepMode::Preload
-            } else {
-                DepMode::Direct
-            },
-            found: false,
-            searched: Vec::new(),
-        },
-        depp,
-    );
-
-    Some((elc.unwrap(), depd))
-}
-
-fn resolve_dependency_check_found(
-    dependency: &str,
-    deptree: &mut DepTree,
-    depp: usize,
-    all: bool,
-) -> bool {
-    if let Some(entry) = deptree.get(dependency) {
-        if all {
-            deptree.addnode(
-                DepNode {
-                    path: entry.path,
-                    name: entry.name,
-                    mode: entry.mode,
-                    found: true,
-                    searched: Vec::new(),
-                },
-                depp,
-            );
-        }
-        true
-    } else {
-        false
-    }
 }
 
 fn open_macho_file<P: AsRef<Path>>(
