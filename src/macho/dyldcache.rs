@@ -56,6 +56,10 @@ impl DyldCache {
     pub fn len(&self) -> usize {
         self.images.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.images.is_empty()
+    }
 }
 
 // macOS starting with 11 (BigSur) only provides a generated cache of all built in

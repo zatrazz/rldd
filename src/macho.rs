@@ -68,28 +68,6 @@ pub fn resolve_binary(
 
     let omf = open_macho_file(&filename, &executable_path)?;
 
-    if verbose {
-        println!(
-            "{}: search path information\n\
-            \x20 rpath: {}\n\
-            \x20 library path: {}\n\
-            \x20 dyld cache: {} images",
-            filename.display(),
-            search_path::format_list(&omf.rpath),
-            search_path::format_list(library_path),
-            cache.len(),
-        );
-    }
-
-    let mut deptree = DepTree::new();
-    let depp = deptree.addroot(DepNode {
-        path: Some(executable_path.clone()),
-        name: pathutils::get_name(&filename),
-        mode: DepMode::Executable,
-        found: false,
-        searched: Vec::new(),
-    });
-
     let fallback_framework_path = search_path::from_string(
         fallback_framework_path
             .as_deref()
@@ -102,6 +80,38 @@ pub fn resolve_binary(
             .unwrap_or(DEFAULT_FALLBACK_LIBRARY_PATH),
         &[':'],
     );
+
+    if verbose {
+        println!(
+            "{}: search path information\n\
+            \x20 rpath: {}\n\
+            \x20 library path: {}\n\
+            \x20 framework path: {}\n\
+            \x20 fallback framework path: {}\n\
+            \x20 fallback library path: {}\n\
+            \x20 dyld cache: {}",
+            filename.display(),
+            search_path::format_list(&omf.rpath),
+            search_path::format_list(library_path),
+            search_path::format_list(framework_path),
+            search_path::format_list(&fallback_framework_path),
+            search_path::format_list(&fallback_library_path),
+            if cache.is_empty() {
+                "not found".to_string()
+            } else {
+                format!("{} images", cache.len())
+            },
+        );
+    }
+
+    let mut deptree = DepTree::new();
+    let depp = deptree.addroot(DepNode {
+        path: Some(executable_path.clone()),
+        name: pathutils::get_name(&filename),
+        mode: DepMode::Executable,
+        found: false,
+        searched: Vec::new(),
+    });
 
     let config = Config {
         cache,
@@ -329,23 +339,61 @@ fn find_dependency(
             name: pathutils::get_name(&path),
             mode: DepMode::NotFound,
             found: false,
-            searched: searched_locations(config, dependency),
+            searched: searched_locations(config, rpaths, dependency),
         },
         depp,
     );
     None
 }
 
-fn searched_locations(config: &Config, dependency: &str) -> Vec<String> {
+// The locations searched for a not found dependency, printed in verbose mode.
+fn searched_locations(
+    config: &Config,
+    rpaths: &search_path::SearchPathVec,
+    dependency: &str,
+) -> Vec<String> {
+    let framework = framework_partial_path(dependency).is_some();
+
     let mut searched = Vec::new();
+    if framework && !config.framework_path.is_empty() {
+        searched.push(format!(
+            "framework path: {}",
+            search_path::format_list(config.framework_path)
+        ));
+    }
     if !config.library_path.is_empty() {
         searched.push(format!(
             "library path: {}",
             search_path::format_list(config.library_path)
         ));
     }
-    searched.push("dyld cache".to_string());
-    searched.push(dependency.to_string());
+    if dependency.contains("@rpath") && !rpaths.is_empty() {
+        for rpath in rpaths {
+            searched.push(dependency.replace("@rpath", rpath.path.as_str()));
+        }
+    } else {
+        searched.push(dependency.to_string());
+    }
+    searched.push(
+        if config.cache.is_empty() {
+            "dyld cache (not loaded)"
+        } else {
+            "dyld cache"
+        }
+        .to_string(),
+    );
+    if framework && !config.fallback_framework_path.is_empty() {
+        searched.push(format!(
+            "fallback framework path: {}",
+            search_path::format_list(&config.fallback_framework_path)
+        ));
+    }
+    if !config.fallback_library_path.is_empty() {
+        searched.push(format!(
+            "fallback library path: {}",
+            search_path::format_list(&config.fallback_library_path)
+        ));
+    }
     searched
 }
 
