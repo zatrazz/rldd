@@ -30,22 +30,22 @@ fn print_deps_children(p: &Printer, deps: &DepTree, children: &[usize], deptrace
     while let Some(c) = iter.next() {
         let dep = &deps.arena[*c];
         deptrace.push(children.len() > 1);
+        let mode = if dep.val.attrs.is_empty() {
+            dep.val.mode.to_string()
+        } else {
+            format!("[{}] {}", dep.val.attrs.join(" "), dep.val.mode)
+        };
         if dep.val.mode == deptree::DepMode::NotFound {
-            p.print_not_found(&dep.val.name, &dep.val.searched, deptrace);
+            p.print_not_found(&dep.val.name, &dep.val.attrs, &dep.val.searched, deptrace);
         } else if dep.val.found {
             p.print_already_found(
                 &dep.val.name,
                 dep.val.path.as_ref().unwrap(),
-                &dep.val.mode.to_string(),
+                &mode,
                 deptrace,
             );
         } else {
-            p.print_dependency(
-                &dep.val.name,
-                dep.val.path.as_ref().unwrap(),
-                &dep.val.mode.to_string(),
-                deptrace,
-            );
+            p.print_dependency(&dep.val.name, dep.val.path.as_ref().unwrap(), &mode, deptrace);
         }
         deptrace.pop();
 
@@ -63,27 +63,17 @@ struct Options {
     #[argh(option, default = "\"\".to_string()")]
     library_path: String,
 
-    /// assume the DYLD_LIBRARY_PATH is set.
+    /// limit the dependency tree to the given number of levels, with 0
+    /// meaning no limit..
     #[cfg(target_os = "macos")]
-    #[argh(option, default = "\"\".to_string()")]
-    library_path: String,
+    #[argh(option, default = "1")]
+    depth: usize,
 
-    /// assume the DYLD_FRAMEWORK_PATH is set.
-    #[cfg(target_os = "macos")]
-    #[argh(option, default = "\"\".to_string()")]
-    framework_path: String,
-
-    /// assume the DYLD_FALLBACK_FRAMEWORK_PATH is set (default to the dyld
-    /// builtin fallback).
+    /// skip dependencies whose load path starts with the prefix (may be
+    /// used multiple times).
     #[cfg(target_os = "macos")]
     #[argh(option)]
-    fallback_framework_path: Option<String>,
-
-    /// assume the DYLD_FALLBACK_LIBRARY_PATH is set (default to the dyld
-    /// builtin fallback).
-    #[cfg(target_os = "macos")]
-    #[argh(option)]
-    fallback_library_path: Option<String>,
+    ignore_prefix: Vec<String>,
 
     /// assume the LD_PRELOAD is set.
     #[argh(option, default = "\"\".to_string()")]
@@ -156,11 +146,16 @@ fn print_error(arg: &String, err: std::io::Error) -> String {
 fn main() {
     let opts: Options = argh::from_env();
 
-    let printer = printer::create(opts.path, opts.ldd, opts.args.len() == 1, opts.verbose);
+    // On macOS the dependencies are always shown with their full resolved path.
+    let printer = printer::create(
+        opts.path || cfg!(target_os = "macos"),
+        opts.ldd,
+        opts.args.len() == 1,
+        opts.verbose,
+    );
 
+    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
     let ld_library_path = search_path::from_string(&opts.library_path, &[':']);
-    #[cfg(target_os = "macos")]
-    let framework_path = search_path::from_string(&opts.framework_path, &[':']);
     let ld_preload = search_path::from_preload(&opts.preload);
 
     let mut ctx = create_context();
@@ -191,12 +186,10 @@ fn main() {
         let resolved = resolve_binary(
             &mut ctx,
             &ld_preload,
-            &ld_library_path,
-            &framework_path,
-            &opts.fallback_framework_path,
-            &opts.fallback_library_path,
             opts.all,
             opts.verbose,
+            opts.depth,
+            &opts.ignore_prefix,
             arg.as_str(),
         );
         match resolved {

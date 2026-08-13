@@ -50,6 +50,8 @@ impl SearchPathVecExt for SearchPathVec {
     }
 }
 
+// Only used by the ELF backend.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn from_string<S: AsRef<str>>(string: S, delim: &[char]) -> SearchPathVec {
     let mut r = SearchPathVec::new();
     for path in string.as_ref().split(delim) {

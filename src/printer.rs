@@ -168,9 +168,20 @@ impl Printer {
         self.print_entry(dtneeded, path, mode, true)
     }
 
-    pub fn print_not_found(&self, dtneeded: &String, searched: &[String], deptrace: &[bool]) {
+    pub fn print_not_found(
+        &self,
+        dtneeded: &String,
+        attrs: &[&'static str],
+        searched: &[String],
+        deptrace: &[bool],
+    ) {
+        let attrs = if attrs.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", attrs.join(" "))
+        };
         if self.ldd {
-            println!("        {dtneeded} => not found");
+            println!("        {dtneeded} => not found{attrs}");
             return;
         }
         self.print_preamble(deptrace);
@@ -181,7 +192,7 @@ impl Printer {
             termcolor::ColorSpec::new()
                 .set_fg(Some(termcolor::Color::Red))
                 .set_bold(true),
-            format!("{dtneeded} not found"),
+            format!("{dtneeded} not found{attrs}"),
         );
         ok!(writer.print(&buffer));
 

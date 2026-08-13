@@ -11,6 +11,9 @@ pub struct DepNode {
     pub name: String,
     pub mode: DepMode,
     pub found: bool,
+    // The dependency attributes from the load command (Mach-O only), such as
+    // weak, re-export, upward, or delay-init.
+    pub attrs: Vec<&'static str>,
     // The locations searched when the dependency is not found, printed in
     // verbose mode.
     pub searched: Vec<String>,
@@ -18,7 +21,10 @@ pub struct DepNode {
 
 impl arenatree::EqualString for DepNode {
     fn eqstr(&self, other: &str) -> bool {
-        if self.mode == DepMode::Preload || self.mode == DepMode::LdLibraryPath {
+        // Dependencies resolved through a search path list are recorded with
+        // the location they were found at, so they are matched by the leaf
+        // name (the same leaf always resolves to the same object).
+        if matches!(self.mode, DepMode::Preload | DepMode::LdLibraryPath) {
             pathutils::get_name(&Path::new(other)) == self.name
         } else if self.path.is_none() || !Path::new(other).is_absolute() {
             *other == self.name
@@ -45,9 +51,6 @@ pub enum DepMode {
     Direct,        // DT_SONAME refers to an aboslute path.
     DtRpath,       // DT_RPATH.
     LdLibraryPath, // LD_LIBRARY_PATH.
-    DyldFrameworkPath, // DYLD_FRAMEWORK_PATH.
-    DyldFallbackFrameworkPath, // DYLD_FALLBACK_FRAMEWORK_PATH.
-    DyldFallbackLibraryPath, // DYLD_FALLBACK_LIBRARY_PATH.
     DtRunpath,     // DT_RUNPATH.
     LdCache,       // Loader cache (ld.so.cache, etc.).
     SystemDirs,    // Default system directory (i.e '/lib64').
@@ -62,13 +65,7 @@ impl fmt::Display for DepMode {
             DepMode::Preload => write!(f, "[preload]"),
             DepMode::Direct => write!(f, "[direct]"),
             DepMode::DtRpath => write!(f, "[rpath]"),
-            #[cfg(all(target_family = "unix", not(target_os = "macos")))]
             DepMode::LdLibraryPath => write!(f, "[LD_LIBRARY_PATH]"),
-            #[cfg(target_os = "macos")]
-            DepMode::LdLibraryPath => write!(f, "[DYLD_LIBRARY_PATH]"),
-            DepMode::DyldFrameworkPath => write!(f, "[DYLD_FRAMEWORK_PATH]"),
-            DepMode::DyldFallbackFrameworkPath => write!(f, "[DYLD_FALLBACK_FRAMEWORK_PATH]"),
-            DepMode::DyldFallbackLibraryPath => write!(f, "[DYLD_FALLBACK_LIBRARY_PATH]"),
             DepMode::DtRunpath => write!(f, "[runpath]"),
             #[cfg(target_os = "linux")]
             DepMode::LdCache => write!(f, "[ld.so.cache]"),

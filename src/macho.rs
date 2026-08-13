@@ -14,7 +14,15 @@ use crate::search_path::*;
 mod dyldcache;
 pub use dyldcache::DyldCache;
 
-type DepsVec = Vec<String>;
+// A dependency recorded on a dylib load command: the load path (install
+// name) along with the attributes reported by dyld_info -dependents.
+#[derive(Debug)]
+struct MachODep {
+    name: String,
+    attrs: Vec<&'static str>,
+}
+
+type DepsVec = Vec<MachODep>;
 
 #[derive(Default, Debug)]
 struct MachOInfo {
@@ -41,60 +49,45 @@ pub fn create_context() -> DyldCache {
     dyldcache::load()
 }
 
-// The dyld builtin fallback paths used when the environment variables are not
-// set (the DYLD_FALLBACK_FRAMEWORK_PATH and DYLD_FALLBACK_LIBRARY_PATH
-// defaults from dyld4).
-const DEFAULT_FALLBACK_FRAMEWORK_PATH: &str = "/System/Library/Frameworks";
-const DEFAULT_FALLBACK_LIBRARY_PATH: &str = "/usr/local/lib:/usr/lib";
-
-#[allow(clippy::too_many_arguments)]
 pub fn resolve_binary(
     cache: &mut DyldCache,
     preload: &search_path::SearchPathVec,
-    library_path: &search_path::SearchPathVec,
-    framework_path: &search_path::SearchPathVec,
-    fallback_framework_path: &Option<String>,
-    fallback_library_path: &Option<String>,
     all: bool,
     verbose: bool,
+    depth: usize,
+    ignore_prefix: &[String],
     arg: &str,
 ) -> Result<DepTree, std::io::Error> {
-    let filename = Path::new(arg).canonicalize()?;
+    // Mach-O images may exist only inside the dyld shared cache (macOS 11+),
+    // so fall back to a cache lookup by the install name when the file is not
+    // present.
+    let (filename, omf) = match Path::new(arg).canonicalize() {
+        Ok(filename) => {
+            let executable_path =
+                pathutils::get_path(&filename).ok_or(std::io::Error::other(format!(
+                    "failed to get path of input file {arg}"
+                )))?;
+            let omf = open_macho_file(&filename, &executable_path)?;
+            (filename, omf)
+        }
+        Err(err) => match cache.get(arg, &pathutils::get_path(&Path::new(arg)).unwrap_or_default())
+        {
+            Some(omf) => (Path::new(arg).to_path_buf(), omf),
+            None => return Err(err),
+        },
+    };
 
     let executable_path = pathutils::get_path(&filename).ok_or(std::io::Error::other(format!(
         "failed to get path of input file {arg}"
     )))?;
 
-    let omf = open_macho_file(&filename, &executable_path)?;
-
-    let fallback_framework_path = search_path::from_string(
-        fallback_framework_path
-            .as_deref()
-            .unwrap_or(DEFAULT_FALLBACK_FRAMEWORK_PATH),
-        &[':'],
-    );
-    let fallback_library_path = search_path::from_string(
-        fallback_library_path
-            .as_deref()
-            .unwrap_or(DEFAULT_FALLBACK_LIBRARY_PATH),
-        &[':'],
-    );
-
     if verbose {
         println!(
             "{}: search path information\n\
             \x20 rpath: {}\n\
-            \x20 library path: {}\n\
-            \x20 framework path: {}\n\
-            \x20 fallback framework path: {}\n\
-            \x20 fallback library path: {}\n\
             \x20 dyld cache: {}",
             filename.display(),
             search_path::format_list(&omf.rpath),
-            search_path::format_list(library_path),
-            search_path::format_list(framework_path),
-            search_path::format_list(&fallback_framework_path),
-            search_path::format_list(&fallback_library_path),
             if cache.is_empty() {
                 "not found".to_string()
             } else {
@@ -109,28 +102,32 @@ pub fn resolve_binary(
         name: pathutils::get_name(&filename),
         mode: DepMode::Executable,
         found: false,
+        attrs: Vec::new(),
         searched: Vec::new(),
     });
 
     let config = Config {
         cache,
-        library_path,
-        framework_path,
-        fallback_framework_path,
-        fallback_library_path,
         executable_path: &executable_path,
         all,
+        depth,
+        ignore_prefix,
     };
 
     for pload in preload {
+        let dep = MachODep {
+            name: pload.path.clone(),
+            attrs: Vec::new(),
+        };
         resolve_dependency(
             &config,
             &executable_path,
             &omf.rpath,
-            &pload.path,
+            &dep,
             &mut deptree,
             depp,
             true,
+            1,
         );
     }
 
@@ -143,6 +140,7 @@ pub fn resolve_binary(
             &mut deptree,
             depp,
             false,
+            1,
         );
     }
 
@@ -151,57 +149,53 @@ pub fn resolve_binary(
 
 struct Config<'a> {
     cache: &'a DyldCache,
-    library_path: &'a search_path::SearchPathVec,
-    framework_path: &'a search_path::SearchPathVec,
-    fallback_framework_path: search_path::SearchPathVec,
-    fallback_library_path: search_path::SearchPathVec,
     executable_path: &'a str,
     all: bool,
+    // Limit the dependency tree to DEPTH levels, mimicking dylibtree, with
+    // 0 meaning no limit.
+    depth: usize,
+    // Prune dependencies whose load path starts with any of the prefixes,
+    // mimicking dylibtree.
+    ignore_prefix: &'a [String],
 }
 
-// Return the framework partial path (Name.framework/Name or
-// Name.framework/Versions/X/Name) if the install path looks like a framework,
-// mimicking the dyld getFrameworkPartialPath check.
-fn framework_partial_path(dependency: &str) -> Option<&str> {
-    let leaf = dependency.rsplit('/').next()?;
-    let marker = ".framework/";
-    let idx = dependency.rfind(marker)?;
-    let start = dependency[..idx].rfind('/').map(|i| i + 1).unwrap_or(0);
-    let name = &dependency[start..idx];
-    let rest = &dependency[idx + marker.len()..];
-    let valid = rest == leaf
-        || rest
-            .strip_prefix("Versions/")
-            .and_then(|version| version.split_once('/'))
-            .is_some_and(|(_, l)| l == leaf);
-    if valid && name == leaf {
-        Some(&dependency[start..])
-    } else {
-        None
-    }
-}
-
+#[allow(clippy::too_many_arguments)]
 fn resolve_dependency(
     config: &Config,
     loader_path: &str,
     rpaths: &search_path::SearchPathVec,
-    dependency: &str,
+    dep: &MachODep,
     deptree: &mut DepTree,
     depp: usize,
     preload: bool,
+    level: usize,
 ) {
-    let dependency = dependency
+    let dependency = dep
+        .name
         .replace("@executable_path", config.executable_path)
         .replace("@loader_path", loader_path);
 
-    // To avoid circular dependencies, check if deptree already contains the
-    // dependency.
-    if check_already_resolved(config, &dependency, deptree, depp) {
+    if config
+        .ignore_prefix
+        .iter()
+        .any(|prefix| dependency.starts_with(prefix.as_str()))
+    {
         return;
     }
 
-    if let Some((elc, depd, path)) = find_dependency(config, rpaths, &dependency, deptree, depp, preload)
+    // To avoid circular dependencies, check if deptree already contains the
+    // dependency.
+    if check_already_resolved(config, &dependency, &dep.attrs, deptree, depp) {
+        return;
+    }
+
+    if let Some((elc, depd, path)) =
+        find_dependency(config, rpaths, &dependency, &dep.attrs, deptree, depp, preload)
     {
+        // Stop descending once the depth limit is reached.
+        if config.depth != 0 && level >= config.depth {
+            return;
+        }
         // The run-path list for the object own dependencies: the object
         // LC_RPATH entries followed by the ones inherited from the loading
         // chain, mimicking the dyld run-path stack.
@@ -212,7 +206,16 @@ fn resolve_dependency(
             }
         }
         for dep in &elc.deps {
-            resolve_dependency(config, &path, &newrpaths, dep, deptree, depd, preload);
+            resolve_dependency(
+                config,
+                &path,
+                &newrpaths,
+                dep,
+                deptree,
+                depd,
+                preload,
+                level + 1,
+            );
         }
     }
 }
@@ -222,6 +225,7 @@ fn resolve_dependency(
 fn check_already_resolved(
     config: &Config,
     dependency: &str,
+    attrs: &[&'static str],
     deptree: &mut DepTree,
     depp: usize,
 ) -> bool {
@@ -233,6 +237,7 @@ fn check_already_resolved(
                     name: entry.name,
                     mode: entry.mode,
                     found: true,
+                    attrs: attrs.to_vec(),
                     searched: Vec::new(),
                 },
                 depp,
@@ -243,52 +248,25 @@ fn check_already_resolved(
     false
 }
 
-// Resolve DEPENDENCY following the dyld search order:
-//
-// 1. The environment path overrides;
-// 2. The install name itself (with @rpath expanded against the run-path list
-//    when present.
-// 3. The fallback paths.
+// Resolve DEPENDENCY the way dyld_info/otool, the recorded load path is taken
+// verbatim (with @rpath expanded against the run-path list when present) and
+// checked against the dyld cache and the filesystem.
+// When found a node is added to the dependency tree and the parsed object, the
+// node index, and the directory of the resolved path (the @loader_path for the
+// object own dependencies) are returned.
 fn find_dependency(
     config: &Config,
     rpaths: &search_path::SearchPathVec,
     dependency: &str,
+    attrs: &[&'static str],
     deptree: &mut DepTree,
     depp: usize,
     preload: bool,
 ) -> Option<(MachOInfo, usize, String)> {
-    // DYLD_FRAMEWORK_PATH with the framework partial path and then
-    // DYLD_LIBRARY_PATH with the leaf name.
-    let partial = framework_partial_path(dependency);
-    if let Some(partial) = partial {
-        if let Some(r) = resolve_search_paths(
-            config,
-            config.framework_path,
-            partial,
-            DepMode::DyldFrameworkPath,
-            deptree,
-            depp,
-        ) {
-            return Some(r);
-        }
-    }
-    let leaf = pathutils::get_name(&Path::new(dependency));
-    if let Some(r) = resolve_search_paths(
-        config,
-        config.library_path,
-        &leaf,
-        DepMode::LdLibraryPath,
-        deptree,
-        depp,
-    ) {
-        return Some(r);
-    }
-
-    // Then the install name, either literally or through the run-path list.
     if dependency.contains("@rpath") {
         for rpath in rpaths {
             let expanded = dependency.replace("@rpath", rpath.path.as_str());
-            match resolve_path(config, &expanded, DepMode::DtRpath, deptree, depp) {
+            match resolve_path(config, &expanded, attrs, DepMode::DtRpath, deptree, depp) {
                 ResolveResult::Found(r) => return Some(r),
                 ResolveResult::Skip => return None,
                 ResolveResult::Miss => {}
@@ -300,44 +278,22 @@ fn find_dependency(
         } else {
             DepMode::Direct
         };
-        match resolve_path(config, dependency, mode, deptree, depp) {
+        match resolve_path(config, dependency, attrs, mode, deptree, depp) {
             ResolveResult::Found(r) => return Some(r),
             ResolveResult::Skip => return None,
             ResolveResult::Miss => {}
         }
     }
 
-    // Now the fallback paths.
-    if let Some(partial) = partial {
-        if let Some(r) = resolve_search_paths(
-            config,
-            &config.fallback_framework_path,
-            partial,
-            DepMode::DyldFallbackFrameworkPath,
-            deptree,
-            depp,
-        ) {
-            return Some(r);
-        }
-    }
-    if let Some(r) = resolve_search_paths(
-        config,
-        &config.fallback_library_path,
-        &leaf,
-        DepMode::DyldFallbackLibraryPath,
-        deptree,
-        depp,
-    ) {
-        return Some(r);
-    }
-
-    let path = Path::new(dependency);
+    // The dependency was not found: record the load path itself so the
+    // report shows the name the binary links against.
     deptree.addnode(
         DepNode {
-            path: pathutils::get_path(&path),
-            name: pathutils::get_name(&path),
+            path: None,
+            name: dependency.to_string(),
             mode: DepMode::NotFound,
             found: false,
+            attrs: attrs.to_vec(),
             searched: searched_locations(config, rpaths, dependency),
         },
         depp,
@@ -351,22 +307,11 @@ fn searched_locations(
     rpaths: &search_path::SearchPathVec,
     dependency: &str,
 ) -> Vec<String> {
-    let framework = framework_partial_path(dependency).is_some();
-
     let mut searched = Vec::new();
-    if framework && !config.framework_path.is_empty() {
-        searched.push(format!(
-            "framework path: {}",
-            search_path::format_list(config.framework_path)
-        ));
-    }
-    if !config.library_path.is_empty() {
-        searched.push(format!(
-            "library path: {}",
-            search_path::format_list(config.library_path)
-        ));
-    }
-    if dependency.contains("@rpath") && !rpaths.is_empty() {
+    if dependency.contains("@rpath") {
+        if rpaths.is_empty() {
+            searched.push(format!("{dependency} (empty run-path list)"));
+        }
         for rpath in rpaths {
             searched.push(dependency.replace("@rpath", rpath.path.as_str()));
         }
@@ -381,21 +326,10 @@ fn searched_locations(
         }
         .to_string(),
     );
-    if framework && !config.fallback_framework_path.is_empty() {
-        searched.push(format!(
-            "fallback framework path: {}",
-            search_path::format_list(&config.fallback_framework_path)
-        ));
-    }
-    if !config.fallback_library_path.is_empty() {
-        searched.push(format!(
-            "fallback library path: {}",
-            search_path::format_list(&config.fallback_library_path)
-        ));
-    }
     searched
 }
 
+// The result of a single candidate path resolution.
 enum ResolveResult {
     // Found and added to the dependency tree.
     Found((MachOInfo, usize, String)),
@@ -405,18 +339,19 @@ enum ResolveResult {
     Miss,
 }
 
-// Try to resolve a candidate path against the dyld cache and then the filesystem,
-// adding a node to the dependency tree when found.
+// Try to resolve a candidate path against the dyld cache and then the
+// filesystem, adding a node to the dependency tree when found.
 fn resolve_path(
     config: &Config,
     dependency: &str,
+    attrs: &[&'static str],
     mode: DepMode,
     deptree: &mut DepTree,
     depp: usize,
 ) -> ResolveResult {
     // The expanded @rpath candidates require their own check against the
     // dependency tree, since the recorded nodes hold the resolved path.
-    if check_already_resolved(config, dependency, deptree, depp) {
+    if check_already_resolved(config, dependency, attrs, deptree, depp) {
         return ResolveResult::Skip;
     }
 
@@ -430,6 +365,7 @@ fn resolve_path(
                 name: pathutils::get_name(&path),
                 mode: DepMode::LdCache,
                 found: false,
+                attrs: attrs.to_vec(),
                 searched: Vec::new(),
             },
             depp,
@@ -446,7 +382,7 @@ fn resolve_path(
     let Ok(path) = path.canonicalize() else {
         return ResolveResult::Miss;
     };
-    if check_already_resolved(config, &path.to_string_lossy(), deptree, depp) {
+    if check_already_resolved(config, &path.to_string_lossy(), attrs, deptree, depp) {
         return ResolveResult::Skip;
     }
     let Ok(elc) = open_macho_file(&path, config.executable_path) else {
@@ -459,48 +395,12 @@ fn resolve_path(
             name: pathutils::get_name(&path),
             mode,
             found: false,
+            attrs: attrs.to_vec(),
             searched: Vec::new(),
         },
         depp,
     );
     ResolveResult::Found((elc, depd, dir.unwrap_or_default()))
-}
-
-// Search NAME (either a leaf name or a framework partial path) on the
-// SEARCHPATHS directories, checking both the dyld cache and the filesystem.
-fn resolve_search_paths(
-    config: &Config,
-    searchpaths: &search_path::SearchPathVec,
-    name: &str,
-    mode: DepMode,
-    deptree: &mut DepTree,
-    depp: usize,
-) -> Option<(MachOInfo, usize, String)> {
-    for searchpath in searchpaths {
-        let newpath = Path::new(&searchpath.path).join(name);
-        let elc = match config
-            .cache
-            .get(&newpath.to_string_lossy(), config.executable_path)
-        {
-            Some(elc) => Some(elc),
-            None => open_macho_file(&newpath, config.executable_path).ok(),
-        };
-        if let Some(elc) = elc {
-            let dir = pathutils::get_path(&newpath);
-            let depd = deptree.addnode(
-                DepNode {
-                    path: dir.clone(),
-                    name: pathutils::get_name(&newpath),
-                    mode,
-                    found: false,
-                    searched: Vec::new(),
-                },
-                depp,
-            );
-            return Some((elc, depd, dir.unwrap_or_default()));
-        }
-    }
-    None
 }
 
 fn open_macho_file<P: AsRef<Path>>(
@@ -627,14 +527,14 @@ fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
         if let Ok(mut commands) = header.load_commands(endian, data, offset) {
             while let Ok(Some(command)) = commands.next() {
                 match parse_load_command::<Mach>(endian, command) {
-                    Some((LoadCommand::Dylib, dylib)) => deps.push(dylib),
-                    Some((LoadCommand::Rpath, path)) => {
+                    Some(LoadCommand::Dylib(dep)) => deps.push(dep),
+                    Some(LoadCommand::Rpath(path)) => {
                         let path = path
                             .replace("@executable_path", executable_path)
                             .replace("@loader_path", loader_path);
                         rpath.add_path(path.as_str());
                     }
-                    _ => {}
+                    None => {}
                 }
             }
         }
@@ -644,35 +544,65 @@ fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
 }
 
 enum LoadCommand {
-    Dylib,
-    Rpath,
+    Dylib(MachODep),
+    Rpath(String),
 }
 
 fn parse_string(data: Option<&[u8]>) -> Option<String> {
     data.and_then(|s| str::from_utf8(s).ok().map(|s| s.to_string()))
 }
 
+fn dylib_attributes<Mach: MachHeader>(
+    endian: Mach::Endian,
+    command: &LoadCommandData<Mach::Endian>,
+    dylib: &DylibCommand<Mach::Endian>,
+) -> Vec<&'static str> {
+    let mut flags = match command.cmd() {
+        LC_LOAD_WEAK_DYLIB => DYLIB_USE_WEAK_LINK.0,
+        LC_REEXPORT_DYLIB => DYLIB_USE_REEXPORT.0,
+        LC_LOAD_UPWARD_DYLIB => DYLIB_USE_UPWARD.0,
+        _ => 0,
+    };
+    // The dylib_use_command alternate encoding (macOS 15) records the attributes
+    // as flags, with a marker on the old timestamp field.
+    if dylib.dylib.timestamp.get(endian) == DYLIB_USE_MARKER {
+        if let Ok(command) = command.data::<DylibUseCommand<Mach::Endian>>() {
+            flags |= command.flags.get(endian).0;
+        }
+    }
+
+    let mut attrs = Vec::new();
+    if flags & DYLIB_USE_WEAK_LINK.0 != 0 {
+        attrs.push("weak-link");
+    }
+    if flags & DYLIB_USE_REEXPORT.0 != 0 {
+        attrs.push("re-export");
+    }
+    if flags & DYLIB_USE_UPWARD.0 != 0 {
+        attrs.push("upward");
+    }
+    if flags & DYLIB_USE_DELAYED_INIT.0 != 0 {
+        attrs.push("delay-init");
+    }
+    attrs
+}
+
 fn parse_load_command<Mach: MachHeader>(
     endian: Mach::Endian,
     command: LoadCommandData<Mach::Endian>,
-) -> Option<(LoadCommand, String)> {
-    if let Ok(variant) = command.variant() {
-        match variant {
-            LoadCommandVariant::Dylib(x) => {
-                if let Some(dylib) = parse_string(command.string(endian, x.dylib.name).ok()) {
-                    return Some((LoadCommand::Dylib, dylib));
-                };
-                None
-            }
-            LoadCommandVariant::Rpath(x) => {
-                if let Some(rpath) = parse_string(command.string(endian, x.path).ok()) {
-                    return Some((LoadCommand::Rpath, rpath));
-                };
-                None
-            }
-            _ => None,
+) -> Option<LoadCommand> {
+    match command.variant().ok()? {
+        LoadCommandVariant::Dylib(x) => {
+            let name = parse_string(command.string(endian, x.dylib.name).ok())?;
+            Some(LoadCommand::Dylib(MachODep {
+                name,
+                attrs: dylib_attributes::<Mach>(endian, &command, x),
+            }))
         }
-    } else {
-        None
+        LoadCommandVariant::Rpath(x) => {
+            let path = parse_string(command.string(endian, x.path).ok())?;
+            Some(LoadCommand::Rpath(path))
+        }
+        _ => None,
     }
 }
