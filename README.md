@@ -38,17 +38,11 @@ The '-v' option also prints the object information from the load commands: the i
 
 ## Relocation checks (Linux only)
 
-Like ldd, the dynamic relocations can be processed to report unresolved symbol
-references, missing symbol versions, or unused dependencies.  The checks mimic
-the glibc loader and are only supported on Linux:
+Like ldd, the dynamic relocations can be processed to report unresolved symbol references, missing symbol versions, or unused dependencies.  The checks mimic the glibc loader and are only supported on Linux:
 
-- '-d' processes the data relocations and reports the undefined symbols that no
-  loaded object defines.
+- '-d' processes the data relocations and reports the undefined symbols that no loaded object defines.
 - '-r' processes both the data and the function (PLT) relocations.
-- '-u' prints the direct dependencies that provide no symbol used by the binary
-  own relocations (like ldd, it suppresses the dependency listing and exits with
-  status 1 when unused dependencies are found).
-
+- '-u' prints the direct dependencies that provide no symbol used by the binary own relocations (like ldd, it suppresses the dependency listing and exits with status 1 when unused dependencies are found).
 
 ## Building from source
 
