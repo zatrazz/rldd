@@ -1503,6 +1503,11 @@ pub fn check_relocations(
             None => continue,
         };
         if node.mode == DepMode::NotFound {
+            // The loader creates a faked entry for a missing dependency, which
+            // can never have a symbol bound to it.
+            if reported.insert(dtneeded.clone()) {
+                r.unused.push(dtneeded.clone());
+            }
             continue;
         }
         let path = match node.path {
