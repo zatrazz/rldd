@@ -14,6 +14,9 @@ pub struct DepNode {
     // The dependency attributes from the load command (Mach-O only), such as
     // weak, re-export, upward, or delay-init.
     pub attrs: Vec<&'static str>,
+    // The compatibility and current versions from the load command (Mach-O
+    // only), printed in verbose mode.
+    pub version: Option<String>,
     // The locations searched when the dependency is not found, printed in
     // verbose mode.
     pub searched: Vec<String>,
@@ -24,7 +27,14 @@ impl arenatree::EqualString for DepNode {
         // Dependencies resolved through a search path list are recorded with
         // the location they were found at, so they are matched by the leaf
         // name (the same leaf always resolves to the same object).
-        if matches!(self.mode, DepMode::Preload | DepMode::LdLibraryPath) {
+        if matches!(
+            self.mode,
+            DepMode::Preload
+                | DepMode::LdLibraryPath
+                | DepMode::LdFrameworkPath
+                | DepMode::LdFallbackLibraryPath
+                | DepMode::LdFallbackFrameworkPath
+        ) {
             pathutils::get_name(&Path::new(other)) == self.name
         } else if self.path.is_none() || !Path::new(other).is_absolute() {
             *other == self.name
@@ -47,14 +57,17 @@ pub type DepTree = arenatree::ArenaTree<DepNode>;
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
 #[allow(dead_code)]
 pub enum DepMode {
-    Preload,       // Preload library.
-    Direct,        // DT_SONAME refers to an aboslute path.
-    DtRpath,       // DT_RPATH.
-    LdLibraryPath, // LD_LIBRARY_PATH.
-    DtRunpath,     // DT_RUNPATH.
-    LdCache,       // Loader cache (ld.so.cache, etc.).
-    SystemDirs,    // Default system directory (i.e '/lib64').
-    Executable,    // The root executable/library.
+    Preload,                 // Preload library.
+    Direct,                  // DT_SONAME refers to an aboslute path.
+    DtRpath,                 // DT_RPATH.
+    LdLibraryPath,           // LD_LIBRARY_PATH or DYLD_LIBRARY_PATH.
+    LdFrameworkPath,         // DYLD_FRAMEWORK_PATH (Mach-O only).
+    LdFallbackLibraryPath,   // DYLD_FALLBACK_LIBRARY_PATH (Mach-O only).
+    LdFallbackFrameworkPath, // DYLD_FALLBACK_FRAMEWORK_PATH (Mach-O only).
+    DtRunpath,               // DT_RUNPATH.
+    LdCache,                 // Loader cache (ld.so.cache, etc.).
+    SystemDirs,              // Default system directory (i.e '/lib64').
+    Executable,              // The root executable/library.
     #[default]
     NotFound,
 }
@@ -65,7 +78,13 @@ impl fmt::Display for DepMode {
             DepMode::Preload => write!(f, "[preload]"),
             DepMode::Direct => write!(f, "[direct]"),
             DepMode::DtRpath => write!(f, "[rpath]"),
+            #[cfg(target_os = "macos")]
+            DepMode::LdLibraryPath => write!(f, "[DYLD_LIBRARY_PATH]"),
+            #[cfg(not(target_os = "macos"))]
             DepMode::LdLibraryPath => write!(f, "[LD_LIBRARY_PATH]"),
+            DepMode::LdFrameworkPath => write!(f, "[DYLD_FRAMEWORK_PATH]"),
+            DepMode::LdFallbackLibraryPath => write!(f, "[DYLD_FALLBACK_LIBRARY_PATH]"),
+            DepMode::LdFallbackFrameworkPath => write!(f, "[DYLD_FALLBACK_FRAMEWORK_PATH]"),
             DepMode::DtRunpath => write!(f, "[runpath]"),
             #[cfg(target_os = "linux")]
             DepMode::LdCache => write!(f, "[ld.so.cache]"),

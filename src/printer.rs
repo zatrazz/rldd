@@ -30,6 +30,10 @@ impl Printer {
         }
     }
 
+    pub fn is_verbose(&self) -> bool {
+        self.verbose
+    }
+
     fn write_colorized<S: Into<String>>(
         &self,
         buffer: &mut termcolor::Buffer,

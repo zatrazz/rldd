@@ -485,7 +485,7 @@ fn check_elf_header(elc: &ElfInfo) -> bool {
                 || (osabi == ELFOSABI_SYSV && ver < 6)
                 || (osabi == ELFOSABI_GNU && ver < maxver)
         },
-        _ => |osabi: OsAbi, ver: u8, maxver: u8| ver == 0 || (osabi == ELFOSABI_GNU && ver < maxver),
+        _ => |osabi: OsAbi, ver: u8, maxver: u8| ver == 0 || (osabi == ELFOSABI_GNU && ver < maxver)
     };
 
     check_elf_osabi(elc.ei_osabi) && check_elf_abiversion(elc.ei_osabi, elc.ei_abiver, maxver)
@@ -658,6 +658,7 @@ fn resolve_binary_arch(
                 mode: DepMode::SystemDirs,
                 found: true,
                 attrs: Vec::new(),
+                version: None,
                 searched: Vec::new(),
             },
             depp,
@@ -762,6 +763,7 @@ pub fn resolve_binary(
         mode: DepMode::Executable,
         found: false,
         attrs: Vec::new(),
+        version: None,
         searched: Vec::new(),
     });
 
@@ -982,6 +984,7 @@ fn resolve_dependencies(
                             mode: entry.mode,
                             found: true,
                             attrs: Vec::new(),
+                            version: None,
                             searched: Vec::new(),
                         },
                         item.depp,
@@ -1014,6 +1017,7 @@ fn resolve_dependencies(
                     mode: dep.mode,
                     found: false,
                     attrs: Vec::new(),
+                    version: None,
                     searched: Vec::new(),
                 },
                 item.depp,
@@ -1055,6 +1059,7 @@ fn resolve_dependencies(
                     mode: DepMode::NotFound,
                     found: false,
                     attrs: Vec::new(),
+                    version: None,
                     searched,
                 },
                 item.depp,

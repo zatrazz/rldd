@@ -30,11 +30,18 @@ fn print_deps_children(p: &Printer, deps: &DepTree, children: &[usize], deptrace
     while let Some(c) = iter.next() {
         let dep = &deps.arena[*c];
         deptrace.push(children.len() > 1);
-        let mode = if dep.val.attrs.is_empty() {
+        let mut mode = if dep.val.attrs.is_empty() {
             dep.val.mode.to_string()
         } else {
             format!("[{}] {}", dep.val.attrs.join(" "), dep.val.mode)
         };
+        // The load command versions (Mach-O only), shown in verbose mode the
+        // way otool -L reports them.
+        if p.is_verbose() {
+            if let Some(version) = &dep.val.version {
+                mode = format!("{mode} ({version})");
+            }
+        }
         if dep.val.mode == deptree::DepMode::NotFound {
             p.print_not_found(&dep.val.name, &dep.val.attrs, &dep.val.searched, deptrace);
         } else if dep.val.found {
@@ -45,7 +52,12 @@ fn print_deps_children(p: &Printer, deps: &DepTree, children: &[usize], deptrace
                 deptrace,
             );
         } else {
-            p.print_dependency(&dep.val.name, dep.val.path.as_ref().unwrap(), &mode, deptrace);
+            p.print_dependency(
+                &dep.val.name,
+                dep.val.path.as_ref().unwrap(),
+                &mode,
+                deptrace,
+            );
         }
         deptrace.pop();
 
@@ -63,11 +75,41 @@ struct Options {
     #[argh(option, default = "\"\".to_string()")]
     library_path: String,
 
+    /// only use the specified architecture instead of the host one.
+    #[cfg(target_os = "macos")]
+    #[argh(option)]
+    arch: Option<String>,
+
     /// limit the dependency tree to the given number of levels, with 0
     /// meaning no limit..
     #[cfg(target_os = "macos")]
     #[argh(option, default = "1")]
     depth: usize,
+
+    /// assume the DYLD_LIBRARY_PATH is set.
+    #[cfg(target_os = "macos")]
+    #[argh(option, default = "\"\".to_string()")]
+    library_path: String,
+
+    /// assume the DYLD_FRAMEWORK_PATH is set.
+    #[cfg(target_os = "macos")]
+    #[argh(option, default = "\"\".to_string()")]
+    framework_path: String,
+
+    /// assume the DYLD_FALLBACK_LIBRARY_PATH is set.
+    #[cfg(target_os = "macos")]
+    #[argh(option, default = "\"\".to_string()")]
+    fallback_library_path: String,
+
+    /// assume the DYLD_FALLBACK_FRAMEWORK_PATH is set.
+    #[cfg(target_os = "macos")]
+    #[argh(option, default = "\"\".to_string()")]
+    fallback_framework_path: String,
+
+    /// assume the DYLD_IMAGE_SUFFIX is set.
+    #[cfg(target_os = "macos")]
+    #[argh(option)]
+    image_suffix: Option<String>,
 
     /// skip dependencies whose load path starts with the prefix (may be
     /// used multiple times).
@@ -105,7 +147,7 @@ struct Options {
     #[argh(switch, short = 'u')]
     unused: bool,
 
-    /// print search path information.
+    /// print search path and object information.
     #[argh(switch, short = 'v')]
     verbose: bool,
 
@@ -158,7 +200,25 @@ fn main() {
     let ld_library_path = search_path::from_string(&opts.library_path, &[':']);
     let ld_preload = search_path::from_preload(&opts.preload);
 
+    #[cfg(target_os = "macos")]
+    let dyld_env = macho::DyldEnv {
+        library_path: search_path::from_string(&opts.library_path, &[':']),
+        framework_path: search_path::from_string(&opts.framework_path, &[':']),
+        fallback_library_path: search_path::from_string(&opts.fallback_library_path, &[':']),
+        fallback_framework_path: search_path::from_string(&opts.fallback_framework_path, &[':']),
+        image_suffix: opts.image_suffix.clone(),
+    };
+
+    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
     let mut ctx = create_context();
+    #[cfg(target_os = "macos")]
+    let mut ctx = match create_context(opts.arch.as_deref()) {
+        Ok(ctx) => ctx,
+        Err(err) => {
+            eprintln!("{}: {err}", env!("CARGO_PKG_NAME"));
+            std::process::exit(1);
+        }
+    };
 
     if opts.args.is_empty() {
         eprintln!(
@@ -186,6 +246,7 @@ fn main() {
         let resolved = resolve_binary(
             &mut ctx,
             &ld_preload,
+            &dyld_env,
             opts.all,
             opts.verbose,
             opts.depth,
@@ -222,7 +283,10 @@ fn main() {
                             Some(version) => format!(", version {version}"),
                             None => String::new(),
                         };
-                        println!("undefined symbol: {}{version}\t({})", undef.name, undef.object);
+                        println!(
+                            "undefined symbol: {}{version}\t({})",
+                            undef.name, undef.object
+                        );
                     }
                     continue;
                 }

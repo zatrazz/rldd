@@ -20,12 +20,21 @@ On macOS the dependencies are tracked the way 'dyld_info -dependents' and 'otool
 
 Like dyld_info, the input file may be an install name of an image that only exists inside the dyld shared cache.
 
+The '--arch NAME' option selects the given slice of a universal binary instead of the host architecture, along with the matching dyld shared cache flavor (for instance '--arch x86_64' on Apple Silicon resolves against the Rosetta cache, when installed).
+
 Since the recursive listing of a system binary expands to most of the dyld shared cache, only the direct dependencies are printed by default, and the tree can be pruned with:
 
 - '--depth N' limits the dependency tree to N levels, with 0 meaning no limit (the default is 1, the direct dependencies).
 - '--ignore-prefix PREFIX' skips dependencies whose load path starts with the prefix (for instance '--ignore-prefix /usr/lib' to hide the system libraries); the option may be used multiple times.
 
-The '--preload' option mimics DYLD_INSERT_LIBRARIES.
+The '--preload' option mimics DYLD_INSERT_LIBRARIES.  The other dyld environment variables are also mimicked with options, following the dyld search order:
+
+- '--library-path LIST' (DYLD_LIBRARY_PATH) searches the colon-separated directories for the dependency leaf name before the recorded load path.
+- '--framework-path LIST' (DYLD_FRAMEWORK_PATH) searches the directories for the framework partial path (Foo.framework/Versions/A/Foo) before the recorded load path.
+- '--fallback-library-path LIST' and '--fallback-framework-path LIST' (DYLD_FALLBACK_LIBRARY_PATH and DYLD_FALLBACK_FRAMEWORK_PATH) are searched after the dependency is not found on the recorded load path.
+- '--image-suffix SUFFIX' (DYLD_IMAGE_SUFFIX) tries each candidate path with the suffix first (inserted before the .dylib extension, or appended otherwise).
+
+The '-v' option also prints the object information from the load commands: the install name (like otool -D), the platform (dyld_info -platform), the UUID (dyld_info -uuid), and the dependencies compatibility and current versions (otool -L).
 
 ## Relocation checks (Linux only)
 
