@@ -368,8 +368,7 @@ fn parse_ld_so_cache_new<R: Read + Seek>(
             }
             ldsocache.insert(
                 key,
-                pathutils::get_path(&value)
-                    .ok_or(Error::other("Invalid ld.so.cache entry"))?,
+                pathutils::get_path(&value).ok_or(Error::other("Invalid ld.so.cache entry"))?,
             );
         }
     }
@@ -427,9 +426,7 @@ fn parse_ld_so_cache_glibc_hwcap<R: Read + Seek>(
     *prev_off = cur + CACHE_EXTENSION_LEN as i64;
 
     if ext.magic != cache_extension_magic {
-        return Err(Error::other(
-            "Invalid cache_extension magic",
-        ));
+        return Err(Error::other("Invalid cache_extension magic"));
     }
 
     // Return an empty set if the cache does not have any glibc-hwcap extension.

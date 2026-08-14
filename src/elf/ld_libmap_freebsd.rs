@@ -154,9 +154,7 @@ fn parse_dir(libmap: &mut LibMap, dirname: &str, depth: usize) {
     };
     let mut paths: Vec<_> = entries
         .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|path| {
-            !pathutils::get_name(path).starts_with('.') && path.is_file()
-        })
+        .filter(|path| !pathutils::get_name(path).starts_with('.') && path.is_file())
         .collect();
     paths.sort();
     for path in paths {
@@ -190,8 +188,14 @@ mod tests {
              libfoo.so.1 libbar.so.1  # trailing comment\n\
              libbaz.so.1\tlibqux.so.1\n",
         );
-        assert_eq!(libmap.lookup("/bin/prog", "libfoo.so.1"), Some("libbar.so.1"));
-        assert_eq!(libmap.lookup("/bin/prog", "libbaz.so.1"), Some("libqux.so.1"));
+        assert_eq!(
+            libmap.lookup("/bin/prog", "libfoo.so.1"),
+            Some("libbar.so.1")
+        );
+        assert_eq!(
+            libmap.lookup("/bin/prog", "libbaz.so.1"),
+            Some("libqux.so.1")
+        );
         assert_eq!(libmap.lookup("/bin/prog", "libother.so.1"), None);
     }
 

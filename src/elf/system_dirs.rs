@@ -10,15 +10,16 @@ use crate::search_path;
 
 #[allow(dead_code)]
 fn return_error<T>() -> Result<T, std::io::Error> {
-    Err(std::io::Error::other(
-        "failed to get default system dir",
-    ))
+    Err(std::io::Error::other("failed to get default system dir"))
 }
 
 // Return the default system directory for the architectures and class.  It is hard
 // wired on glibc install for each triplet (the $slibdir).
 #[cfg(target_os = "linux")]
-pub fn get_slibdir(e_machine: Machine, ei_class: FileClass) -> Result<&'static str, std::io::Error> {
+pub fn get_slibdir(
+    e_machine: Machine,
+    ei_class: FileClass,
+) -> Result<&'static str, std::io::Error> {
     // Not all machines are supported by object crate.
     const EM_ARCV2: Machine = Machine(195);
 
@@ -172,12 +173,12 @@ pub fn get_system_dirs(
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
     // The rtld STANDARD_LIBRARY_PATH, with the COMPAT_libcompat suffix for
     // the 32-bit compat objects.
-    let dirs: &[&str] =
-        if cfg!(target_pointer_width = "64") && ei_class == object::elf::ELFCLASS32 {
-            &["/lib/casper", "/lib32", "/usr/lib32"]
-        } else {
-            &["/lib/casper", "/lib", "/usr/lib"]
-        };
+    let dirs: &[&str] = if cfg!(target_pointer_width = "64") && ei_class == object::elf::ELFCLASS32
+    {
+        &["/lib/casper", "/lib32", "/usr/lib32"]
+    } else {
+        &["/lib/casper", "/lib", "/usr/lib"]
+    };
     Ok(dirs
         .iter()
         .map(|path| search_path::SearchPath {

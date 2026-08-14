@@ -171,7 +171,7 @@ pub fn resolve_binary(
 
 // The verbose object information: the object metadata from the load
 // commands along with the search path lists used for the resolution.
-fn print_object_information(ctx: &MachOContext,env: &DyldEnv, filename: &Path, omf: &MachOInfo) {
+fn print_object_information(ctx: &MachOContext, env: &DyldEnv, filename: &Path, omf: &MachOInfo) {
     let mut lines = vec![format!("{}: object information", filename.display())];
     lines.push(format!("  arch: {}", ctx.arch.name()));
     if let Some(id) = &omf.id {

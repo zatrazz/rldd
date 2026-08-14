@@ -69,7 +69,10 @@ pub fn parse<P: AsRef<Path>>(filename: &P) -> Option<ObjectSymbols> {
     }
 }
 
-fn parse_elf<Elf: FileHeader<Endian = Endianness>>(elf: &Elf, data: &[u8]) -> Option<ObjectSymbols> {
+fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
+    elf: &Elf,
+    data: &[u8],
+) -> Option<ObjectSymbols> {
     let endian = elf.endian().ok()?;
 
     let sections = elf.sections(endian, data).ok()?;
@@ -280,11 +283,7 @@ struct DynamicInfo {
     bind_now: bool,
 }
 
-fn parse_dynamic_info<Elf: FileHeader>(
-    endian: Elf::Endian,
-    elf: &Elf,
-    data: &[u8],
-) -> DynamicInfo {
+fn parse_dynamic_info<Elf: FileHeader>(endian: Elf::Endian, elf: &Elf, data: &[u8]) -> DynamicInfo {
     let mut r = DynamicInfo {
         jmprel: None,
         bind_now: false,

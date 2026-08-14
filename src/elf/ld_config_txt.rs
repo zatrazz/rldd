@@ -197,7 +197,11 @@ pub fn get_ld_config_path<P: AsRef<Path>>(
         Some("/system/etc/ld.config.txt".to_string())
     }
 
-    fn get_vndk_ld_config_path(e_machine: Machine, ei_class: FileClass, linkerconfig: bool) -> Option<String> {
+    fn get_vndk_ld_config_path(
+        e_machine: Machine,
+        ei_class: FileClass,
+        linkerconfig: bool,
+    ) -> Option<String> {
         if let Some(abi) = abi_string(e_machine, ei_class) {
             let ld_config_arch = format!("/system/etc/ld.config.{abi}.txt");
             if Path::new(&ld_config_arch).exists() {

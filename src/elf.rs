@@ -22,10 +22,10 @@ mod interp;
 mod ld_config_txt;
 #[cfg(target_os = "freebsd")]
 mod ld_hints_freebsd;
-#[cfg(target_os = "freebsd")]
-mod ld_libmap_freebsd;
 #[cfg(target_os = "openbsd")]
 mod ld_hints_openbsd;
+#[cfg(target_os = "freebsd")]
+mod ld_libmap_freebsd;
 #[cfg(target_os = "linux")]
 mod ld_preload;
 #[cfg(target_os = "linux")]
@@ -485,7 +485,9 @@ fn check_elf_header(elc: &ElfInfo) -> bool {
                 || (osabi == ELFOSABI_SYSV && ver < 6)
                 || (osabi == ELFOSABI_GNU && ver < maxver)
         },
-        _ => |osabi: OsAbi, ver: u8, maxver: u8| ver == 0 || (osabi == ELFOSABI_GNU && ver < maxver)
+        _ => {
+            |osabi: OsAbi, ver: u8, maxver: u8| ver == 0 || (osabi == ELFOSABI_GNU && ver < maxver)
+        }
     };
 
     check_elf_osabi(elc.ei_osabi) && check_elf_abiversion(elc.ei_osabi, elc.ei_abiver, maxver)
@@ -666,9 +668,7 @@ fn resolve_binary_arch(
         return Ok(());
     }
 
-    Err(std::io::Error::other(
-        "musl: failed to get INTERP value",
-    ))
+    Err(std::io::Error::other("musl: failed to get INTERP value"))
 }
 #[cfg(all(target_family = "unix", not(target_os = "linux")))]
 fn resolve_binary_arch(
@@ -1307,9 +1307,12 @@ pub struct RelocCheckResult {
 
 #[cfg(target_os = "linux")]
 fn deptree_node_path(node: &DepNode) -> Option<String> {
-    node.path
-        .as_ref()
-        .map(|path| Path::new(path).join(&node.name).to_string_lossy().into_owned())
+    node.path.as_ref().map(|path| {
+        Path::new(path)
+            .join(&node.name)
+            .to_string_lossy()
+            .into_owned()
+    })
 }
 
 // Build the loader global search scope: the resolved objects from the dependency
