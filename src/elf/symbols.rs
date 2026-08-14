@@ -25,6 +25,8 @@ pub struct SymbolRef {
     // Whether the relocation comes from the DT_JMPREL table (function/PLT
     // relocation, only processed in bind-now mode by the loader).
     pub plt: bool,
+    // Whether the reference comes from a COPY relocation.
+    pub copy: bool,
 }
 
 // A version required from a dependency, from the .gnu.version_r information.
@@ -112,6 +114,7 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
     let jmprel = dyninfo.jmprel;
     obj.bind_now = dyninfo.bind_now;
     let is_mips64el = elf.is_mips64el(endian);
+    let copy_reloc = copy_relocation_type(elf.e_machine(endian));
 
     // Track already seen references to avoid reporting a symbol multiple times
     // for the same object.
@@ -126,24 +129,28 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
 
         if let Ok(Some((relas, _link))) = section.rela(endian, data) {
             for rela in relas {
+                let copy = copy_reloc == Some(rela.r_type(endian, is_mips64el));
                 add_reference(
                     endian,
                     &dynsyms,
                     &versions,
                     rela.symbol(endian, is_mips64el),
                     plt,
+                    copy,
                     &mut seen,
                     &mut obj.references,
                 );
             }
         } else if let Ok(Some((rels, _link))) = section.rel(endian, data) {
             for rel in rels {
+                let copy = copy_reloc == Some(rel.r_type(endian));
                 add_reference(
                     endian,
                     &dynsyms,
                     &versions,
                     rel.symbol(endian),
                     plt,
+                    copy,
                     &mut seen,
                     &mut obj.references,
                 );
@@ -167,6 +174,31 @@ fn symbol_name<'data, Elf: FileHeader>(
     Some(name)
 }
 
+// The architecture COPY relocation type.
+fn copy_relocation_type(e_machine: Machine) -> Option<RelocationType> {
+    match e_machine {
+        EM_386 => Some(R_386_COPY),
+        EM_X86_64 => Some(R_X86_64_COPY),
+        EM_AARCH64 => Some(R_AARCH64_COPY),
+        EM_ARM => Some(R_ARM_COPY),
+        EM_68K => Some(R_68K_COPY),
+        EM_ALPHA => Some(R_ALPHA_COPY),
+        EM_CSKY => Some(R_CKCORE_COPY),
+        EM_IA_64 => Some(R_IA64_COPY),
+        EM_LOONGARCH => Some(R_LARCH_COPY),
+        EM_MICROBLAZE => Some(R_MICROBLAZE_COPY),
+        EM_MIPS => Some(R_MIPS_COPY),
+        EM_PARISC => Some(R_PARISC_COPY),
+        EM_PPC => Some(R_PPC_COPY),
+        EM_PPC64 => Some(R_PPC64_COPY),
+        EM_RISCV => Some(R_RISCV_COPY),
+        EM_S390 => Some(R_390_COPY),
+        EM_SH => Some(R_SH_COPY),
+        EM_SPARC | EM_SPARC32PLUS | EM_SPARCV9 => Some(R_SPARC_COPY),
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn add_reference<'data, Elf: FileHeader>(
     endian: Elf::Endian,
@@ -174,6 +206,7 @@ fn add_reference<'data, Elf: FileHeader>(
     versions: &Option<VersionTable<'data, Elf>>,
     symidx: Option<SymbolIndex>,
     plt: bool,
+    copy: bool,
     seen: &mut HashSet<(String, bool)>,
     references: &mut Vec<SymbolRef>,
 ) {
@@ -183,8 +216,9 @@ fn add_reference<'data, Elf: FileHeader>(
     let Ok(sym) = dynsyms.symbol(symidx) else {
         return;
     };
-    // Only undefined symbols require a lookup on the loaded objects scope.
-    if sym.st_shndx(endian) != SHN_UNDEF {
+    // Only undefined symbols require a lookup on the loaded objects scope,
+    // with the exception of COPY relocations.
+    if sym.st_shndx(endian) != SHN_UNDEF && !copy {
         return;
     }
     let Some(name) = symbol_name(endian, dynsyms, sym) else {
@@ -196,6 +230,7 @@ fn add_reference<'data, Elf: FileHeader>(
             version: symbol_version(endian, versions, symidx),
             weak: sym.st_bind() == STB_WEAK,
             plt,
+            copy,
         });
     }
 }

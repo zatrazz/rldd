@@ -1444,12 +1444,17 @@ pub fn check_relocations(
 
     // The loader relocates the objects in the inverse scope order, with the
     // executable itself being the last one.
-    for (path, obj) in scope.iter().rev() {
+    for (idx, (path, obj)) in scope.iter().enumerate().rev() {
         for sref in &obj.references {
             if sref.weak || (sref.plt && !process_plt && !obj.bind_now) {
                 continue;
             }
-            if !scope.iter().any(|(_, o)| satisfies(o, sref)) {
+            // A COPY relocation lookup skips the referencing object own definition).
+            if !scope
+                .iter()
+                .enumerate()
+                .any(|(i, (_, o))| (!sref.copy || i != idx) && satisfies(o, sref))
+            {
                 r.undefined.push(UndefinedSymbol {
                     name: sref.name.clone(),
                     version: sref.version.clone(),
@@ -1473,8 +1478,14 @@ pub fn check_relocations(
     let mut used = vec![false; scope.len()];
     if let Some((_, robj)) = scope.first() {
         for sref in &robj.references {
-            if let Some(p) = scope.iter().position(|(_, o)| satisfies(o, sref)) {
-                used[p] = true;
+            // A COPY relocation lookup skips the referencing object own definition).
+            let skip = if sref.copy { 1 } else { 0 };
+            if let Some(p) = scope
+                .iter()
+                .skip(skip)
+                .position(|(_, o)| satisfies(o, sref))
+            {
+                used[p + skip] = true;
             }
         }
     }
