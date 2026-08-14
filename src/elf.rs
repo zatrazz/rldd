@@ -1066,6 +1066,97 @@ fn resolve_dependencies(
             );
         }
     }
+
+    add_loader_dependency(config, &parents[0].0, deptree, root_depp);
+}
+
+// The dynamic loader is always loaded, and ldd always shows it.  The libc.so is
+// explicitly lists it as a dependency, but an object might not depend on libc at
+// all.  Objects without any dependency are skipped, since the loader is not
+// involved.
+#[cfg(target_os = "linux")]
+fn add_loader_dependency(config: &Config, elc: &ElfInfo, deptree: &mut DepTree, root_depp: usize) {
+    if !interp::is_glibc(&elc.interp) || deptree.arena[root_depp].children.is_empty() {
+        return;
+    }
+    if deptree
+        .arena
+        .iter()
+        .any(|n| interp::is_glibc_name(&n.val.name))
+    {
+        return;
+    }
+
+    // For an executable the PT_INTERP segment has the loader path.
+    if let Some(interp) = &elc.interp {
+        let path = Path::new(interp);
+        if path.exists() {
+            deptree.addnode(
+                DepNode {
+                    path: pathutils::get_path(&path),
+                    name: pathutils::get_name(&path),
+                    mode: DepMode::Direct,
+                    found: false,
+                    attrs: Vec::new(),
+                    version: None,
+                    searched: Vec::new(),
+                },
+                root_depp,
+            );
+            return;
+        }
+    }
+
+    // Otherwise resolve the loader soname through the loader cache and the
+    // system directories (only the soname matching the object architecture
+    // resolves).  The object search paths do not apply, since the loader is
+    // not subject to the dependency search.
+    for name in interp::glibc_names() {
+        let dtneeded = name.to_string();
+        let mut dep = None;
+        if let Some(ld_cache) = config.ld_cache {
+            dep = resolve_dependency_ld_cache(&dtneeded, ld_cache, config.platform, elc);
+        }
+        if dep.is_none() {
+            for searchpath in &config.system_dirs {
+                let path = dependency_path(&searchpath.path, &dtneeded);
+                if let Ok(elc) =
+                    open_elf_file(&path, Some(elc), Some(&dtneeded), config.platform, false)
+                {
+                    dep = Some(ResolvedDependency {
+                        elc,
+                        path: &searchpath.path,
+                        filename: pathutils::get_name(&path),
+                        mode: DepMode::SystemDirs,
+                    });
+                    break;
+                }
+            }
+        }
+        if let Some(dep) = dep {
+            deptree.addnode(
+                DepNode {
+                    path: Some(dep.path.to_string()),
+                    name: dep.filename.clone(),
+                    mode: dep.mode,
+                    found: false,
+                    attrs: Vec::new(),
+                    version: None,
+                    searched: Vec::new(),
+                },
+                root_depp,
+            );
+            return;
+        }
+    }
+}
+#[cfg(all(target_family = "unix", not(target_os = "linux")))]
+fn add_loader_dependency(
+    _config: &Config,
+    _elc: &ElfInfo,
+    _deptree: &mut DepTree,
+    _root_depp: usize,
+) {
 }
 
 fn resolve_dependency_1<'a>(

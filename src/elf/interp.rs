@@ -31,9 +31,20 @@ const GLIBC_INTERP: &[&str] = &[
     "ld64.so.2",                     // powerpc64 ELFv2.
 ];
 
+pub fn is_glibc_name(name: &str) -> bool {
+    GLIBC_INTERP.contains(&name)
+}
+
+// The known glibc loader sonames, used to resolve the loader when the object
+// does not have a PT_INTERP segment (only the one matching the object
+// architecture resolves through the loader cache and system directories).
+pub fn glibc_names() -> &'static [&'static str] {
+    GLIBC_INTERP
+}
+
 pub fn is_glibc(interp: &Option<String>) -> bool {
     match interp {
-        Some(interp) => GLIBC_INTERP.contains(&pathutils::get_name(&Path::new(interp)).as_str()),
+        Some(interp) => is_glibc_name(pathutils::get_name(&Path::new(interp)).as_str()),
         // Shared libraries do not have a PT_INTERP segment, so assume the system
         // loader (glibc) to resolve their dependencies (it also mimics ldd, which
         // always uses the system loader).
