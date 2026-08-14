@@ -172,6 +172,13 @@ impl Printer {
         self.print_entry(dtneeded, path, mode, true)
     }
 
+    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
+    pub fn print_statically_linked(&self) {
+        if self.ldd {
+            println!("        statically linked");
+        }
+    }
+
     pub fn print_not_found(
         &self,
         dtneeded: &String,

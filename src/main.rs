@@ -21,6 +21,12 @@ fn print_deps(p: &Printer, deps: &DepTree) {
     let bin = deps.arena.first().unwrap();
     p.print_executable(&bin.val.path, &bin.val.name);
 
+    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
+    if bin.children.is_empty() {
+        p.print_statically_linked();
+        return;
+    }
+
     let mut deptrace = Vec::<bool>::new();
     print_deps_children(p, deps, &bin.children, &mut deptrace);
 }
