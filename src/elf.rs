@@ -1182,7 +1182,33 @@ fn add_loader_dependency(config: &Config, elc: &ElfInfo, deptree: &mut DepTree, 
         }
     }
 }
-#[cfg(all(target_family = "unix", not(target_os = "linux")))]
+// The OpenBSD ldd lists the loader (/usr/libexec/ld.so) for executables (the
+// dlopen trace used for shared libraries does not show it).
+#[cfg(target_os = "openbsd")]
+fn add_loader_dependency(_config: &Config, elc: &ElfInfo, deptree: &mut DepTree, root_depp: usize) {
+    if let Some(interp) = &elc.interp {
+        let path = Path::new(interp);
+        if path.exists() {
+            deptree.addnode(
+                DepNode {
+                    path: pathutils::get_path(&path),
+                    name: pathutils::get_name(&path),
+                    mode: DepMode::Direct,
+                    found: false,
+                    attrs: Vec::new(),
+                    version: None,
+                    searched: Vec::new(),
+                },
+                root_depp,
+            );
+        }
+    }
+}
+#[cfg(all(
+    target_family = "unix",
+    not(target_os = "linux"),
+    not(target_os = "openbsd")
+))]
 fn add_loader_dependency(
     _config: &Config,
     _elc: &ElfInfo,
