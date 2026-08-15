@@ -704,7 +704,15 @@ pub fn resolve_binary(
     // the binary can not dereference the procfs entry.
     let filename = Path::new(arg).canonicalize()?;
 
-    let mut elc = open_elf_file(&filename, None, None, platform.as_ref(), false)?;
+    let elc = open_elf_file(&filename, None, None, platform.as_ref(), false)?;
+
+    // The OpenBSD loader matches a library by name and major version, picking the best
+    // minor available on the directory (even for the dlopen argument). Mimic it for
+    // shared library inputs (executables are executed directly, with no redirection).
+    #[cfg(target_os = "openbsd")]
+    let (filename, elc) = redirect_to_best_minor(filename, elc, platform.as_ref());
+
+    let mut elc = elc;
 
     // DT_RPATH is ignored if the object also defines DT_RUNPATH (the latter only
     // applies to the object own dependencies, so it is not propagated).
@@ -773,6 +781,30 @@ pub fn resolve_binary(
     resolve_dependencies(&config, elc, refpath, &mut deptree, depp);
 
     Ok(deptree)
+}
+
+#[cfg(target_os = "openbsd")]
+fn redirect_to_best_minor(
+    filename: std::path::PathBuf,
+    elc: ElfInfo,
+    platform: Option<&String>,
+) -> (std::path::PathBuf, ElfInfo) {
+    if elc.interp.is_some() {
+        return (filename, elc);
+    }
+    let (Some(dir), Some(name)) = (
+        filename.parent().and_then(|p| p.to_str()),
+        filename.file_name().and_then(|n| n.to_str()),
+    ) else {
+        return (filename, elc);
+    };
+    let candidate = dependency_path(dir, name);
+    if candidate != filename {
+        if let Ok(nelc) = open_elf_file(&candidate, None, None, platform, false) {
+            return (candidate, nelc);
+        }
+    }
+    (filename, elc)
 }
 
 #[cfg(target_os = "linux")]
