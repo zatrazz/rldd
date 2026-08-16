@@ -181,6 +181,33 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
         }
     }
 
+    // The MIPS ABI does not use dynamic relocations for the external symbol
+    // references: the dynamic symbols from DT_MIPS_GOTSYM onwards correspond
+    // to the global GOT entries ( which the loader resolves directly).
+    // The data entries are resolved eagerly, while the function ones with a
+    // lazy stub (non zero st_value) are resolved lazily like the PLT relocations.
+    if elf.e_machine(endian) == EM_MIPS {
+        if let (Some(gotsym), Some(symtabno)) = (dyninfo.mips_gotsym, dyninfo.mips_symtabno) {
+            for idx in gotsym..symtabno {
+                let symidx = SymbolIndex(idx as usize);
+                let Ok(sym) = dynsyms.symbol(symidx) else {
+                    continue;
+                };
+                let lazy = sym.st_type() == STT_FUNC && sym.st_value(endian).into() != 0;
+                add_reference(
+                    endian,
+                    &dynsyms,
+                    &versions,
+                    Some(symidx),
+                    lazy,
+                    false,
+                    &mut seen,
+                    &mut obj.references,
+                );
+            }
+        }
+    }
+
     Some(obj)
 }
 
@@ -354,12 +381,18 @@ fn parse_verneed<'data, Elf: FileHeader>(
 struct DynamicInfo {
     jmprel: Option<u64>,
     bind_now: bool,
+    // The MIPS global GOT dynamic symbol range (DT_MIPS_GOTSYM to
+    // DT_MIPS_SYMTABNO).
+    mips_gotsym: Option<u64>,
+    mips_symtabno: Option<u64>,
 }
 
 fn parse_dynamic_info<Elf: FileHeader>(endian: Elf::Endian, elf: &Elf, data: &[u8]) -> DynamicInfo {
     let mut r = DynamicInfo {
         jmprel: None,
         bind_now: false,
+        mips_gotsym: None,
+        mips_symtabno: None,
     };
     let Ok(headers) = elf.program_headers(endian, data) else {
         return r;
@@ -386,6 +419,10 @@ fn parse_dynamic_info<Elf: FileHeader>(endian: Elf::Endian, elf: &Elf, data: &[u
             r.bind_now |= DynamicFlags(d.d_val(endian).into()).contains(DF_BIND_NOW);
         } else if tag == DT_FLAGS_1 {
             r.bind_now |= DynamicFlags1(d.d_val(endian).into()).contains(DF_1_NOW);
+        } else if tag == DT_MIPS_GOTSYM {
+            r.mips_gotsym = Some(d.d_val(endian).into());
+        } else if tag == DT_MIPS_SYMTABNO {
+            r.mips_symtabno = Some(d.d_val(endian).into());
         }
     }
     r
