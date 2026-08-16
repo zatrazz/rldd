@@ -115,6 +115,7 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
     obj.bind_now = dyninfo.bind_now;
     let is_mips64el = elf.is_mips64el(endian);
     let copy_reloc = copy_relocation_type(elf.e_machine(endian));
+    let tlsdesc_reloc = tlsdesc_relocation_type(elf.e_machine(endian));
 
     // Track already seen references to avoid reporting a symbol multiple times
     // for the same object.
@@ -129,28 +130,28 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
 
         if let Ok(Some((relas, _link))) = section.rela(endian, data) {
             for rela in relas {
-                let copy = copy_reloc == Some(rela.r_type(endian, is_mips64el));
+                let r_type = rela.r_type(endian, is_mips64el);
                 add_reference(
                     endian,
                     &dynsyms,
                     &versions,
                     rela.symbol(endian, is_mips64el),
-                    plt,
-                    copy,
+                    plt && tlsdesc_reloc != Some(r_type),
+                    copy_reloc == Some(r_type),
                     &mut seen,
                     &mut obj.references,
                 );
             }
         } else if let Ok(Some((rels, _link))) = section.rel(endian, data) {
             for rel in rels {
-                let copy = copy_reloc == Some(rel.r_type(endian));
+                let r_type = rel.r_type(endian);
                 add_reference(
                     endian,
                     &dynsyms,
                     &versions,
                     rel.symbol(endian),
-                    plt,
-                    copy,
+                    plt && tlsdesc_reloc != Some(r_type),
+                    copy_reloc == Some(r_type),
                     &mut seen,
                     &mut obj.references,
                 );
@@ -195,6 +196,21 @@ fn copy_relocation_type(e_machine: Machine) -> Option<RelocationType> {
         EM_S390 => Some(R_390_COPY),
         EM_SH => Some(R_SH_COPY),
         EM_SPARC | EM_SPARC32PLUS | EM_SPARCV9 => Some(R_SPARC_COPY),
+        _ => None,
+    }
+}
+
+// TLSDESC relocations are placed on the DT_JMPREL table, but the glibc loader
+// processes them eagerly even in lazy mode, so they are reported by --data-relocs
+// like the data relocations.
+// ARM is not included, where the loader still handles R_ARM_TLS_DESC lazily.
+fn tlsdesc_relocation_type(e_machine: Machine) -> Option<RelocationType> {
+    match e_machine {
+        EM_386 => Some(R_386_TLS_DESC),
+        EM_X86_64 => Some(R_X86_64_TLSDESC),
+        EM_AARCH64 => Some(R_AARCH64_TLSDESC),
+        EM_LOONGARCH => Some(R_LARCH_TLS_DESC64),
+        EM_RISCV => Some(R_RISCV_TLSDESC),
         _ => None,
     }
 }
