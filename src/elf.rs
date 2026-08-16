@@ -230,6 +230,14 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
     platform: Option<&String>,
 ) -> Result<ElfInfo, &'static str> {
     if let Ok(Some(dynamic)) = segment.dynamic(endian, data) {
+        // The loader rejects an object whose dynamic section has no entries (for instance the
+        // separated debug info files).
+        if !dynamic.iter().any(|d| {
+            let tag = d.d_tag(endian);
+            tag != DT_NULL
+        }) {
+            return Err("Object file has no dynamic section");
+        }
         let mut strtab = 0;
         let mut strsz = 0;
 
