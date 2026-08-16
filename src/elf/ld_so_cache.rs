@@ -103,6 +103,8 @@ const FLAG_MIPS64_LIBN32_NAN2008: i32 = 0x0d00;
 const FLAG_MIPS64_LIBN64_NAN2008: i32 = 0x0e00;
 const FLAG_RISCV_FLOAT_ABI_SOFT: i32 = 0x0f00;
 const FLAG_RISCV_FLOAT_ABI_DOUBLE: i32 = 0x1000;
+const FLAG_LARCH_FLOAT_ABI_SOFT: i32 = 0x1100;
+const FLAG_LARCH_FLOAT_ABI_DOUBLE: i32 = 0x1200;
 
 fn check_file_entry_flags(
     flags: i32,
@@ -149,6 +151,11 @@ fn check_file_entry_flags(
                 }
             }
             _ => false,
+        },
+        EM_LOONGARCH => match e_flags & FileFlags(EF_LARCH_ABI_MODIFIER_MASK) {
+            EF_LARCH_ABI_DOUBLE_FLOAT => flags == FLAG_ELF_LIBC6 | FLAG_LARCH_FLOAT_ABI_DOUBLE,
+            EF_LARCH_ABI_SOFT_FLOAT => flags == FLAG_ELF_LIBC6 | FLAG_LARCH_FLOAT_ABI_SOFT,
+            _ => flags == FLAG_ELF_LIBC6,
         },
         EM_PPC64 => flags == FLAG_ELF_LIBC6 | FLAG_POWERPC_LIB64,
         EM_RISCV => match e_flags & FileFlags(EF_RISCV_FLOAT_ABI) {
