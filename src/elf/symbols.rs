@@ -144,12 +144,34 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
             }
         } else if let Ok(Some((rels, _link))) = section.rel(endian, data) {
             for rel in rels {
-                let r_type = rel.r_type(endian);
+                // The object crate Rel trait does not handle the mips64el
+                // packed r_info (unlike the Rela one), where the fields are
+                // encoded as a byte-swapped 64-bit value with r_sym on the
+                // first four bytes (is_mips64el implies ELFCLASS64).
+                let (symidx, r_type) = if is_mips64el {
+                    let info: u64 = rel.r_info(endian).into();
+                    let info = (info << 32)
+                        | ((info >> 8) & 0xff000000)
+                        | ((info >> 24) & 0x00ff0000)
+                        | ((info >> 40) & 0x0000ff00)
+                        | ((info >> 56) & 0x000000ff);
+                    let sym = (info >> 32) as u32;
+                    (
+                        if sym == 0 {
+                            None
+                        } else {
+                            Some(SymbolIndex(sym as usize))
+                        },
+                        RelocationType((info & 0xffff_ffff) as u32),
+                    )
+                } else {
+                    (rel.symbol(endian), rel.r_type(endian))
+                };
                 add_reference(
                     endian,
                     &dynsyms,
                     &versions,
-                    rel.symbol(endian),
+                    symidx,
                     plt && tlsdesc_reloc != Some(r_type),
                     copy_reloc == Some(r_type),
                     &mut seen,
