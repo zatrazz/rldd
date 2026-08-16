@@ -168,7 +168,9 @@ fn check_file_entry_flags(
             ELFCLASS64 => flags == FLAG_ELF_LIBC6 | FLAG_S390_LIB64,
             _ => false,
         },
-        EM_SPARC => match ei_class {
+        // The 64-bit objects use EM_SPARCV9, while the 32-bit ones might use
+        // either EM_SPARC or EM_SPARC32PLUS (v8+).
+        EM_SPARC | EM_SPARC32PLUS | EM_SPARCV9 => match ei_class {
             ELFCLASS32 => flags == FLAG_ELF_LIBC6,
             ELFCLASS64 => flags == FLAG_ELF_LIBC6 | FLAG_SPARC_LIB64,
             _ => false,
