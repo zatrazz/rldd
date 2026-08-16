@@ -1655,6 +1655,11 @@ pub fn check_relocations(
 
     let mut reported = HashSet::new();
     for dtneeded in &root_elc.deps {
+        // The loader map is always marked as used by the loader itself, so
+        // ldd never reports an explicit loader dependency.
+        if interp::is_glibc_name(dtneeded) {
+            continue;
+        }
         let node = match deptree.get(dtneeded) {
             Some(node) => node,
             None => continue,
