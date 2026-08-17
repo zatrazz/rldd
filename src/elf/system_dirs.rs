@@ -46,12 +46,66 @@ pub fn get_slibdir(
     }
 }
 
+// The musl loader search path comes from the /etc/ld-musl-$(ARCH).path file
+// (colon or newline separated), with a compiled-in default.  The ARCH is
+// taken from the loader name, or from the installed loader config when the
+// object does not have a PT_INTERP segment (shared libraries).
+#[cfg(target_os = "linux")]
+fn get_musl_path_file(interp: &Option<String>) -> Option<String> {
+    use std::path::Path;
+    if let Some(interp) = interp {
+        let name = crate::pathutils::get_name(&Path::new(interp));
+        let arch = name.strip_prefix("ld-musl-")?.strip_suffix(".so.1")?;
+        return Some(format!("/etc/ld-musl-{arch}.path"));
+    }
+    for entry in std::fs::read_dir("/etc").ok()?.flatten() {
+        if let Some(name) = entry.file_name().to_str() {
+            if name.starts_with("ld-musl-") && name.ends_with(".path") {
+                return Some(format!("/etc/{name}"));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn get_musl_system_dirs(interp: &Option<String>) -> search_path::SearchPathVec {
+    if let Some(path_file) = get_musl_path_file(interp) {
+        if let Ok(contents) = std::fs::read_to_string(&path_file) {
+            let dirs: search_path::SearchPathVec = contents
+                .split([':', '\n'])
+                .filter(|p| !p.is_empty())
+                .map(|p| search_path::SearchPath {
+                    path: p.to_string(),
+                    dev: 0,
+                    ino: 0,
+                })
+                .collect();
+            if !dirs.is_empty() {
+                return dirs;
+            }
+        }
+    }
+    ["/lib", "/usr/local/lib", "/usr/lib"]
+        .iter()
+        .map(|p| search_path::SearchPath {
+            path: p.to_string(),
+            dev: 0,
+            ino: 0,
+        })
+        .collect()
+}
+
 #[cfg(target_os = "linux")]
 pub fn get_system_dirs(
-    _interp: &Option<String>,
+    interp: &Option<String>,
+    is_musl: bool,
     e_machine: Machine,
     ei_class: FileClass,
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
+    if is_musl {
+        return Ok(get_musl_system_dirs(interp));
+    }
     let path = get_slibdir(e_machine, ei_class)?;
     Ok(vec![
         search_path::SearchPath {
@@ -73,6 +127,7 @@ pub fn get_system_dirs(
 #[cfg(target_os = "android")]
 pub fn get_system_dirs(
     interp: &Option<String>,
+    _is_musl: bool,
     e_machine: Machine,
     ei_class: FileClass,
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
@@ -168,6 +223,7 @@ pub fn get_system_dirs(
 #[cfg(target_os = "freebsd")]
 pub fn get_system_dirs(
     _interp: &Option<String>,
+    _is_musl: bool,
     _e_machine: object::elf::Machine,
     ei_class: object::elf::FileClass,
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
@@ -192,6 +248,7 @@ pub fn get_system_dirs(
 #[cfg(any(target_os = "openbsd", target_os = "netbsd"))]
 pub fn get_system_dirs(
     _interp: &Option<String>,
+    _is_musl: bool,
     _e_machine: object::elf::Machine,
     _ei_class: object::elf::FileClass,
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
@@ -205,6 +262,7 @@ pub fn get_system_dirs(
 #[cfg(any(target_os = "illumos", target_os = "solaris"))]
 pub fn get_system_dirs(
     _interp: &Option<String>,
+    _is_musl: bool,
     e_machine: Machine,
     _ei_class: FileClass,
 ) -> Result<search_path::SearchPathVec, std::io::Error> {

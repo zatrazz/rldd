@@ -164,6 +164,16 @@ fn parse_header_elf<Elf: FileHeader<Endian = Endianness>>(
 #[cfg(target_os = "linux")]
 fn handle_loader(elc: &mut ElfInfo) {
     elc.is_musl = interp::is_musl(&elc.interp)
+        || elc.deps.iter().any(|dep| dep.starts_with("libc.musl-"))
+        || (elc.interp.is_none() && is_musl_system());
+}
+
+#[cfg(target_os = "linux")]
+fn is_musl_system() -> bool {
+    use std::sync::OnceLock;
+    static MUSL_SYSTEM: OnceLock<bool> = OnceLock::new();
+    *MUSL_SYSTEM
+        .get_or_init(|| !Path::new("/etc/ld.so.cache").exists() && find_musl_loader().is_some())
 }
 #[cfg(all(target_family = "unix", not(target_os = "linux")))]
 fn handle_loader(_elc: &mut ElfInfo) {}
@@ -657,26 +667,38 @@ fn resolve_binary_arch(
         return Ok(());
     }
 
-    if let Some(interp) = &elc.interp {
+    let interp = match &elc.interp {
+        Some(interp) => Some(interp.clone()),
+        None => find_musl_loader(),
+    };
+    if let Some(interp) = interp {
         let path = Path::new(&interp);
         deptree.addnode(
             DepNode {
-                //path: interp::get_interp_path(&elc.interp),
                 path: pathutils::get_path(&path),
-                //name: interp::get_interp_name(&elc.interp).unwrap().to_string(),
                 name: pathutils::get_name(&path),
                 mode: DepMode::SystemDirs,
-                found: true,
+                found: false,
                 attrs: Vec::new(),
                 version: None,
                 searched: Vec::new(),
             },
             depp,
         );
-        return Ok(());
     }
+    Ok(())
+}
 
-    Err(std::io::Error::other("musl: failed to get INTERP value"))
+#[cfg(target_os = "linux")]
+fn find_musl_loader() -> Option<String> {
+    for entry in fs::read_dir("/lib").ok()?.flatten() {
+        if let Some(name) = entry.file_name().to_str() {
+            if name.starts_with("ld-musl-") && name.ends_with(".so.1") {
+                return Some(format!("/lib/{name}"));
+            }
+        }
+    }
+    None
 }
 #[cfg(all(target_family = "unix", not(target_os = "linux")))]
 fn resolve_binary_arch(
@@ -751,7 +773,7 @@ pub fn resolve_binary(
     }
 
     let system_dirs = if load_system_dirs(&*ld_cache) {
-        system_dirs::get_system_dirs(&elc.interp, elc.e_machine, elc.ei_class)?
+        system_dirs::get_system_dirs(&elc.interp, elc.is_musl, elc.e_machine, elc.ei_class)?
     } else {
         search_path::SearchPathVec::new()
     };
