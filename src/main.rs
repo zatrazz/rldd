@@ -298,6 +298,22 @@ fn main() {
                 }
 
                 print_deps(&printer, &deptree);
+
+                // The musl ldd always processes the relocations (musl has no
+                // lazy binding), reporting the unresolved references after
+                // the listing and failing with the loader exit status.
+                #[cfg(target_os = "linux")]
+                if let Some(undefined) = check_musl_relocations(&deptree) {
+                    if !undefined.is_empty() {
+                        for undef in &undefined {
+                            eprintln!(
+                                "Error relocating {}: {}: symbol not found",
+                                undef.object, undef.name
+                            );
+                        }
+                        exitcode = 127;
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("error: {}", print_error(&arg, e));

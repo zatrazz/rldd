@@ -1555,6 +1555,44 @@ fn append_interp_to_scope(scope: &mut Vec<(String, symbols::ObjectSymbols)>, elc
     }
 }
 
+// Mimic the musl loader relocation processing, which the musl ldd always
+// performs: musl has no lazy binding, so all the relocations (data and
+// DT_JMPREL) are processed eagerly, and the symbol versioning is ignored on
+// the load time resolution.  The unresolved references are reported as
+// 'Error relocating OBJECT: SYMBOL: symbol not found' and the loader exits
+// with status 127.  Returns None when the object is not a musl one.
+#[cfg(target_os = "linux")]
+pub fn check_musl_relocations(deptree: &DepTree) -> Option<Vec<UndefinedSymbol>> {
+    let root_elc = open_root_elf(deptree)?;
+    if !root_elc.is_musl {
+        return None;
+    }
+
+    let mut scope = build_symbol_scope(deptree);
+    append_interp_to_scope(&mut scope, &root_elc);
+
+    let mut undefined = Vec::new();
+    for (idx, (path, obj)) in scope.iter().enumerate().rev() {
+        for sref in &obj.references {
+            if sref.weak {
+                continue;
+            }
+            if !scope
+                .iter()
+                .enumerate()
+                .any(|(i, (_, o))| (!sref.copy || i != idx) && o.defined.contains(&sref.name))
+            {
+                undefined.push(UndefinedSymbol {
+                    name: sref.name.clone(),
+                    version: None,
+                    object: path.clone(),
+                });
+            }
+        }
+    }
+    Some(undefined)
+}
+
 // Mimic the loader relocation processing and version checking, used to
 // implement the ldd like --data-relocs, --function-relocs, and --unused
 // options:
