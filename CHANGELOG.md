@@ -1,0 +1,99 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+## [0.4.0] - 2026-08-17
+
+This release contains a major rework of the Mach-O dependency resolution,
+extended relocation checks on Linux/glibc, and multiple resolution fixes
+for the BSDs and Linux/musl.
+
+### Added
+
+- New `-v`/`--verbose` option that prints the search path information used
+  to resolve each dependency, and the searched locations for dependencies
+  that are not found.
+- ELF (Linux): new relocation check options `-d`/`--data-relocs`,
+  `-r`/`--function-relocs`, and `-u`/`--unused`, which verify whether the
+  relocations can be resolved with the loaded dependencies and report
+  unused ones.
+- ELF: FreeBSD `libmap.conf` support.
+- Mach-O: new `--arch NAME` option to select a slice of a universal binary
+  along with the matching dyld shared cache flavor (for instance
+  `--arch x86_64` on Apple Silicon resolves against the Rosetta cache).
+- Mach-O: support for `DYLD_FALLBACK_LIBRARY_PATH`, `DYLD_FRAMEWORK_PATH`,
+  and `DYLD_FALLBACK_FRAMEWORK_PATH`.
+- Mach-O: support for dyld shared cache subcaches and the macOS Sonoma,
+  Sequoia, and Tahoe cache layouts; the cache location is now probed on the
+  filesystem.  The input file may be an install name of an image that only
+  exists inside the dyld shared cache, like `dyld_info`.
+- Mach-O: the `-v` option also prints the object information from the load
+  commands: the install name, the platform, the UUID, and the dependencies
+  compatibility and current versions.
+
+### Changed
+
+- ELF: dependencies are resolved in breadth-first order, matching the
+  dynamic loader behavior.
+- ELF: the relocation checks take symbol versioning in consideration, and
+  process COPY relocations, TLSDESC relocations, and the MIPS global GOT
+  symbols.
+- ELF: relocations for musl objects are processed like the musl ldd, and
+  the musl dependency resolution was fixed.
+- ELF: the ldd mode output prints `statically linked` for objects with no
+  dependencies, always lists the dynamic loader, and objects without
+  `PT_INTERP` assume the system loader.
+- Mach-O: the dependency resolution was reworked to follow the dyld search
+  order: the run-path list is searched from the whole loading chain,
+  `@loader_path` is expanded on `LC_RPATH` entries, unversioned framework
+  paths are resolved against the dyld shared cache, and dependencies are
+  tracked like `dyld_info` and `dylibtree`.
+- A missing file argument now exits with an error status.
+
+### Fixed
+
+- ELF: fix `$PLATFORM` expansion on rpath/runpath.
+- ELF: fix the `DT_RPATH` search to follow the loader chain, and its scope
+  for indirect dependencies on the BSDs.
+- ELF: fix the `ld.so.cache` entry flags check for arm, riscv, LoongArch,
+  and SPARC (v9 and v8+), and the mips64el REL relocation decoding.
+- ELF: fix the FreeBSD default library search paths and the resolution of
+  FreeBSD 32-bit compat objects.
+- ELF: fix the OpenBSD library version matching, mimic the OpenBSD loader
+  minor version matching for the input object, and list the loader for
+  OpenBSD executables.
+- ELF: avoid a panic on malformed `PT_INTERP` offsets and reject objects
+  with an empty dynamic section.
+- Mach-O: honor the `-a` option for already resolved dependencies, and do
+  not handle `LC_ID_DYLIB` as a dependency.
+- Fix the ldd mode output for not found and duplicated entries.
+
+## [0.3.0] - 2025-02-01
+
+### Added
+
+- GitHub Actions CI workflow.
+
+### Fixed
+
+- ELF: fix the dependency path value for the `-p` option.
+- ELF: fix the SPARC default system directories.
+
+### Changed
+
+- Update dependencies and multiple cargo clippy and cargo fmt cleanups
+  across all supported systems.
+
+## [0.2.0] - 2023-01-24
+
+### Added
+
+- Initial Android support: `ld.config.txt` namespaces, SDK/VNDK version
+  substitutions, and asan system paths.
+- ELF: check the `CACHE_MAGIC` for the old `ld.so.cache` format.
+- Print a help message when no argument is provided.
+
+## [0.1.0] - 2023-01-05
+
+- Initial release with ELF support for Linux (glibc, musl, and Android),
+  FreeBSD, OpenBSD, and NetBSD, and initial Mach-O support for macOS.
