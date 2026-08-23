@@ -46,6 +46,8 @@ The KnownDLLs are always resolved from the system directory, from the search ord
 
 An imported symbol that resolves to a forwarded export pulls in the module it points at, which no import directory records.  Those dependencies are printed with the 'forwarded' attribute.
 
+The dependent assemblies declared on the embedded RT_MANIFEST resource are resolved against the WinSxS store, which the loader searches before the loaded module list (so the same name may be loaded from more than one assembly). The version 5 and the version 6 common controls are the usual case.  The publisher policy is not parsed, and the highest installed build of the requested major and minor version is used.
+
 The search order is the application directory, the '--library-path' directories, the system directory, the 16 bit system directory, the Windows directory, the current directory, and at last the PATH directories.
 
 Since the recursive listing of a system binary expands to most of the system directory, only the direct dependencies are printed by default. The tree can be pruned with:
@@ -68,7 +70,6 @@ The PE equivalent of the ELF relocation processing is to check that every import
 - '-r' also checks the delay load imports, which the loader only binds on the first call.
 - '-u' prints the direct dependencies the object imports no symbol from (like ldd, it suppresses the dependency listing and exits with status 1 when unused dependencies are found).
 
-Since there is no side-by-side support yet, an import satisfied by a WinSxS assembly is reported as undefined; the version 6 common controls are the usual case.
 
 ## Relocation checks (Linux only)
 

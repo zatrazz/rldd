@@ -53,8 +53,17 @@ impl arenatree::EqualString for DepNode {
         }
     }
 
+    // A side-by-side module is matched by its full path, since the same name
+    // may be loaded from more than one assembly.
     #[cfg(windows)]
     fn eqstr(&self, other: &str) -> bool {
+        if other.contains(std::path::MAIN_SEPARATOR) || other.contains('/') {
+            let Some(path) = &self.path else {
+                return false;
+            };
+            let resolved = format!("{}{}{}", path, std::path::MAIN_SEPARATOR, self.name);
+            return other.eq_ignore_ascii_case(&resolved);
+        }
         pathutils::get_name(&Path::new(other)).eq_ignore_ascii_case(&self.name)
     }
 }
@@ -78,6 +87,8 @@ pub enum DepMode {
     SystemDirs,              // Default system directory (i.e '/lib64').
     #[cfg(windows)]
     ApiSet, // API set schema redirectio.
+    #[cfg(windows)]
+    SideBySide, // Side-by-side assembly.
     #[cfg(windows)]
     Application, // The application directory.
     #[cfg(windows)]
@@ -125,6 +136,8 @@ impl fmt::Display for DepMode {
             DepMode::LdCache => write!(f, "[KnownDLLs]"),
             #[cfg(windows)]
             DepMode::ApiSet => write!(f, "[api set]"),
+            #[cfg(windows)]
+            DepMode::SideBySide => write!(f, "[side-by-side]"),
             #[cfg(windows)]
             DepMode::Application => write!(f, "[application directory]"),
             #[cfg(windows)]

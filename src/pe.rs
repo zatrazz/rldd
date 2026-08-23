@@ -15,11 +15,13 @@ use object::{FileKind, LittleEndian as LE};
 use crate::deptree::*;
 use crate::pathutils;
 use crate::search_path;
+use crate::search_path::SearchPathVecExt;
 
 mod apiset;
 mod knowndlls;
 mod machine;
 mod search_dirs;
+mod sxs;
 
 // A symbol imported from a dependency.
 #[derive(Clone, Debug)]
@@ -84,12 +86,16 @@ struct PeInfo {
     is_dll: bool,
     deps: Vec<PeDep>,
     exports: PeExports,
+    // The dependent assemblies of the embedded manifest, which the loader
+    // searches before the standard order.
+    assemblies: Vec<sxs::Assembly>,
 }
 
 // The resolution context: the system state the loader consults before the search order.
 pub struct PeContext {
     apiset: apiset::ApiSetMap,
     knowndlls: knowndlls::KnownDlls,
+    winsxs: sxs::WinSxs,
     windows_dir: String,
     safe_search: bool,
 }
@@ -100,6 +106,7 @@ pub fn create_context(safe_search: bool) -> PeContext {
     PeContext {
         apiset,
         knowndlls: knowndlls::load(),
+        winsxs: sxs::WinSxs::load(&windows_dir),
         windows_dir,
         safe_search,
     }
@@ -205,6 +212,14 @@ fn print_object_information(
     ));
     lines.push(format!("  known dlls: {} modules", ctx.knowndlls.len()));
     lines.push(format!(
+        "  winsxs: {}",
+        if ctx.winsxs.is_empty() {
+            "not found".to_string()
+        } else {
+            format!("{} assemblies", ctx.winsxs.len())
+        }
+    ));
+    lines.push(format!(
         "  safe dll search mode: {}",
         if ctx.safe_search {
             "enabled"
@@ -223,8 +238,31 @@ fn print_object_information(
 struct WorkItem {
     dep: PeDep,
     importing: String,
+    // The side-by-side directories of the loading chain.
+    sxs: search_path::SearchPathVec,
     depp: usize,
     level: usize,
+}
+
+// The side-by-side directories of an object, added to the ones it inherits
+// from the loading chain.
+fn assembly_dirs(
+    config: &Config,
+    inherited: &search_path::SearchPathVec,
+    assemblies: &[sxs::Assembly],
+) -> search_path::SearchPathVec {
+    let mut dirs = inherited.clone();
+    for dir in sxs_dirs(config.ctx, assemblies, config.machine) {
+        dirs.add_path(&dir);
+    }
+    dirs
+}
+
+fn sxs_dirs(ctx: &PeContext, assemblies: &[sxs::Assembly], machine: pe::Machine) -> Vec<String> {
+    assemblies
+        .iter()
+        .filter_map(|assembly| ctx.winsxs.resolve(assembly, machine::is_32bit(machine)))
+        .collect()
 }
 
 // Resolve the dependencies in breadth-first orde: a module is loaded once
@@ -232,12 +270,14 @@ struct WorkItem {
 // the application (not of the importing module).
 fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, root_depp: usize) {
     let root_name = deptree.arena[root_depp].val.name.clone();
+    let root_sxs = assembly_dirs(config, &search_path::SearchPathVec::new(), &root.assemblies);
 
     let mut queue = VecDeque::new();
     for dep in &root.deps {
         queue.push_back(WorkItem {
             dep: dep.clone(),
             importing: root_name.clone(),
+            sxs: root_sxs.clone(),
             depp: root_depp,
             level: 1,
         });
@@ -264,7 +304,16 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
             continue;
         }
 
-        if let Some(entry) = deptree.get(&name) {
+        // The side-by-side redirection comes before the loaded-module list,
+        // so the same name may be loaded from more than one assembly.
+        let mut searched = Vec::new();
+        let redirect = find_side_by_side(config, &name, &item.sxs, &mut searched);
+        let lookup = match &redirect {
+            Some((_, dir)) => format!("{dir}{}{name}", std::path::MAIN_SEPARATOR),
+            None => name.clone(),
+        };
+
+        if let Some(entry) = deptree.get(&lookup) {
             if config.all {
                 deptree.addnode(
                     DepNode {
@@ -283,8 +332,11 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
             continue;
         }
 
-        let mut searched = Vec::new();
-        let Some((info, dir, mode)) = find_dependency(config, &name, &mut searched) else {
+        let found = match redirect {
+            Some((info, dir)) => Some((info, dir, DepMode::SideBySide)),
+            None => find_dependency(config, &name, &mut searched),
+        };
+        let Some((info, dir, mode)) = found else {
             add_not_found(config, &item, deptree, searched);
             continue;
         };
@@ -311,10 +363,12 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
         if config.depth != 0 && item.level >= config.depth {
             continue;
         }
+        let sxs = assembly_dirs(config, &item.sxs, &info.assemblies);
         for dep in &info.deps {
             queue.push_back(WorkItem {
                 dep: dep.clone(),
                 importing: name.clone(),
+                sxs: sxs.clone(),
                 depp: depd,
                 level: item.level + 1,
             });
@@ -329,6 +383,7 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
                     imports: Vec::new(),
                 },
                 importing: name.clone(),
+                sxs: sxs.clone(),
                 depp: depd,
                 level: item.level + 1,
             });
@@ -392,6 +447,8 @@ pub fn check_imports(ctx: &PeContext, deptree: &DepTree, delay_load: bool) -> Im
             continue;
         };
 
+        let sxs = sxs_dirs(ctx, &info.assemblies, info.machine);
+
         for dep in &info.deps {
             // Like ldd, only the direct dependencies are reported as unused.
             if node.parent.is_none() && dep.imports.is_empty() {
@@ -409,7 +466,23 @@ pub fn check_imports(ctx: &PeContext, deptree: &DepTree, delay_load: bool) -> Im
                 Some(_) => continue,
                 None => dep.name.clone(),
             };
-            let Some(target) = deptree.get(&name) else {
+            // The child node records the module this object resolved to,
+            // which a side-by-side redirection may make differ from the one
+            // the loaded-module list holds.  The redirection is redone when
+            // the child was resolved through another object.
+            let target = node
+                .children
+                .iter()
+                .map(|child| &deptree.arena[*child].val)
+                .find(|child| child.name.eq_ignore_ascii_case(&name))
+                .cloned()
+                .or_else(|| {
+                    sxs.iter().find_map(|dir| {
+                        deptree.get(&format!("{dir}{}{name}", std::path::MAIN_SEPARATOR))
+                    })
+                })
+                .or_else(|| deptree.get(&name));
+            let Some(target) = target else {
                 continue;
             };
             let Some(target_path) = &target.path else {
@@ -465,6 +538,22 @@ fn add_not_found(config: &Config, item: &WorkItem, deptree: &mut DepTree, search
         },
         item.depp,
     );
+}
+
+fn find_side_by_side(
+    config: &Config,
+    name: &str,
+    sxs: &search_path::SearchPathVec,
+    searched: &mut Vec<String>,
+) -> Option<(PeInfo, String)> {
+    for dir in sxs {
+        let candidate = Path::new(&dir.path).join(name);
+        searched.push(candidate.to_string_lossy().into_owned());
+        if let Some(info) = try_open(config, &candidate) {
+            return Some((info, dir.path.clone()));
+        }
+    }
+    None
 }
 
 // Resolve NAME against the known DLLs and then the search directories, returning th
@@ -539,6 +628,7 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
         is_dll: headers.file_header().characteristics.get(LE).0 & pe::IMAGE_FILE_DLL.0 != 0,
         deps: Vec::new(),
         exports: PeExports::default(),
+        assemblies: Vec::new(),
     };
 
     if let Ok(Some(table)) = file.import_table() {
@@ -583,7 +673,37 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
         pei.exports = parse_exports(&table);
     }
 
+    if let Some(manifest) = parse_manifest(&file) {
+        pei.assemblies = sxs::parse_manifest(&manifest);
+    }
+
     Ok(pei)
+}
+
+// The embedded RT_MANIFEST resource, which declares the side-by-side
+// assemblies the object depends on.
+fn parse_manifest<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> Option<String> {
+    let sections = file.section_table();
+    let directory = file
+        .data_directories()
+        .resource_directory(file.data(), &sections)
+        .ok()??;
+
+    // The resource tree is indexed by type, then by name, then by language.
+    let types = directory.root().ok()?;
+    let manifests = types
+        .entries
+        .iter()
+        .find(|entry| entry.name_or_id().id() == Some(pe::RT_MANIFEST))?
+        .data(directory)
+        .ok()?
+        .table()?;
+    let languages = manifests.entries.first()?.data(directory).ok()?.table()?;
+    let entry = languages.entries.first()?.data(directory).ok()?.data()?;
+
+    let data = sections.pe_data_at(file.data(), entry.offset_to_data.get(LE))?;
+    let data = data.get(..entry.size.get(LE) as usize)?;
+    Some(String::from_utf8_lossy(data).into_owned())
 }
 
 fn import_names<Pe: ImageNtHeaders>(table: &ImportTable, rva: u32) -> Vec<ImportName> {
