@@ -85,9 +85,12 @@ struct PeInfo {
     is_dll: bool,
     deps: Vec<PeDep>,
     exports: PeExports,
-    // The dependent assemblies of the embedded manifest, which the loader
-    // searches before the standard order.
+    // The dependent assemblies of the manifest, which the loader searches
+    // before the standard order.
     assemblies: Vec<sxs::Assembly>,
+    // Whether the object embeds a manifest resource, which the loader
+    // prefers over an external one.
+    manifest: bool,
 }
 
 // The resolution context: the system state the loader consults before the search order.
@@ -105,7 +108,7 @@ pub fn create_context(safe_search: bool) -> PeContext {
     PeContext {
         apiset,
         knowndlls: knowndlls::load(),
-        winsxs: sxs::WinSxs::load(&windows_dir),
+        winsxs: sxs::WinSxs::new(&windows_dir),
         windows_dir,
         safe_search,
     }
@@ -231,6 +234,14 @@ fn print_object_information(
             "disabled"
         }
     ));
+    for assembly in &pei.assemblies {
+        let dir = ctx.winsxs.resolve(assembly, machine::is_32bit(pei.machine));
+        lines.push(format!(
+            "  side-by-side: {} ({})",
+            assembly.name,
+            dir.unwrap_or_else(|| "not found".to_string())
+        ));
+    }
     for (dir, mode) in dirs {
         lines.push(format!("  search path: {} {mode}", dir.path));
     }
@@ -630,7 +641,18 @@ fn open_pe_file<P: AsRef<Path>>(filename: &P) -> Result<PeInfo, std::io::Error> 
         Err(_) => return Err(Error::other("Failed to map file")),
     };
 
-    parse_object(&mmap).map_err(Error::other)
+    let mut pei = parse_object(&mmap).map_err(Error::other)?;
+
+    // The loader falls back to an external manifest when the object embeds
+    // none.
+    if !pei.manifest {
+        let external = format!("{}.manifest", filename.as_ref().to_string_lossy());
+        if let Ok(manifest) = fs::read_to_string(&external) {
+            pei.assemblies = sxs::parse_manifest(&manifest);
+        }
+    }
+
+    Ok(pei)
 }
 
 fn parse_object(data: &[u8]) -> Result<PeInfo, &'static str> {
@@ -653,6 +675,7 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
         deps: Vec::new(),
         exports: PeExports::default(),
         assemblies: Vec::new(),
+        manifest: false,
     };
 
     if let Ok(Some(table)) = file.import_table() {
@@ -703,8 +726,9 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
         pei.exports = parse_exports(&table);
     }
 
-    if let Some(manifest) = parse_manifest(&file) {
+    if let Some(manifest) = manifest_resource(&file) {
         pei.assemblies = sxs::parse_manifest(&manifest);
+        pei.manifest = true;
     }
 
     Ok(pei)
@@ -712,7 +736,7 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
 
 // The embedded RT_MANIFEST resource, which declares the side-by-side
 // assemblies the object depends on.
-fn parse_manifest<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> Option<String> {
+fn manifest_resource<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> Option<String> {
     let sections = file.section_table();
     let directory = file
         .data_directories()

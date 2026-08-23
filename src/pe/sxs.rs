@@ -2,6 +2,7 @@
 // RT_MANIFEST resource, resolved against the WinSxS store, which the loader
 // searches before the standard order.
 
+use std::cell::OnceCell;
 use std::fs;
 use std::path::MAIN_SEPARATOR;
 
@@ -22,29 +23,47 @@ pub struct Assembly {
 // A neutral assembly language is recorded as 'none'.
 pub struct WinSxs {
     root: String,
-    dirs: Vec<String>,
+    dirs: OnceCell<Vec<String>>,
 }
 
 impl WinSxs {
-    pub fn load(windows_dir: &str) -> WinSxs {
-        let root = format!("{windows_dir}{MAIN_SEPARATOR}WinSxS");
-        let mut dirs = Vec::new();
-        if let Ok(entries) = fs::read_dir(&root) {
-            for entry in entries.flatten() {
-                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                    dirs.push(entry.file_name().to_string_lossy().to_lowercase());
+    pub fn new(windows_dir: &str) -> WinSxs {
+        WinSxs {
+            root: format!("{windows_dir}{MAIN_SEPARATOR}WinSxS"),
+            dirs: OnceCell::new(),
+        }
+    }
+
+    // The store holds tens of thousands of directories, so it is only listed
+    // when an object declares a dependent assembly.
+    fn dirs(&self) -> &[String] {
+        self.dirs.get_or_init(|| {
+            let mut dirs = Vec::new();
+            if let Ok(entries) = fs::read_dir(&self.root) {
+                for entry in entries.flatten() {
+                    if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                        dirs.push(entry.file_name().to_string_lossy().to_lowercase());
+                    }
                 }
             }
+            dirs
+        })
+    }
+
+    #[cfg(test)]
+    fn with_dirs(root: &str, dirs: &[&str]) -> WinSxs {
+        WinSxs {
+            root: root.to_string(),
+            dirs: OnceCell::from(dirs.iter().map(|dir| dir.to_string()).collect::<Vec<_>>()),
         }
-        WinSxs { root, dirs }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.dirs.is_empty()
+        self.dirs().is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.dirs.len()
+        self.dirs().len()
     }
 
     // The directory of the highest version of ASSEMBLY.  The manifest records
@@ -62,7 +81,7 @@ impl WinSxs {
         let wanted = version(&assembly.version);
 
         let mut best: Option<(Vec<u32>, &String)> = None;
-        for dir in &self.dirs {
+        for dir in self.dirs() {
             let Some(rest) = dir.strip_prefix(&prefix) else {
                 continue;
             };
@@ -212,6 +231,35 @@ mod tests {
         let identity = r#"<assemblyIdentity assemblyname="wrong" name="right""#;
         assert_eq!(attribute(identity, "name"), "right");
         assert_eq!(attribute(identity, "missing"), "");
+    }
+
+    // The store holds several builds of the same assembly, and the highest
+    // one of the requested major and minor is used.
+    #[test]
+    fn resolve_highest_build() {
+        let store = WinSxs::with_dirs(
+            "W",
+            &[
+                "amd64_microsoft.windows.common-controls_6595b64144ccf1df_5.82.26100.8328_none_a",
+                "amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.8875_none_b",
+                "amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.8972_none_c",
+                "x86_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.9168_none_d",
+            ],
+        );
+        let assembly = &parse_manifest(MANIFEST)[0];
+
+        let resolved = store.resolve(assembly, false).unwrap();
+        assert!(resolved.ends_with("6.0.26100.8972_none_c"), "{resolved}");
+
+        // A 32 bit object resolves the x86 assembly instead.
+        let resolved = store.resolve(assembly, true).unwrap();
+        assert!(resolved.ends_with("6.0.26100.9168_none_d"), "{resolved}");
+    }
+
+    #[test]
+    fn resolve_missing_assembly() {
+        let store = WinSxs::with_dirs("W", &[]);
+        assert!(store.resolve(&parse_manifest(MANIFEST)[0], false).is_none());
     }
 
     #[test]

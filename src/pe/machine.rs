@@ -72,3 +72,57 @@ pub fn subsystem_name(subsystem: pe::Subsystem) -> String {
     };
     name.to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wow64_selection() {
+        assert!(is_32bit(pe::IMAGE_FILE_MACHINE_I386));
+        assert!(is_32bit(pe::IMAGE_FILE_MACHINE_ARMNT));
+        assert!(!is_32bit(pe::IMAGE_FILE_MACHINE_AMD64));
+        assert!(!is_32bit(pe::IMAGE_FILE_MACHINE_ARM64));
+    }
+
+    // A candidate of the wrong machine is skipped, which is what tells the
+    // System32 and the SysWOW64 modules apart.
+    #[test]
+    fn machine_mismatch() {
+        assert!(compatible(
+            pe::IMAGE_FILE_MACHINE_AMD64,
+            pe::IMAGE_FILE_MACHINE_AMD64
+        ));
+        assert!(!compatible(
+            pe::IMAGE_FILE_MACHINE_AMD64,
+            pe::IMAGE_FILE_MACHINE_I386
+        ));
+        assert!(!compatible(
+            pe::IMAGE_FILE_MACHINE_I386,
+            pe::IMAGE_FILE_MACHINE_AMD64
+        ));
+    }
+
+    // An ARM64 image loads the emulation compatible modules.
+    #[test]
+    fn arm64_variants() {
+        assert!(compatible(
+            pe::IMAGE_FILE_MACHINE_ARM64,
+            pe::IMAGE_FILE_MACHINE_ARM64X
+        ));
+        assert!(compatible(
+            pe::IMAGE_FILE_MACHINE_ARM64EC,
+            pe::IMAGE_FILE_MACHINE_AMD64
+        ));
+        assert!(!compatible(
+            pe::IMAGE_FILE_MACHINE_ARM64,
+            pe::IMAGE_FILE_MACHINE_I386
+        ));
+    }
+
+    #[test]
+    fn machine_names() {
+        assert_eq!(name(pe::IMAGE_FILE_MACHINE_AMD64), "x86_64");
+        assert_eq!(name(pe::Machine(0x1234)), "0x1234");
+    }
+}

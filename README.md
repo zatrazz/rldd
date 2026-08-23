@@ -46,7 +46,7 @@ The KnownDLLs are always resolved from the system directory, from the search ord
 
 An imported symbol that resolves to a forwarded export pulls in the module it points at, which no import directory records.  Those dependencies are printed with the 'forwarded' attribute.
 
-The dependent assemblies declared on the embedded RT_MANIFEST resource are resolved against the WinSxS store, which the loader searches before the loaded module list (so the same name may be loaded from more than one assembly). The version 5 and the version 6 common controls are the usual case.  The publisher policy is not parsed, and the highest installed build of the requested major and minor version is used.
+The dependent assemblies declared on the manifest are resolved against the WinSxS store, which the loader searches before the loaded module list, so the same name may be loaded from more than one assembly (the version 5 and the version 6 common controls are the usual case).  The embedded RT_MANIFEST resource is used when present, and an external '<object>.manifest' file otherwise.  The publisher policy is not read, the highest installed build of the requested major and minor version is used.
 
 When a '<object>.local' directory exists the dependencies are taken from it, and when it is a plain file they are taken from the application directory; either way the redirection is searched before the known DLLs.
 
@@ -64,7 +64,7 @@ The remaining loader inputs are mimicked with options:
 - '--library-path LIST' searches the semicolon-separated directories right after the application one, as SetDllDirectory and AddDllDirectory.
 - '--no-safe-search' searches the current directory right after the application one, as the SafeDllSearchMode registry value set to 0.
 
-The '-v' option also prints the object information: the machine, the subsystem, the image base, the API set schema and KnownDLLs status, and the search path list used for the resolution.
+The '-v' option also prints the object information: the machine, the subsystem, the image base, the API set schema and KnownDLLs status, the dependent assemblies with the directory they resolved to, and the search path list used for the resolution.
 
 ## Import checks (Windows only)
 

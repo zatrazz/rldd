@@ -23,3 +23,15 @@ pub fn strip_verbatim(path: &str) -> String {
     }
     path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
 }
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verbatim_prefix() {
+        assert_eq!(strip_verbatim(r"\\?\C:\Windows"), r"C:\Windows");
+        assert_eq!(strip_verbatim(r"\\?\UNC\host\share"), r"\\host\share");
+        assert_eq!(strip_verbatim(r"C:\Windows"), r"C:\Windows");
+    }
+}

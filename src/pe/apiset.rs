@@ -187,3 +187,118 @@ pub fn load(system_dir: &str) -> ApiSetMap {
         None => ApiSetMap::default(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn put_u32(data: &mut [u8], offset: usize, value: u32) {
+        data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_str(data: &mut Vec<u8>, string: &str) -> (u32, u32) {
+        let offset = data.len() as u32;
+        let units: Vec<u16> = string.encode_utf16().collect();
+        for unit in &units {
+            data.extend_from_slice(&unit.to_le_bytes());
+        }
+        (offset, (units.len() * 2) as u32)
+    }
+
+    // A namespace holding a single set with a default host and an alias for
+    // one importing module.
+    fn namespace(version: u32) -> Vec<u8> {
+        let entry = HEADER_SIZE;
+        let value = entry + ENTRY_SIZE;
+        let mut data = vec![0u8; value + 2 * VALUE_SIZE];
+
+        let (name_o, name_l) = put_str(&mut data, "api-ms-win-test-l1-1-0");
+        let (host_o, host_l) = put_str(&mut data, "testhost.dll");
+        let (alias_o, alias_l) = put_str(&mut data, "caller.dll");
+        let (ahost_o, ahost_l) = put_str(&mut data, "aliashost.dll");
+
+        put_u32(&mut data, 0, version);
+        put_u32(&mut data, 12, 1);
+        put_u32(&mut data, 16, entry as u32);
+
+        put_u32(&mut data, entry + 4, name_o);
+        put_u32(&mut data, entry + 8, name_l);
+        put_u32(&mut data, entry + 16, value as u32);
+        put_u32(&mut data, entry + 20, 2);
+
+        // The default value carries no alias.
+        put_u32(&mut data, value + 12, host_o);
+        put_u32(&mut data, value + 16, host_l);
+
+        put_u32(&mut data, value + VALUE_SIZE + 4, alias_o);
+        put_u32(&mut data, value + VALUE_SIZE + 8, alias_l);
+        put_u32(&mut data, value + VALUE_SIZE + 12, ahost_o);
+        put_u32(&mut data, value + VALUE_SIZE + 16, ahost_l);
+
+        data
+    }
+
+    #[test]
+    fn resolve_default_host() {
+        let map = parse(&namespace(NAMESPACE_V6));
+        assert_eq!(map.len(), 1);
+        assert_eq!(
+            map.resolve("api-ms-win-test-l1-1-0.dll", "other.dll"),
+            Some("testhost.dll")
+        );
+    }
+
+    // The alias of the importing module wins over the default host, and the
+    // module names are compared without regard to case.
+    #[test]
+    fn resolve_importing_alias() {
+        let map = parse(&namespace(NAMESPACE_V6));
+        assert_eq!(
+            map.resolve("api-ms-win-test-l1-1-0.dll", "CALLER.DLL"),
+            Some("aliashost.dll")
+        );
+    }
+
+    // The namespace is indexed without the trailing version field, so a set
+    // built against another revision still resolves.
+    #[test]
+    fn resolve_other_revision() {
+        let map = parse(&namespace(NAMESPACE_V6));
+        assert_eq!(
+            map.resolve("api-ms-win-test-l1-1-3.dll", "other.dll"),
+            Some("testhost.dll")
+        );
+    }
+
+    #[test]
+    fn resolve_non_apiset() {
+        let map = parse(&namespace(NAMESPACE_V6));
+        assert_eq!(map.resolve("kernel32.dll", "other.dll"), None);
+        assert_eq!(
+            map.resolve("api-ms-win-other-l1-1-0.dll", "other.dll"),
+            None
+        );
+    }
+
+    // Only the version 6 layout is parsed.
+    #[test]
+    fn unsupported_version() {
+        let map = parse(&namespace(4));
+        assert_eq!(map.version(), 4);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn apiset_names() {
+        assert!(is_apiset("api-ms-win-core-x-l1-1-0.dll"));
+        assert!(is_apiset("EXT-MS-Win-x-l1-1-0.dll"));
+        assert!(!is_apiset("kernel32.dll"));
+        assert!(!is_apiset("api-"));
+    }
+
+    #[test]
+    fn namespace_key() {
+        assert_eq!(key("API-MS-Win-Test-L1-1-0.dll"), "api-ms-win-test-l1-1");
+        assert_eq!(key("noversion"), "noversion");
+    }
+}
