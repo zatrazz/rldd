@@ -184,7 +184,7 @@ struct Options {
     function_relocs: bool,
 
     /// print unused direct dependencies.
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(target_os = "linux")]
     #[argh(switch, short = 'u')]
     unused: bool,
 
@@ -349,23 +349,10 @@ fn main() {
                 }
 
                 #[cfg(windows)]
-                if opts.unused {
-                    let check = check_imports(&ctx, &deptree, true);
-                    if !check.unused.is_empty() {
-                        println!("Unused direct dependencies:");
-                        for name in check.unused {
-                            println!("\t{name}");
-                        }
-                        exitcode = 1;
-                    }
-                    continue;
-                }
-
-                #[cfg(windows)]
                 if opts.data_relocs || opts.function_relocs {
-                    let check = check_imports(&ctx, &deptree, opts.function_relocs);
+                    let undefined = check_imports(&ctx, &deptree, opts.function_relocs);
                     print_deps(&printer, &deptree);
-                    for undef in check.undefined {
+                    for undef in undefined {
                         println!(
                             "undefined symbol: {}, from {}\t({})",
                             undef.name, undef.from, undef.object

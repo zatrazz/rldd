@@ -451,18 +451,15 @@ pub struct UndefinedSymbol {
     pub from: String,
 }
 
-#[derive(Default)]
-pub struct ImportCheck {
-    pub undefined: Vec<UndefinedSymbol>,
-    pub unused: Vec<String>,
-}
-
 // Check that every imported symbol is exported by the module it is imported
 // from, the PE equivalent of processing the ELF relocations.  DELAY_LOAD also
 // checks the delay load imports, which the loader only binds on the first
 // call.
-pub fn check_imports(ctx: &PeContext, deptree: &DepTree, delay_load: bool) -> ImportCheck {
-    let mut check = ImportCheck::default();
+//
+// There is no check for unused dependencies: an import directory only records
+// a module when a symbol is imported from it.
+pub fn check_imports(ctx: &PeContext, deptree: &DepTree, delay_load: bool) -> Vec<UndefinedSymbol> {
+    let mut undefined = Vec::new();
     let mut cache = HashMap::<String, PeExports>::new();
 
     for node in &deptree.arena {
@@ -480,10 +477,6 @@ pub fn check_imports(ctx: &PeContext, deptree: &DepTree, delay_load: bool) -> Im
         let sxs = sxs_dirs(ctx, &info.assemblies, info.machine);
 
         for dep in &info.deps {
-            // Like ldd, only the direct dependencies are reported as unused.
-            if node.parent.is_none() && dep.imports.is_empty() {
-                check.unused.push(dep.name.clone());
-            }
             if !delay_load && dep.attrs.contains(&"delay-load") {
                 continue;
             }
@@ -531,7 +524,7 @@ pub fn check_imports(ctx: &PeContext, deptree: &DepTree, delay_load: bool) -> Im
 
             for import in &dep.imports {
                 if matches!(exports.lookup(import), ExportLookup::Missing) {
-                    check.undefined.push(UndefinedSymbol {
+                    undefined.push(UndefinedSymbol {
                         name: import.to_string(),
                         object: node.val.name.clone(),
                         from: target.name.clone(),
@@ -541,7 +534,7 @@ pub fn check_imports(ctx: &PeContext, deptree: &DepTree, delay_load: bool) -> Im
         }
     }
 
-    check
+    undefined
 }
 
 // The paths are compared in case-insensite mode (as the filesystem).

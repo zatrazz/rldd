@@ -20,9 +20,8 @@ All notable changes to this project will be documented in this file.
   list used for the resolution.
 - PE: the export forwarders are followed, so a module pulled in only by a
   forwarded export is listed with the `forwarded` attribute.
-- PE: new `-d`, `-r`, and `-u` options, which check that every imported
-  symbol is exported by the module it is imported from and report the
-  direct dependencies no symbol is imported from.
+- PE: new `-d` and `-r` options, which check that every imported symbol is
+  exported by the module it is imported from.
 - PE: the dependent assemblies of the embedded `RT_MANIFEST` resource are
   resolved against the WinSxS store, which is searched before the loaded
   module list (so the same name may be loaded from more than one assembly).

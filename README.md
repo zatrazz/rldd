@@ -72,7 +72,8 @@ The PE equivalent of the ELF relocation processing is to check that every import
 
 - '-d' checks the imports bound at load time and reports the ones no dependency exports.
 - '-r' also checks the delay load imports, which the loader only binds on the first call.
-- '-u' prints the direct dependencies the object imports no symbol from (like ldd, it suppresses the dependency listing and exits with status 1 when unused dependencies are found).
+
+There is no '-u' option: an import directory only records a module when a symbol is imported from it, so a PE object has no unused dependency to report.
 
 
 ## Relocation checks (Linux only)
