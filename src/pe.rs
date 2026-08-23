@@ -1,10 +1,15 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::fmt;
 use std::io::Error;
 use std::path::Path;
 use std::{fs, str};
 
 use object::pe;
-use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, PeFile};
+use object::read::pe::ExportTarget;
+use object::read::pe::{
+    DelayLoadImportTable, ExportTable, ImageNtHeaders, ImageOptionalHeader, Import, ImportTable,
+    PeFile,
+};
 use object::{FileKind, LittleEndian as LE};
 
 use crate::deptree::*;
@@ -16,11 +21,59 @@ mod knowndlls;
 mod machine;
 mod search_dirs;
 
+// A symbol imported from a dependency.
+#[derive(Clone, Debug)]
+enum ImportName {
+    Name(String),
+    Ordinal(u16),
+}
+
+impl fmt::Display for ImportName {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ImportName::Name(name) => write!(f, "{name}"),
+            ImportName::Ordinal(ordinal) => write!(f, "#{ordinal}"),
+        }
+    }
+}
+
 // A dependency recorded on the import or the delay load import directory.
 #[derive(Clone, Debug)]
 struct PeDep {
     name: String,
     attrs: Vec<&'static str>,
+    // The symbols imported from it, used to follow the export forwarders and
+    // to check the imports.
+    imports: Vec<ImportName>,
+}
+
+// Where an exported symbol points to.
+enum ExportLookup<'a> {
+    Local,
+    // Forwarded to another module, which the loader loads to bind it.
+    Forwarded(&'a str),
+    Missing,
+}
+
+#[derive(Default, Debug)]
+struct PeExports {
+    // The value is the module a forwarded export points at.
+    names: HashMap<String, Option<String>>,
+    ordinals: HashMap<u16, Option<String>>,
+}
+
+impl PeExports {
+    fn lookup(&self, import: &ImportName) -> ExportLookup<'_> {
+        let forward = match import {
+            ImportName::Name(name) => self.names.get(name),
+            ImportName::Ordinal(ordinal) => self.ordinals.get(ordinal),
+        };
+        match forward {
+            Some(Some(module)) => ExportLookup::Forwarded(module),
+            Some(None) => ExportLookup::Local,
+            None => ExportLookup::Missing,
+        }
+    }
 }
 
 #[derive(Default, Debug)]
@@ -30,6 +83,7 @@ struct PeInfo {
     image_base: u64,
     is_dll: bool,
     deps: Vec<PeDep>,
+    exports: PeExports,
 }
 
 // The resolution context: the system state the loader consults before the search order.
@@ -265,7 +319,126 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
                 level: item.level + 1,
             });
         }
+        // An imported symbol that resolves to a forwarded export pulls in the
+        // module it points at, which no import directory records.
+        for module in forwarded_modules(&item.dep.imports, &info) {
+            queue.push_back(WorkItem {
+                dep: PeDep {
+                    name: module,
+                    attrs: vec!["forwarded"],
+                    imports: Vec::new(),
+                },
+                importing: name.clone(),
+                depp: depd,
+                level: item.level + 1,
+            });
+        }
     }
+}
+
+// The modules the imported symbols are forwarded to, skipping the ones the
+// import directory already records.
+fn forwarded_modules(imports: &[ImportName], info: &PeInfo) -> Vec<String> {
+    let mut modules = Vec::<String>::new();
+    for import in imports {
+        let ExportLookup::Forwarded(module) = info.exports.lookup(import) else {
+            continue;
+        };
+        if info
+            .deps
+            .iter()
+            .any(|dep| dep.name.eq_ignore_ascii_case(module))
+            || modules.iter().any(|seen| seen.eq_ignore_ascii_case(module))
+        {
+            continue;
+        }
+        modules.push(module.to_string());
+    }
+    modules
+}
+
+// An imported symbol that no loaded module exports.
+pub struct UndefinedSymbol {
+    pub name: String,
+    // The module holding the import.
+    pub object: String,
+    // The module it is imported from.
+    pub from: String,
+}
+
+#[derive(Default)]
+pub struct ImportCheck {
+    pub undefined: Vec<UndefinedSymbol>,
+    pub unused: Vec<String>,
+}
+
+// Check that every imported symbol is exported by the module it is imported
+// from, the PE equivalent of processing the ELF relocations.  DELAY_LOAD also
+// checks the delay load imports, which the loader only binds on the first
+// call.
+pub fn check_imports(ctx: &PeContext, deptree: &DepTree, delay_load: bool) -> ImportCheck {
+    let mut check = ImportCheck::default();
+    let mut cache = HashMap::<String, PeExports>::new();
+
+    for node in &deptree.arena {
+        // The duplicated and the not found entries hold no imports.
+        let Some(path) = &node.val.path else {
+            continue;
+        };
+        if node.val.found {
+            continue;
+        }
+        let Ok(info) = open_pe_file(&Path::new(path).join(&node.val.name)) else {
+            continue;
+        };
+
+        for dep in &info.deps {
+            // Like ldd, only the direct dependencies are reported as unused.
+            if node.parent.is_none() && dep.imports.is_empty() {
+                check.unused.push(dep.name.clone());
+            }
+            if !delay_load && dep.attrs.contains(&"delay-load") {
+                continue;
+            }
+
+            // The api set names are virtual, the imports are checked against
+            // the module that implements them.
+            let name = match ctx.apiset.resolve(&dep.name, &node.val.name) {
+                Some(host) if !host.is_empty() => host.to_string(),
+                // Already reported as not found by the resolution.
+                Some(_) => continue,
+                None => dep.name.clone(),
+            };
+            let Some(target) = deptree.get(&name) else {
+                continue;
+            };
+            let Some(target_path) = &target.path else {
+                continue;
+            };
+
+            let resolved = Path::new(target_path).join(&target.name);
+            let key = resolved.to_string_lossy().to_lowercase();
+            if !cache.contains_key(&key) {
+                let Ok(target_info) = open_pe_file(&resolved) else {
+                    continue;
+                };
+                cache.insert(key.clone(), target_info.exports);
+            }
+            let exports = &cache[&key];
+
+            for import in &dep.imports {
+                if matches!(exports.lookup(import), ExportLookup::Missing) {
+                    check.undefined.push(UndefinedSymbol {
+                        name: import.to_string(),
+                        object: node.val.name.clone(),
+                        from: target.name.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    check
 }
 
 // The paths are compared in case-insensite mode (as the filesystem).
@@ -365,15 +538,23 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
         image_base: headers.optional_header().image_base(),
         is_dll: headers.file_header().characteristics.get(LE).0 & pe::IMAGE_FILE_DLL.0 != 0,
         deps: Vec::new(),
+        exports: PeExports::default(),
     };
 
     if let Ok(Some(table)) = file.import_table() {
         if let Ok(mut descriptors) = table.descriptors() {
             while let Ok(Some(descriptor)) = descriptors.next() {
                 if let Ok(name) = table.name(descriptor.name.get(LE)) {
+                    // The import name table holds the names, and is only
+                    // absent on the old bound objects.
+                    let thunks = match descriptor.original_first_thunk.get(LE) {
+                        0 => descriptor.first_thunk.get(LE),
+                        rva => rva,
+                    };
                     pei.deps.push(PeDep {
                         name: String::from_utf8_lossy(name).into_owned(),
                         attrs: Vec::new(),
+                        imports: import_names::<Pe>(&table, thunks),
                     });
                 }
             }
@@ -388,11 +569,88 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
                     pei.deps.push(PeDep {
                         name: String::from_utf8_lossy(name).into_owned(),
                         attrs: vec!["delay-load"],
+                        imports: delay_import_names::<Pe>(
+                            &table,
+                            descriptor.import_name_table_rva.get(LE),
+                        ),
                     });
                 }
             }
         }
     }
 
+    if let Ok(Some(table)) = file.export_table() {
+        pei.exports = parse_exports(&table);
+    }
+
     Ok(pei)
+}
+
+fn import_names<Pe: ImageNtHeaders>(table: &ImportTable, rva: u32) -> Vec<ImportName> {
+    let mut names = Vec::new();
+    let Ok(mut thunks) = table.thunks(rva) else {
+        return names;
+    };
+    while let Ok(Some(thunk)) = thunks.next::<Pe>() {
+        match table.import::<Pe>(thunk) {
+            Ok(import) => names.push(import_name(import)),
+            Err(_) => break,
+        }
+    }
+    names
+}
+
+fn delay_import_names<Pe: ImageNtHeaders>(
+    table: &DelayLoadImportTable,
+    rva: u32,
+) -> Vec<ImportName> {
+    let mut names = Vec::new();
+    let Ok(mut thunks) = table.thunks(rva) else {
+        return names;
+    };
+    while let Ok(Some(thunk)) = thunks.next::<Pe>() {
+        match table.import::<Pe>(thunk) {
+            Ok(import) => names.push(import_name(import)),
+            Err(_) => break,
+        }
+    }
+    names
+}
+
+fn import_name(import: Import) -> ImportName {
+    match import {
+        Import::Name(_, name) => ImportName::Name(String::from_utf8_lossy(name).into_owned()),
+        Import::Ordinal(ordinal) => ImportName::Ordinal(ordinal),
+    }
+}
+
+fn parse_exports(table: &ExportTable) -> PeExports {
+    let mut exports = PeExports::default();
+    let Ok(list) = table.exports() else {
+        return exports;
+    };
+    for export in list {
+        let forward = match export.target {
+            ExportTarget::ForwardByName(module, _) | ExportTarget::ForwardByOrdinal(module, _) => {
+                Some(forward_module(module))
+            }
+            ExportTarget::Address(_) => None,
+        };
+        if let Some(name) = export.name {
+            exports
+                .names
+                .insert(String::from_utf8_lossy(name).into_owned(), forward.clone());
+        }
+        exports.ordinals.insert(export.ordinal.0, forward);
+    }
+    exports
+}
+
+// The module of a forwarder string is recorded without the '.dll' suffix.
+fn forward_module(module: &[u8]) -> String {
+    let module = String::from_utf8_lossy(module).into_owned();
+    match module.len() > 4 && module[module.len() - 4..].eq_ignore_ascii_case(".dll") {
+        true => module,
+        false => format!("{module}.dll"),
+    }
 }

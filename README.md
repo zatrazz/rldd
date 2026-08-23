@@ -44,6 +44,8 @@ The 'api-ms-*' and 'ext-ms-*' virtual names are resolved with the API set schema
 
 The KnownDLLs are always resolved from the system directory, from the search order, and for 32 bit images the system directory is SysWOW64 instead of System32.  A candidate built for another machine is skipped and the search continues.
 
+An imported symbol that resolves to a forwarded export pulls in the module it points at, which no import directory records.  Those dependencies are printed with the 'forwarded' attribute.
+
 The search order is the application directory, the '--library-path' directories, the system directory, the 16 bit system directory, the Windows directory, the current directory, and at last the PATH directories.
 
 Since the recursive listing of a system binary expands to most of the system directory, only the direct dependencies are printed by default. The tree can be pruned with:
@@ -57,6 +59,16 @@ The remaining loader inputs are mimicked with options:
 - '--no-safe-search' searches the current directory right after the application one, as the SafeDllSearchMode registry value set to 0.
 
 The '-v' option also prints the object information: the machine, the subsystem, the image base, the API set schema and KnownDLLs status, and the search path list used for the resolution.
+
+## Import checks (Windows only)
+
+The PE equivalent of the ELF relocation processing is to check that every imported symbol is exported by the module it is imported from:
+
+- '-d' checks the imports bound at load time and reports the ones no dependency exports.
+- '-r' also checks the delay load imports, which the loader only binds on the first call.
+- '-u' prints the direct dependencies the object imports no symbol from (like ldd, it suppresses the dependency listing and exits with status 1 when unused dependencies are found).
+
+Since there is no side-by-side support yet, an import satisfied by a WinSxS assembly is reported as undefined; the version 6 common controls are the usual case.
 
 ## Relocation checks (Linux only)
 

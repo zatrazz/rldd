@@ -173,8 +173,18 @@ struct Options {
     #[argh(switch, short = 'r')]
     function_relocs: bool,
 
+    /// check the imports and report the ones no dependency exports.
+    #[cfg(windows)]
+    #[argh(switch, short = 'd')]
+    data_relocs: bool,
+
+    /// also check the delay load imports.
+    #[cfg(windows)]
+    #[argh(switch, short = 'r')]
+    function_relocs: bool,
+
     /// print unused direct dependencies.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     #[argh(switch, short = 'u')]
     unused: bool,
 
@@ -333,6 +343,32 @@ fn main() {
                         println!(
                             "undefined symbol: {}{version}\t({})",
                             undef.name, undef.object
+                        );
+                    }
+                    continue;
+                }
+
+                #[cfg(windows)]
+                if opts.unused {
+                    let check = check_imports(&ctx, &deptree, true);
+                    if !check.unused.is_empty() {
+                        println!("Unused direct dependencies:");
+                        for name in check.unused {
+                            println!("\t{name}");
+                        }
+                        exitcode = 1;
+                    }
+                    continue;
+                }
+
+                #[cfg(windows)]
+                if opts.data_relocs || opts.function_relocs {
+                    let check = check_imports(&ctx, &deptree, opts.function_relocs);
+                    print_deps(&printer, &deptree);
+                    for undef in check.undefined {
+                        println!(
+                            "undefined symbol: {}, from {}\t({})",
+                            undef.name, undef.from, undef.object
                         );
                     }
                     continue;

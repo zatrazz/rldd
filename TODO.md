@@ -12,8 +12,7 @@
 
 ### TODO
 
-- [ ] Follow the export forwarders (a 'foo.bar' forwarded export), which pull in a dependency that no import directory records.
-- [ ] Check the imported names against the export table of the resolved module and report the missing ones (the PE equivalent of the -d/-r relocation checks).
+- [ ] The export forwarders are only followed for the symbols the first importer of a module records, since the resolution stops at the first time a module is added to the tree.
 - [ ] Side-by-side support: the embedded RT_MANIFEST resource, the external '.manifest' files, and the WinSxS assembly resolution.
 - [ ] DLL redirection with the '.local' file.
 - [ ] The package dependency graph of a packaged application.
@@ -24,6 +23,8 @@
 
 ## Done
 
+- [x] PE: Follow the export forwarders.
+- [x] PE: Check the imports against the export tables (-d, -r, and -u).
 - [x] MachO: Implement DYLD_FALLBACK_LIBRARY_PATH.
 - [x] MachO: Implement DYLD_FRAMEWORK_PATH and DYLD_FALLBACK_FRAMEWORK_PATH.
 - [x] Take symbol versioning in consideration on the -d/-r/-u relocation checks.

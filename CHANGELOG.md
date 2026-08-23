@@ -18,6 +18,11 @@ All notable changes to this project will be documented in this file.
 - PE: the `-v` option prints the object information (machine, subsystem,
   image base, API set schema, and known DLLs) along with the search path
   list used for the resolution.
+- PE: the export forwarders are followed, so a module pulled in only by a
+  forwarded export is listed with the `forwarded` attribute.
+- PE: new `-d`, `-r`, and `-u` options, which check that every imported
+  symbol is exported by the module it is imported from and report the
+  direct dependencies no symbol is imported from.
 - The CI workflow also builds on Windows.
 
 ### Changed
