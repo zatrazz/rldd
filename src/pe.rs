@@ -15,7 +15,6 @@ use object::{FileKind, LittleEndian as LE};
 use crate::deptree::*;
 use crate::pathutils;
 use crate::search_path;
-use crate::search_path::SearchPathVecExt;
 
 mod apiset;
 mod knowndlls;
@@ -127,6 +126,8 @@ impl PeContext {
 struct Config<'a> {
     ctx: &'a PeContext,
     dirs: search_dirs::SearchDirs,
+    // The '.local' DLL redirection directory, searched first when present.
+    redirect: search_dirs::SearchDirs,
     machine: pe::Machine,
     all: bool,
     depth: usize,
@@ -160,6 +161,8 @@ pub fn resolve_binary(
         print_object_information(ctx, filename, &pei, &dirs);
     }
 
+    let redirect = dot_local_dirs(filename, application.as_deref());
+
     let mut deptree = DepTree::new();
     let depp = deptree.addroot(DepNode {
         path: application,
@@ -175,6 +178,7 @@ pub fn resolve_binary(
     let config = Config {
         ctx,
         dirs,
+        redirect,
         machine: pei.machine,
         all,
         depth,
@@ -233,13 +237,35 @@ fn print_object_information(
     println!("{}", lines.join("\n"));
 }
 
+// When a '<object>.local' directory exists the dependencies are taken from it, and
+// when it is a plain file they are taken from the application directory.
+fn dot_local_dirs(filename: &Path, application: Option<&str>) -> search_dirs::SearchDirs {
+    let mut dirs = search_dirs::SearchDirs::new();
+    let local = format!("{}.local", filename.to_string_lossy());
+    let Ok(meta) = fs::metadata(&local) else {
+        return dirs;
+    };
+    let dir = match meta.is_dir() {
+        true => Some(local.as_str()),
+        false => application,
+    };
+    if let Some(dir) = dir {
+        search_dirs::add(&mut dirs, dir, DepMode::DllRedirection);
+    }
+    dirs
+}
+
 // A pending dependency to resolve, along the base name of the module that
 // imports it (which selects the api set alias) and its tree level.
 struct WorkItem {
     dep: PeDep,
     importing: String,
-    // The side-by-side directories of the loading chain.
-    sxs: search_path::SearchPathVec,
+    // The directories the loading chain redirects to, searched before the
+    // loaded module list.
+    redirect: search_dirs::SearchDirs,
+    // Whether the importer is a known DLL, whose own dependencies the loader
+    // also takes from the known DLLs directory.
+    known: bool,
     depp: usize,
     level: usize,
 }
@@ -248,12 +274,12 @@ struct WorkItem {
 // from the loading chain.
 fn assembly_dirs(
     config: &Config,
-    inherited: &search_path::SearchPathVec,
+    inherited: &search_dirs::SearchDirs,
     assemblies: &[sxs::Assembly],
-) -> search_path::SearchPathVec {
+) -> search_dirs::SearchDirs {
     let mut dirs = inherited.clone();
     for dir in sxs_dirs(config.ctx, assemblies, config.machine) {
-        dirs.add_path(&dir);
+        search_dirs::add(&mut dirs, &dir, DepMode::SideBySide);
     }
     dirs
 }
@@ -270,14 +296,15 @@ fn sxs_dirs(ctx: &PeContext, assemblies: &[sxs::Assembly], machine: pe::Machine)
 // the application (not of the importing module).
 fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, root_depp: usize) {
     let root_name = deptree.arena[root_depp].val.name.clone();
-    let root_sxs = assembly_dirs(config, &search_path::SearchPathVec::new(), &root.assemblies);
+    let root_sxs = assembly_dirs(config, &config.redirect, &root.assemblies);
 
     let mut queue = VecDeque::new();
     for dep in &root.deps {
         queue.push_back(WorkItem {
             dep: dep.clone(),
             importing: root_name.clone(),
-            sxs: root_sxs.clone(),
+            redirect: root_sxs.clone(),
+            known: false,
             depp: root_depp,
             level: 1,
         });
@@ -307,9 +334,9 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
         // The side-by-side redirection comes before the loaded-module list,
         // so the same name may be loaded from more than one assembly.
         let mut searched = Vec::new();
-        let redirect = find_side_by_side(config, &name, &item.sxs, &mut searched);
+        let redirect = find_redirected(config, &name, &item.redirect, &mut searched);
         let lookup = match &redirect {
-            Some((_, dir)) => format!("{dir}{}{name}", std::path::MAIN_SEPARATOR),
+            Some((_, dir, _)) => format!("{dir}{}{name}", std::path::MAIN_SEPARATOR),
             None => name.clone(),
         };
 
@@ -333,8 +360,8 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
         }
 
         let found = match redirect {
-            Some((info, dir)) => Some((info, dir, DepMode::SideBySide)),
-            None => find_dependency(config, &name, &mut searched),
+            Some(found) => Some(found),
+            None => find_dependency(config, &name, item.known, &mut searched),
         };
         let Some((info, dir, mode)) = found else {
             add_not_found(config, &item, deptree, searched);
@@ -363,12 +390,14 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
         if config.depth != 0 && item.level >= config.depth {
             continue;
         }
-        let sxs = assembly_dirs(config, &item.sxs, &info.assemblies);
+        let sxs = assembly_dirs(config, &item.redirect, &info.assemblies);
+        let known = item.known || mode == DepMode::LdCache;
         for dep in &info.deps {
             queue.push_back(WorkItem {
                 dep: dep.clone(),
                 importing: name.clone(),
-                sxs: sxs.clone(),
+                redirect: sxs.clone(),
+                known,
                 depp: depd,
                 level: item.level + 1,
             });
@@ -383,7 +412,8 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
                     imports: Vec::new(),
                 },
                 importing: name.clone(),
-                sxs: sxs.clone(),
+                redirect: sxs.clone(),
+                known,
                 depp: depd,
                 level: item.level + 1,
             });
@@ -540,17 +570,17 @@ fn add_not_found(config: &Config, item: &WorkItem, deptree: &mut DepTree, search
     );
 }
 
-fn find_side_by_side(
+fn find_redirected(
     config: &Config,
     name: &str,
-    sxs: &search_path::SearchPathVec,
+    dirs: &search_dirs::SearchDirs,
     searched: &mut Vec<String>,
-) -> Option<(PeInfo, String)> {
-    for dir in sxs {
+) -> Option<(PeInfo, String, DepMode)> {
+    for (dir, mode) in dirs {
         let candidate = Path::new(&dir.path).join(name);
         searched.push(candidate.to_string_lossy().into_owned());
         if let Some(info) = try_open(config, &candidate) {
-            return Some((info, dir.path.clone()));
+            return Some((info, dir.path.clone(), *mode));
         }
     }
     None
@@ -561,6 +591,7 @@ fn find_side_by_side(
 fn find_dependency(
     config: &Config,
     name: &str,
+    known: bool,
     searched: &mut Vec<String>,
 ) -> Option<(PeInfo, String, DepMode)> {
     // A recorded name with a path component is taken as is.
@@ -571,7 +602,7 @@ fn find_dependency(
         return Some((info, pathutils::get_path(&path)?, DepMode::Direct));
     }
 
-    if config.ctx.knowndlls.contains(name) {
+    if known || config.ctx.knowndlls.contains(name) {
         let dir = config.ctx.knowndll_dir(machine::is_32bit(config.machine));
         let candidate = Path::new(&dir).join(name);
         searched.push(candidate.to_string_lossy().into_owned());
@@ -641,9 +672,15 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
                         0 => descriptor.first_thunk.get(LE),
                         rva => rva,
                     };
+                    // A non zero timestamp means the imports were bound at
+                    // link time.
+                    let mut attrs = Vec::new();
+                    if descriptor.time_date_stamp.get(LE) != 0 {
+                        attrs.push("bound");
+                    }
                     pei.deps.push(PeDep {
                         name: String::from_utf8_lossy(name).into_owned(),
-                        attrs: Vec::new(),
+                        attrs,
                         imports: import_names::<Pe>(&table, thunks),
                     });
                 }

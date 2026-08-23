@@ -14,10 +14,7 @@
 
 - [ ] The export forwarders are only followed for the symbols the first importer of a module records, since the resolution stops at the first time a module is added to the tree.
 - [ ] Side-by-side: read the external '.manifest' files and the publisher policy, only the embedded RT_MANIFEST resource is parsed and the highest installed build of the requested version is used.
-- [ ] DLL redirection with the '.local' file.
 - [ ] The package dependency graph of a packaged application.
-- [ ] Treat the dependencies of a known DLL as known DLLs as well.
-- [ ] Parse the bound import directory and report a 'bound' attribute.
 - [ ] API set schema version 4 (Windows 8.1), only version 6 is parsed.
 
 
@@ -25,6 +22,8 @@
 
 - [x] PE: Follow the export forwarders.
 - [x] PE: Resolve the side-by-side assemblies of the embedded manifest.
+- [x] PE: Handle the '.local' DLL redirection and the known DLL dependencies.
+- [x] PE: Report the bound imports.
 - [x] PE: Check the imports against the export tables (-d, -r, and -u).
 - [x] MachO: Implement DYLD_FALLBACK_LIBRARY_PATH.
 - [x] MachO: Implement DYLD_FRAMEWORK_PATH and DYLD_FALLBACK_FRAMEWORK_PATH.

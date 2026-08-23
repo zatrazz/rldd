@@ -90,6 +90,8 @@ pub enum DepMode {
     #[cfg(windows)]
     SideBySide, // Side-by-side assembly.
     #[cfg(windows)]
+    DllRedirection, // '.local' DLL redirection.
+    #[cfg(windows)]
     Application, // The application directory.
     #[cfg(windows)]
     WindowsDir, // The Windows directory.
@@ -138,6 +140,8 @@ impl fmt::Display for DepMode {
             DepMode::ApiSet => write!(f, "[api set]"),
             #[cfg(windows)]
             DepMode::SideBySide => write!(f, "[side-by-side]"),
+            #[cfg(windows)]
+            DepMode::DllRedirection => write!(f, "[.local]"),
             #[cfg(windows)]
             DepMode::Application => write!(f, "[application directory]"),
             #[cfg(windows)]

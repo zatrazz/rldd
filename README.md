@@ -48,7 +48,11 @@ An imported symbol that resolves to a forwarded export pulls in the module it po
 
 The dependent assemblies declared on the embedded RT_MANIFEST resource are resolved against the WinSxS store, which the loader searches before the loaded module list (so the same name may be loaded from more than one assembly). The version 5 and the version 6 common controls are the usual case.  The publisher policy is not parsed, and the highest installed build of the requested major and minor version is used.
 
+When a '<object>.local' directory exists the dependencies are taken from it, and when it is a plain file they are taken from the application directory; either way the redirection is searched before the known DLLs.
+
 The search order is the application directory, the '--library-path' directories, the system directory, the 16 bit system directory, the Windows directory, the current directory, and at last the PATH directories.
+
+The dependencies of a known DLL are also taken from the known DLLs directory, and an object whose imports were bound at link time is printed with the 'bound' attribute.
 
 Since the recursive listing of a system binary expands to most of the system directory, only the direct dependencies are printed by default. The tree can be pruned with:
 

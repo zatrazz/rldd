@@ -26,6 +26,8 @@ All notable changes to this project will be documented in this file.
 - PE: the dependent assemblies of the embedded `RT_MANIFEST` resource are
   resolved against the WinSxS store, which is searched before the loaded
   module list (so the same name may be loaded from more than one assembly).
+- PE: the `.local` DLL redirection and the `bound` attribute for the imports
+  bound at link time.
 - The CI workflow also builds on Windows.
 
 ### Changed

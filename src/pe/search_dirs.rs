@@ -33,7 +33,7 @@ pub fn system_dir(windows: &str, is_32bit: bool) -> String {
     format!("{windows}{MAIN_SEPARATOR}{name}")
 }
 
-fn push(dirs: &mut SearchDirs, entry: &str, mode: DepMode) {
+pub fn add(dirs: &mut SearchDirs, entry: &str, mode: DepMode) {
     let mut probe = SearchPathVec::new();
     probe.add_path(entry);
     if let Some(path) = probe.pop() {
@@ -63,10 +63,10 @@ pub fn build(
     let mut dirs = SearchDirs::new();
 
     if let Some(application) = application {
-        push(&mut dirs, application, DepMode::Application);
+        add(&mut dirs, application, DepMode::Application);
     }
     for path in user {
-        push(&mut dirs, &path.path, DepMode::LdLibraryPath);
+        add(&mut dirs, &path.path, DepMode::LdLibraryPath);
     }
 
     let current = std::env::current_dir()
@@ -74,32 +74,32 @@ pub fn build(
         .map(|path| path.to_string_lossy().into_owned());
     if !safe_search {
         if let Some(current) = &current {
-            push(&mut dirs, current, DepMode::CurrentDir);
+            add(&mut dirs, current, DepMode::CurrentDir);
         }
     }
 
-    push(
+    add(
         &mut dirs,
         &system_dir(windows, is_32bit),
         DepMode::SystemDirs,
     );
-    push(
+    add(
         &mut dirs,
         &format!("{windows}{MAIN_SEPARATOR}System"),
         DepMode::SystemDirs,
     );
-    push(&mut dirs, windows, DepMode::WindowsDir);
+    add(&mut dirs, windows, DepMode::WindowsDir);
 
     if safe_search {
         if let Some(current) = &current {
-            push(&mut dirs, current, DepMode::CurrentDir);
+            add(&mut dirs, current, DepMode::CurrentDir);
         }
     }
 
     if let Ok(path) = std::env::var("PATH") {
         for entry in path.split(LIST_SEPARATOR) {
             if !entry.is_empty() {
-                push(&mut dirs, entry, DepMode::EnvPath);
+                add(&mut dirs, entry, DepMode::EnvPath);
             }
         }
     }
