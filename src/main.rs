@@ -17,6 +17,11 @@ mod macho;
 #[cfg(target_os = "macos")]
 use macho::*;
 
+#[cfg(windows)]
+mod pe;
+#[cfg(windows)]
+use pe::*;
+
 fn print_deps(p: &Printer, deps: &DepTree) {
     let bin = deps.arena.first().unwrap();
     p.print_executable(&bin.val.path, &bin.val.name);
@@ -53,6 +58,7 @@ fn print_deps_children(p: &Printer, deps: &DepTree, children: &[usize], deptrace
         } else if dep.val.found {
             p.print_already_found(
                 &dep.val.name,
+                dep.val.alias.as_deref(),
                 dep.val.path.as_ref().unwrap(),
                 &mode,
                 deptrace,
@@ -60,6 +66,7 @@ fn print_deps_children(p: &Printer, deps: &DepTree, children: &[usize], deptrace
         } else {
             p.print_dependency(
                 &dep.val.name,
+                dep.val.alias.as_deref(),
                 dep.val.path.as_ref().unwrap(),
                 &mode,
                 deptrace,
@@ -88,9 +95,21 @@ struct Options {
 
     /// limit the dependency tree to the given number of levels, with 0
     /// meaning no limit..
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     #[argh(option, default = "1")]
     depth: usize,
+
+    /// assume the directories are set with SetDllDirectory (semicolon
+    /// separated).
+    #[cfg(windows)]
+    #[argh(option, default = "\"\".to_string()")]
+    library_path: String,
+
+    /// assume the SafeDllSearchMode is disabled, which searches the current
+    /// directory before the system ones.
+    #[cfg(windows)]
+    #[argh(switch)]
+    no_safe_search: bool,
 
     /// assume the DYLD_LIBRARY_PATH is set.
     #[cfg(target_os = "macos")]
@@ -120,6 +139,12 @@ struct Options {
     /// skip dependencies whose load path starts with the prefix (may be
     /// used multiple times).
     #[cfg(target_os = "macos")]
+    #[argh(option)]
+    ignore_prefix: Vec<String>,
+
+    /// skip dependencies whose resolved path starts with the prefix (may be
+    /// used multiple times).
+    #[cfg(windows)]
     #[argh(option)]
     ignore_prefix: Vec<String>,
 
@@ -157,7 +182,7 @@ struct Options {
     #[argh(switch, short = 'v')]
     verbose: bool,
 
-    /// show the resolved path instead of the library SONAME.
+    /// show the resolved path instead of the library name.
     #[argh(switch, short = 'p')]
     path: bool,
 
@@ -204,7 +229,11 @@ fn main() {
 
     #[cfg(all(target_family = "unix", not(target_os = "macos")))]
     let ld_library_path = search_path::from_string(&opts.library_path, &[':']);
+    #[cfg(unix)]
     let ld_preload = search_path::from_preload(&opts.preload);
+    #[cfg(windows)]
+    let dll_directory =
+        search_path::from_string(&opts.library_path, &[search_path::LIST_SEPARATOR]);
 
     #[cfg(target_os = "macos")]
     let dyld_env = macho::DyldEnv {
@@ -225,6 +254,8 @@ fn main() {
             std::process::exit(1);
         }
     };
+    #[cfg(windows)]
+    let mut ctx = create_context(!opts.no_safe_search);
 
     if opts.args.is_empty() {
         eprintln!(
@@ -253,6 +284,16 @@ fn main() {
             &mut ctx,
             &ld_preload,
             &dyld_env,
+            opts.all,
+            opts.verbose,
+            opts.depth,
+            &opts.ignore_prefix,
+            arg.as_str(),
+        );
+        #[cfg(windows)]
+        let resolved = resolve_binary(
+            &mut ctx,
+            &dll_directory,
             opts.all,
             opts.verbose,
             opts.depth,

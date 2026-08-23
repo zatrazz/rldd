@@ -87,7 +87,14 @@ impl Printer {
         ok!(writer.print(&buffer));
     }
 
-    fn print_entry(&self, dtneeded: &String, path: &String, mode: &str, found: bool) {
+    fn print_entry(
+        &self,
+        dtneeded: &String,
+        alias: Option<&str>,
+        path: &String,
+        mode: &str,
+        found: bool,
+    ) {
         let writer = BufferWriter::stdout(ColorChoice::Always);
         let mut buffer = writer.buffer();
 
@@ -96,6 +103,11 @@ impl Printer {
             color.set_fg(Some(termcolor::Color::Cyan));
         } else {
             color.set_fg(Some(termcolor::Color::Magenta));
+        }
+
+        // The recorded name, when the resolved file differs from it.
+        if let Some(alias) = alias {
+            self.write_colorized(&mut buffer, &color, format!("{alias} -> "));
         }
 
         if self.pp {
@@ -124,14 +136,14 @@ impl Printer {
         print!("\\_ ");
     }
 
-    fn print_ldd(&self, dtneeded: &String, path: &String) {
+    fn print_ldd(&self, dtneeded: &String, alias: Option<&str>, path: &String) {
         let writer = BufferWriter::stdout(ColorChoice::Always);
         let mut buffer = writer.buffer();
 
         ok!(buffer.write_all(
             format!(
                 "        {} => {}{}{}\n",
-                dtneeded,
+                alias.unwrap_or(dtneeded),
                 path,
                 std::path::MAIN_SEPARATOR,
                 dtneeded
@@ -145,21 +157,23 @@ impl Printer {
     pub fn print_dependency(
         &self,
         dtneeded: &String,
+        alias: Option<&str>,
         path: &String,
         mode: &str,
         deptrace: &[bool],
     ) {
         if self.ldd {
-            self.print_ldd(dtneeded, path);
+            self.print_ldd(dtneeded, alias, path);
             return;
         }
         self.print_preamble(deptrace);
-        self.print_entry(dtneeded, path, mode, false)
+        self.print_entry(dtneeded, alias, path, mode, false)
     }
 
     pub fn print_already_found(
         &self,
         dtneeded: &String,
+        alias: Option<&str>,
         path: &String,
         mode: &str,
         deptrace: &[bool],
@@ -169,7 +183,7 @@ impl Printer {
             return;
         }
         self.print_preamble(deptrace);
-        self.print_entry(dtneeded, path, mode, true)
+        self.print_entry(dtneeded, alias, path, mode, true)
     }
 
     #[cfg(all(target_family = "unix", not(target_os = "macos")))]

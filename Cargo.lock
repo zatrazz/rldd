@@ -165,6 +165,7 @@ dependencies = [
  "raw-cpuid",
  "tempfile",
  "termcolor",
+ "windows-sys",
 ]
 
 [[package]]

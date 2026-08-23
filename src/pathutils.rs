@@ -13,3 +13,13 @@ pub fn get_name<P: AsRef<Path>>(path: &P) -> String {
         .unwrap_or("")
         .to_string()
 }
+
+// Strip the verbatim prefix added by fs::canonicalize (for instance,
+// \\?\C:\Windows\System32 -> C:\Windows\System32).
+#[cfg(windows)]
+pub fn strip_verbatim(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
+}

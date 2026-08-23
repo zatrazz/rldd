@@ -1,8 +1,8 @@
 # rldd
 
-The rldd tool resolves and prints the binary or shared library dependencies with different visualization options.  In opposite to the Linux ldd tool, it does not invoke the system loader but instead parses the loading information directly from either ELF or Mach-O files, along with any required system files (such as loader cache or extra configuration files).
+The rldd tool resolves and prints the binary or shared library dependencies with different visualization options.  In opposite to the Linux ldd tool, it does not invoke the system loader but instead parses the loading information directly from either ELF, Mach-O, or PE files, along with any required system files (such as loader cache or extra configuration files).
 
-Currently it supports Linux (glibc, android, and musl), FreeBSD, OpenBSD, NetBSD, Illumos (no support for crle/ld.config, trusted directories, or any environment variable), and macOS.
+Currently it supports Linux (glibc, android, and musl), FreeBSD, OpenBSD, NetBSD, Illumos (no support for crle/ld.config, trusted directories, or any environment variable), macOS, and Windows.
 
 ![screenshot](doc/screenshot.png)
 
@@ -35,6 +35,28 @@ The '--preload' option mimics DYLD_INSERT_LIBRARIES.  The other dyld environment
 - '--image-suffix SUFFIX' (DYLD_IMAGE_SUFFIX) tries each candidate path with the suffix first (inserted before the .dylib extension, or appended otherwise).
 
 The '-v' option also prints the object information from the load commands: the install name (like otool -D), the platform (dyld_info -platform), the UUID (dyld_info -uuid), and the dependencies compatibility and current versions (otool -L).
+
+## Windows
+
+On Windows the dependencies are tracked the way 'dumpbin /dependents' and the Dependencies tool, where the DLL names recorded on the import and the delay load import directories are resolved  are resolved following the [documented search order for unpackaged applications](https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order#search-order-for-unpackaged-apps). The delay load dependencies are printed with the 'delay-load' attribute.
+
+The 'api-ms-*' and 'ext-ms-*' virtual names are resolved with the API set schema from 'apisetschema.dll' and printed as 'NAME -> HOST', with the module that implements them.  A set that implements nothing on the running system is reported as not found.
+
+The KnownDLLs are always resolved from the system directory, from the search order, and for 32 bit images the system directory is SysWOW64 instead of System32.  A candidate built for another machine is skipped and the search continues.
+
+The search order is the application directory, the '--library-path' directories, the system directory, the 16 bit system directory, the Windows directory, the current directory, and at last the PATH directories.
+
+Since the recursive listing of a system binary expands to most of the system directory, only the direct dependencies are printed by default. The tree can be pruned with:
+
+- '--depth N' limits the dependency tree to N levels, with 0 meaning no limit (the default is 1, the direct dependencies).
+- '--ignore-prefix PREFIX' skips dependencies whose resolved path starts with the prefix (for instance '--ignore-prefix C:\Windows' to hide the system libraries). The option may be used multiple times and the comparison ignores case.
+
+The remaining loader inputs are mimicked with options:
+
+- '--library-path LIST' searches the semicolon-separated directories right after the application one, as SetDllDirectory and AddDllDirectory.
+- '--no-safe-search' searches the current directory right after the application one, as the SafeDllSearchMode registry value set to 0.
+
+The '-v' option also prints the object information: the machine, the subsystem, the image base, the API set schema and KnownDLLs status, and the search path list used for the resolution.
 
 ## Relocation checks (Linux only)
 

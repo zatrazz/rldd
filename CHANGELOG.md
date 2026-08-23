@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Initial Windows support.  The dependencies recorded on the PE import and
+  delay load import directories are resolved following the documented search
+  order for unpackaged applications, along with the API set schema from
+  `apisetschema.dll`, the `KnownDLLs` registry key, and the SysWOW64
+  redirection for 32 bit images. A candidate built for another machine is
+  skipped and the search continues, like the loader does.
+- PE: new `--depth N` and `--ignore-prefix PREFIX` options to prune the
+  dependency tree, `--library-path LIST` to mimic `SetDllDirectory`, and
+  `--no-safe-search` to mimic `SafeDllSearchMode` disabled.
+- PE: the `-v` option prints the object information (machine, subsystem,
+  image base, API set schema, and known DLLs) along with the search path
+  list used for the resolution.
+- The CI workflow also builds on Windows.
+
+### Changed
+
+- A dependency whose resolved file differs from the recorded name is printed
+  as `NAME -> FILE`, which on Windows shows the module that implements an API
+  set.
+- The `raw-cpuid` dependency is only used by the ELF backend, and is no
+  longer pulled in on the other systems.
+
 ## [0.4.0] - 2026-08-17
 
 This release contains a major rework of the Mach-O dependency resolution,

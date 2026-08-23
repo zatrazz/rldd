@@ -11,6 +11,9 @@ pub struct DepNode {
     pub name: String,
     pub mode: DepMode,
     pub found: bool,
+    // The recorded dependency name, when it differs from the resolved file
+    // name (an API set on Windows).
+    pub alias: Option<String>,
     // The dependency attributes from the load command (Mach-O only), such as
     // weak, re-export, upward, or delay-init.
     pub attrs: Vec<&'static str>,
@@ -23,6 +26,7 @@ pub struct DepNode {
 }
 
 impl arenatree::EqualString for DepNode {
+    #[cfg(unix)]
     fn eqstr(&self, other: &str) -> bool {
         // Dependencies resolved through a search path list are recorded with
         // the location they were found at, so they are matched by the leaf
@@ -48,6 +52,11 @@ impl arenatree::EqualString for DepNode {
                 )
         }
     }
+
+    #[cfg(windows)]
+    fn eqstr(&self, other: &str) -> bool {
+        pathutils::get_name(&Path::new(other)).eq_ignore_ascii_case(&self.name)
+    }
 }
 
 // The resolved binary dependency tree.
@@ -60,13 +69,23 @@ pub enum DepMode {
     Preload,                 // Preload library.
     Direct,                  // DT_SONAME refers to an aboslute path.
     DtRpath,                 // DT_RPATH.
-    LdLibraryPath,           // LD_LIBRARY_PATH or DYLD_LIBRARY_PATH.
+    LdLibraryPath,           // LD_LIBRARY_PATH, DYLD_LIBRARY_PATH, or SetDllDirectory.
     LdFrameworkPath,         // DYLD_FRAMEWORK_PATH (Mach-O only).
     LdFallbackLibraryPath,   // DYLD_FALLBACK_LIBRARY_PATH (Mach-O only).
     LdFallbackFrameworkPath, // DYLD_FALLBACK_FRAMEWORK_PATH (Mach-O only).
     DtRunpath,               // DT_RUNPATH.
-    LdCache,                 // Loader cache (ld.so.cache, etc.).
+    LdCache,                 // Loader cache (ld.so.cache, KnownDLLs, etc.).
     SystemDirs,              // Default system directory (i.e '/lib64').
+    #[cfg(windows)]
+    ApiSet, // API set schema redirectio.
+    #[cfg(windows)]
+    Application, // The application directory.
+    #[cfg(windows)]
+    WindowsDir, // The Windows directory.
+    #[cfg(windows)]
+    CurrentDir, // The current directory.
+    #[cfg(windows)]
+    EnvPath, // The PATH environment variable.
     Executable,              // The root executable/library.
     #[default]
     NotFound,
@@ -80,7 +99,9 @@ impl fmt::Display for DepMode {
             DepMode::DtRpath => write!(f, "[rpath]"),
             #[cfg(target_os = "macos")]
             DepMode::LdLibraryPath => write!(f, "[DYLD_LIBRARY_PATH]"),
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(windows)]
+            DepMode::LdLibraryPath => write!(f, "[SetDllDirectory]"),
+            #[cfg(all(unix, not(target_os = "macos")))]
             DepMode::LdLibraryPath => write!(f, "[LD_LIBRARY_PATH]"),
             DepMode::LdFrameworkPath => write!(f, "[DYLD_FRAMEWORK_PATH]"),
             DepMode::LdFallbackLibraryPath => write!(f, "[DYLD_FALLBACK_LIBRARY_PATH]"),
@@ -100,6 +121,21 @@ impl fmt::Display for DepMode {
             DepMode::LdCache => write!(f, "[unknown]"),
             #[cfg(target_os = "macos")]
             DepMode::LdCache => write!(f, "[dyld cache]"),
+            #[cfg(windows)]
+            DepMode::LdCache => write!(f, "[KnownDLLs]"),
+            #[cfg(windows)]
+            DepMode::ApiSet => write!(f, "[api set]"),
+            #[cfg(windows)]
+            DepMode::Application => write!(f, "[application directory]"),
+            #[cfg(windows)]
+            DepMode::WindowsDir => write!(f, "[windows directory]"),
+            #[cfg(windows)]
+            DepMode::CurrentDir => write!(f, "[current directory]"),
+            #[cfg(windows)]
+            DepMode::EnvPath => write!(f, "[PATH]"),
+            #[cfg(windows)]
+            DepMode::SystemDirs => write!(f, "[system directory]"),
+            #[cfg(not(windows))]
             DepMode::SystemDirs => write!(f, "[system default paths]"),
             DepMode::Executable => write!(f, ""),
             DepMode::NotFound => write!(f, "[not found]"),

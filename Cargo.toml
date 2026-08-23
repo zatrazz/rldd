@@ -10,7 +10,7 @@ A program to print shared object dependencies
 repository = "https://github.com/zatrazz/rldd/"
 homepage = "https://github.com/zatrazz/rldd/"
 readme = "README.md"
-keywords = ["elf", "mach-o", "cli", "linux", ]
+keywords = ["elf", "mach-o", "pe", "cli", ]
 categories = ["command-line-utilities"]
 exclude = [
     "TODO.md",
@@ -28,8 +28,17 @@ argh = "0.1.19"
 [target.'cfg(any(target_os = "macos", target_os = "android"))'.dependencies]
 libc = "0.2.138"
 
-[target.'cfg(any(target_arch = "x86", target_arch = "x86_64"))'.dependencies]
+# Only used by the ELF glibc-hwcap support.
+[target.'cfg(all(target_family = "unix", any(target_arch = "x86", target_arch = "x86_64")))'.dependencies]
 raw-cpuid = "11.6.0"
+
+# The KnownDLLs registry key and the Windows directory.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+] }
 
 [target.'cfg(target_os = "freebsd")'.dev-dependencies]
 tempfile = "3.3.0"

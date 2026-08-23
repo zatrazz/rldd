@@ -6,8 +6,20 @@
 
 ### TODO
 
-
 ## MachO
+
+## PE
+
+### TODO
+
+- [ ] Follow the export forwarders (a 'foo.bar' forwarded export), which pull in a dependency that no import directory records.
+- [ ] Check the imported names against the export table of the resolved module and report the missing ones (the PE equivalent of the -d/-r relocation checks).
+- [ ] Side-by-side support: the embedded RT_MANIFEST resource, the external '.manifest' files, and the WinSxS assembly resolution.
+- [ ] DLL redirection with the '.local' file.
+- [ ] The package dependency graph of a packaged application.
+- [ ] Treat the dependencies of a known DLL as known DLLs as well.
+- [ ] Parse the bound import directory and report a 'bound' attribute.
+- [ ] API set schema version 4 (Windows 8.1), only version 6 is parsed.
 
 
 ## Done
