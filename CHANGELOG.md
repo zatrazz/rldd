@@ -19,7 +19,8 @@ All notable changes to this project will be documented in this file.
   image base, API set schema, and known DLLs) along with the search path
   list used for the resolution.
 - PE: the export forwarders are followed, so a module pulled in only by a
-  forwarded export is listed with the `forwarded` attribute.
+  forwarded export is listed with the `forwarded` attribute, including for
+  the modules already resolved through another importer.
 - PE: new `-d` and `-r` options, which check that every imported symbol is
   exported by the module it is imported from.
 - PE: the dependent assemblies of the manifest, either the embedded

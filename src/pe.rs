@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::io::Error;
 use std::path::Path;
@@ -309,6 +309,11 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
     let root_name = deptree.arena[root_depp].val.name.clone();
     let root_sxs = assembly_dirs(config, &config.redirect, &root.assemblies);
 
+    // The objects already parsed, so a module shared by several importers is
+    // only read once, and the forwarders already queued for them.
+    let mut cache = HashMap::<String, PeInfo>::new();
+    let mut forwarded = HashSet::<(usize, String)>::new();
+
     let mut queue = VecDeque::new();
     for dep in &root.deps {
         queue.push_back(WorkItem {
@@ -351,12 +356,13 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
             None => name.clone(),
         };
 
-        if let Some(entry) = deptree.get(&lookup) {
+        if let Some(index) = deptree.index(&lookup) {
+            let entry = deptree.arena[index].val.clone();
             if config.all {
                 deptree.addnode(
                     DepNode {
-                        path: entry.path,
-                        name: entry.name,
+                        path: entry.path.clone(),
+                        name: entry.name.clone(),
                         mode: entry.mode,
                         found: true,
                         alias,
@@ -366,6 +372,35 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
                     },
                     item.depp,
                 );
+            }
+
+            // The module was resolved through another object, so the
+            // forwarders of the symbols only this one imports are still
+            // pending; they belong to the module already on the tree.
+            if config.depth != 0 && item.level >= config.depth {
+                continue;
+            }
+            let Some(exports) = module_exports(&entry, &mut cache) else {
+                continue;
+            };
+            for module in forwarded_modules(&item.dep.imports, exports) {
+                if !forwarded.insert((index, module.to_lowercase())) {
+                    continue;
+                }
+                queue.push_back(WorkItem {
+                    dep: PeDep {
+                        name: module,
+                        attrs: vec!["forwarded"],
+                        imports: Vec::new(),
+                    },
+                    importing: entry.name.clone(),
+                    redirect: item.redirect.clone(),
+                    // The forwarded module is a dependency of the module
+                    // already on the tree, not of the current importer.
+                    known: entry.mode == DepMode::LdCache,
+                    depp: index,
+                    level: item.level + 1,
+                });
             }
             continue;
         }
@@ -430,6 +465,20 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
             });
         }
     }
+}
+
+// The parsed object of a module already on the tree.
+fn module_exports<'a>(
+    entry: &DepNode,
+    cache: &'a mut HashMap<String, PeInfo>,
+) -> Option<&'a PeInfo> {
+    let path = entry.path.as_ref()?;
+    let resolved = Path::new(path).join(&entry.name);
+    let key = resolved.to_string_lossy().to_lowercase();
+    if !cache.contains_key(&key) {
+        cache.insert(key.clone(), open_pe_file(&resolved).ok()?);
+    }
+    cache.get(&key)
 }
 
 // The modules the imported symbols are forwarded to, skipping the ones the

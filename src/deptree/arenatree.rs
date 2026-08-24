@@ -68,6 +68,10 @@ where
         None
     }
 
+    pub fn index(&self, val: &str) -> Option<usize> {
+        self.arena.iter().position(|node| node.val.eqstr(val))
+    }
+
     #[allow(dead_code)]
     pub fn contains(&self, val: &str) -> bool {
         for node in &self.arena {

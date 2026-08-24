@@ -12,7 +12,6 @@
 
 ### TODO
 
-- [ ] The export forwarders are only followed for the symbols the first importer of a module records, since the resolution stops at the first time a module is added to the tree.
 - [ ] Side-by-side: read the publisher policy, the highest installed build of the requested major and minor version is used instead.
 - [ ] The package dependency graph of a packaged application.
 - [ ] API set schema version 4 (Windows 8.1), only version 6 is parsed.
@@ -20,7 +19,8 @@
 
 ## Done
 
-- [x] PE: Follow the export forwarders.
+- [x] PE: Follow the export forwarders, including for the modules already
+      resolved through another importer.
 - [x] PE: Resolve the side-by-side assemblies of the embedded and the
       external manifests.
 - [x] PE: Handle the '.local' DLL redirection and the known DLL dependencies.
