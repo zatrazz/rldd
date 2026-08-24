@@ -38,11 +38,11 @@ The '-v' option also prints the object information from the load commands: the i
 
 ## Windows
 
-On Windows the dependencies are tracked the way 'dumpbin /dependents' and the Dependencies tool, where the DLL names recorded on the import and the delay load import directories are resolved  are resolved following the [documented search order for unpackaged applications](https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order#search-order-for-unpackaged-apps). The delay load dependencies are printed with the 'delay-load' attribute.
+On Windows the dependencies are tracked the way 'dumpbin /dependents' and the Dependencies tool, where the DLL names recorded on the import and the delay load import directories are resolved following the [documented search order for unpackaged applications](https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order#search-order-for-unpackaged-apps).  The delay load dependencies are printed with the 'delay-load' attribute, and the ones whose imports were bound at link time with the 'bound' one.
 
 The 'api-ms-*' and 'ext-ms-*' virtual names are resolved with the API set schema from 'apisetschema.dll' and printed as 'NAME -> HOST', with the module that implements them.  A set that implements nothing on the running system is reported as not found.
 
-The KnownDLLs are always resolved from the system directory, from the search order, and for 32 bit images the system directory is SysWOW64 instead of System32.  A candidate built for another machine is skipped and the search continues.
+The KnownDLLs are always resolved from the system directory, whatever the search order says, and so are their own dependencies.  For 32 bit images the system directory is SysWOW64 instead of System32, and a candidate built for another machine is skipped so the search continues, also like the loader does.
 
 An imported symbol that resolves to a forwarded export pulls in the module it points at, which no import directory records.  Those dependencies are printed with the 'forwarded' attribute.
 
@@ -52,9 +52,7 @@ When a '<object>.local' directory exists the dependencies are taken from it, and
 
 The search order is the application directory, the '--library-path' directories, the system directory, the 16 bit system directory, the Windows directory, the current directory, and at last the PATH directories.
 
-The dependencies of a known DLL are also taken from the known DLLs directory, and an object whose imports were bound at link time is printed with the 'bound' attribute.
-
-Since the recursive listing of a system binary expands to most of the system directory, only the direct dependencies are printed by default. The tree can be pruned with:
+Since the recursive listing of a system binary expands to most of the system directory, only the direct dependencies are printed by default, and the tree can be pruned with:
 
 - '--depth N' limits the dependency tree to N levels, with 0 meaning no limit (the default is 1, the direct dependencies).
 - '--ignore-prefix PREFIX' skips dependencies whose resolved path starts with the prefix (for instance '--ignore-prefix C:\Windows' to hide the system libraries). The option may be used multiple times and the comparison ignores case.
@@ -74,7 +72,6 @@ The PE equivalent of the ELF relocation processing is to check that every import
 - '-r' also checks the delay load imports, which the loader only binds on the first call.
 
 There is no '-u' option: an import directory only records a module when a symbol is imported from it, so a PE object has no unused dependency to report.
-
 
 ## Relocation checks (Linux only)
 

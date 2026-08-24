@@ -68,6 +68,9 @@ where
         None
     }
 
+    // Only used by the PE backend, to attach the forwarded dependencies of a
+    // module already on the tree.
+    #[allow(dead_code)]
     pub fn index(&self, val: &str) -> Option<usize> {
         self.arena.iter().position(|node| node.val.eqstr(val))
     }
