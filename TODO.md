@@ -12,7 +12,7 @@
 
 ### TODO
 
-- [ ] Side-by-side: read the publisher policy, the highest installed build of the requested major and minor version is used instead.
+- [ ] Side-by-side: read the Win32 publisher policy.  The highest installed build of the requested major and minor version is used instead, and a Windows 11 install carries no Win32 policy assembly to check it against (the '*_policy.*' ones on WinSxS are managed assemblies).
 - [ ] The package dependency graph of a packaged application.
 - [ ] API set schema version 4 (Windows 8.1), only version 6 is parsed.
 

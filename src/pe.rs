@@ -877,3 +877,61 @@ fn forward_module(module: &[u8]) -> String {
         false => format!("{module}.dll"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolve(depth: usize, ignore_prefix: &[String]) -> DepTree {
+        let exe = std::env::current_exe().unwrap();
+        let mut ctx = create_context(true);
+        resolve_binary(
+            &mut ctx,
+            &search_path::SearchPathVec::new(),
+            false,
+            false,
+            depth,
+            ignore_prefix,
+            exe.to_str().unwrap(),
+        )
+        .unwrap()
+    }
+
+    // Resolving the test binary exercises the whole pipeline: the import
+    // directory, the api set schema, the known DLLs, and the search order.
+    #[test]
+    fn resolve_test_binary() {
+        let deptree = resolve(1, &[]);
+
+        assert!(deptree.arena.len() > 1, "no dependency was resolved");
+        for node in &deptree.arena {
+            assert_ne!(node.val.mode, DepMode::NotFound, "{}", node.val.name);
+            assert!(node.val.path.is_some(), "{} has no path", node.val.name);
+        }
+
+        // An object that runs resolves every dependency from the system.
+        let system = search_dirs::system_dir(&search_dirs::windows_dir(), false).to_lowercase();
+        assert!(
+            deptree.arena[1..].iter().any(|node| node
+                .val
+                .path
+                .as_ref()
+                .is_some_and(|path| path.to_lowercase() == system)),
+            "no dependency came from the system directory"
+        );
+    }
+
+    #[test]
+    fn depth_limits_the_tree() {
+        let direct = resolve(1, &[]).arena.len();
+        assert!(resolve(2, &[]).arena.len() >= direct);
+        assert!(resolve(0, &[]).arena.len() >= direct);
+    }
+
+    #[test]
+    fn ignore_prefix_prunes_the_tree() {
+        let windows = search_dirs::windows_dir();
+        let pruned = resolve(1, &[windows]);
+        assert!(pruned.arena.len() < resolve(1, &[]).arena.len());
+    }
+}
