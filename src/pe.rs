@@ -934,4 +934,167 @@ mod tests {
         let pruned = resolve(1, &[windows]);
         assert!(pruned.arena.len() < resolve(1, &[]).arena.len());
     }
+
+    // Every symbol the test binary imports must be exported by the module it
+    // is imported from, delay load ones included.
+    #[test]
+    fn imports_are_resolved() {
+        let exe = std::env::current_exe().unwrap();
+        let mut ctx = create_context(true);
+        let deptree = resolve_binary(
+            &mut ctx,
+            &search_path::SearchPathVec::new(),
+            false,
+            false,
+            1,
+            &[],
+            exe.to_str().unwrap(),
+        )
+        .unwrap();
+
+        let undefined: Vec<String> = check_imports(&ctx, &deptree, true)
+            .iter()
+            .map(|undef| format!("{} from {} ({})", undef.name, undef.from, undef.object))
+            .collect();
+        assert!(undefined.is_empty(), "{undefined:?}");
+    }
+
+    #[test]
+    fn parse_the_test_binary() {
+        let pei = open_pe_file(&std::env::current_exe().unwrap()).unwrap();
+        assert!(!pei.is_dll);
+        assert_ne!(pei.machine, pe::IMAGE_FILE_MACHINE_UNKNOWN);
+        assert!(!pei.deps.is_empty());
+        assert!(pei.deps.iter().all(|dep| !dep.name.is_empty()));
+        assert!(pei.deps.iter().any(|dep| !dep.imports.is_empty()));
+    }
+
+    #[test]
+    fn parse_a_system_library() {
+        let system = search_dirs::system_dir(&search_dirs::windows_dir(), false);
+        let pei = open_pe_file(&Path::new(&system).join("kernel32.dll")).unwrap();
+        assert!(pei.is_dll);
+        assert!(!pei.exports.names.is_empty());
+        // A good part of the kernel32 exports is forwarded to ntdll.
+        assert!(pei.exports.names.values().any(|module| module.is_some()));
+    }
+
+    #[test]
+    fn known_dlls_from_the_registry() {
+        let known = knowndlls::load();
+        assert!(known.contains("KERNEL32.dll"));
+        assert!(!known.contains("rldd-not-a-known.dll"));
+    }
+
+    #[test]
+    fn api_set_schema_from_the_system() {
+        let system = search_dirs::system_dir(&search_dirs::windows_dir(), false);
+        let schema = apiset::load(&system);
+        assert!(!schema.is_empty());
+        assert_eq!(schema.version(), 6);
+        // A core set every supported Windows implements.
+        let host = schema.resolve("api-ms-win-core-processthreads-l1-1-0.dll", "test.exe");
+        assert!(matches!(host, Some(host) if !host.is_empty()), "{host:?}");
+    }
+
+    // The '.local' redirection points at the directory when one exists, and
+    // at the application directory when it is a plain file.
+    #[test]
+    fn dot_local_redirection() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("app.exe");
+        fs::write(&exe, b"").unwrap();
+        let application = dir.path().to_string_lossy().into_owned();
+
+        assert!(dot_local_dirs(&exe, Some(application.as_str())).is_empty());
+
+        let local = dir.path().join("app.exe.local");
+        fs::write(&local, b"").unwrap();
+        let dirs = dot_local_dirs(&exe, Some(application.as_str()));
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0].1, DepMode::DllRedirection);
+        assert!(dirs[0].0.path.eq_ignore_ascii_case(&application));
+
+        fs::remove_file(&local).unwrap();
+        fs::create_dir(&local).unwrap();
+        let dirs = dot_local_dirs(&exe, Some(application.as_str()));
+        assert_eq!(dirs.len(), 1);
+        assert!(dirs[0].0.path.to_lowercase().ends_with("app.exe.local"));
+    }
+
+    #[test]
+    fn forwarder_module_names() {
+        assert_eq!(forward_module(b"NTDLL"), "NTDLL.dll");
+        assert_eq!(forward_module(b"ntdll.dll"), "ntdll.dll");
+        assert_eq!(forward_module(b"NTDLL.DLL"), "NTDLL.DLL");
+    }
+
+    #[test]
+    fn import_display() {
+        assert_eq!(
+            ImportName::Name("HeapAlloc".to_string()).to_string(),
+            "HeapAlloc"
+        );
+        assert_eq!(ImportName::Ordinal(42).to_string(), "#42");
+    }
+
+    fn exports() -> PeExports {
+        PeExports {
+            names: HashMap::from([
+                ("Local".to_string(), None),
+                ("Forwarded".to_string(), Some("target.dll".to_string())),
+                ("Recorded".to_string(), Some("RECORDED.DLL".to_string())),
+            ]),
+            ordinals: HashMap::from([(7, None)]),
+        }
+    }
+
+    #[test]
+    fn export_lookup() {
+        let exports = exports();
+        assert!(matches!(
+            exports.lookup(&ImportName::Name("Local".to_string())),
+            ExportLookup::Local
+        ));
+        assert!(matches!(
+            exports.lookup(&ImportName::Name("Forwarded".to_string())),
+            ExportLookup::Forwarded("target.dll")
+        ));
+        assert!(matches!(
+            exports.lookup(&ImportName::Name("Missing".to_string())),
+            ExportLookup::Missing
+        ));
+        assert!(matches!(
+            exports.lookup(&ImportName::Ordinal(7)),
+            ExportLookup::Local
+        ));
+        assert!(matches!(
+            exports.lookup(&ImportName::Ordinal(8)),
+            ExportLookup::Missing
+        ));
+    }
+
+    // Only the forwarders of the imported symbols count, and the modules the
+    // import directory already records are left out.
+    #[test]
+    fn forwarded_dependencies() {
+        let info = PeInfo {
+            deps: vec![PeDep {
+                name: "recorded.dll".to_string(),
+                attrs: Vec::new(),
+                imports: Vec::new(),
+            }],
+            exports: exports(),
+            ..Default::default()
+        };
+        let imports = [
+            ImportName::Name("Local".to_string()),
+            ImportName::Name("Missing".to_string()),
+            ImportName::Name("Recorded".to_string()),
+            ImportName::Name("Forwarded".to_string()),
+            ImportName::Name("Forwarded".to_string()),
+        ];
+        assert_eq!(forwarded_modules(&imports, &info), vec!["target.dll"]);
+        assert!(forwarded_modules(&[], &info).is_empty());
+    }
 }

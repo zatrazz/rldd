@@ -40,7 +40,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_SystemInformation",
 ] }
 
-[target.'cfg(target_os = "freebsd")'.dev-dependencies]
+[target.'cfg(any(target_os = "freebsd", windows))'.dev-dependencies]
 tempfile = "3.3.0"
 
 [profile.release]

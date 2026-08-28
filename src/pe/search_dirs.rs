@@ -106,3 +106,81 @@ pub fn build(
 
     dirs
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn position(dirs: &SearchDirs, mode: DepMode) -> usize {
+        dirs.iter()
+            .position(|(_, found)| *found == mode)
+            .unwrap_or_else(|| panic!("no {mode} directory on the search order"))
+    }
+
+    #[test]
+    fn wow64_system_directory() {
+        assert!(system_dir(r"C:\Windows", false).ends_with(r"\System32"));
+        assert!(system_dir(r"C:\Windows", true).ends_with(r"\SysWOW64"));
+    }
+
+    // The application directory is searched first, then the ones set with
+    // SetDllDirectory, and the Windows directory after the system one.
+    #[test]
+    fn search_order() {
+        let windows = windows_dir();
+        let current = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let mut user = SearchPathVec::new();
+        user.add_path(&current);
+
+        let dirs = build(
+            Some(&system_dir(&windows, false)),
+            &user,
+            &windows,
+            false,
+            true,
+        );
+
+        assert_eq!(dirs[0].1, DepMode::Application);
+        assert!(position(&dirs, DepMode::LdLibraryPath) < position(&dirs, DepMode::WindowsDir));
+        assert!(position(&dirs, DepMode::WindowsDir) < position(&dirs, DepMode::EnvPath));
+    }
+
+    // The safe mode moves the current directory after the system ones.
+    #[test]
+    fn safe_search_mode() {
+        let windows = windows_dir();
+        let safe = build(None, &SearchPathVec::new(), &windows, false, true);
+        assert!(position(&safe, DepMode::SystemDirs) < position(&safe, DepMode::CurrentDir));
+
+        let unsafe_search = build(None, &SearchPathVec::new(), &windows, false, false);
+        assert!(
+            position(&unsafe_search, DepMode::CurrentDir)
+                < position(&unsafe_search, DepMode::SystemDirs)
+        );
+    }
+
+    // A directory reached twice keeps the mode it was first added with.
+    #[test]
+    fn duplicated_directories() {
+        let windows = windows_dir();
+        let dirs = build(Some(&windows), &SearchPathVec::new(), &windows, false, true);
+        assert_eq!(dirs[0].1, DepMode::Application);
+        assert!(!dirs.iter().any(|(_, mode)| *mode == DepMode::WindowsDir));
+    }
+
+    // A directory that does not exist is not searched.
+    #[test]
+    fn missing_directories() {
+        let dirs = build(
+            Some(r"C:\rldd-does-not-exist"),
+            &SearchPathVec::new(),
+            &windows_dir(),
+            false,
+            true,
+        );
+        assert!(!dirs.iter().any(|(_, mode)| *mode == DepMode::Application));
+    }
+}
