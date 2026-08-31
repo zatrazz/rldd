@@ -137,15 +137,12 @@ mod tests {
 
     #[test]
     fn check_is_musl() {
-        assert_eq!(is_musl(&None), false);
-        assert_eq!(is_musl(&Some("ld-linux-aarch64.so.1".to_string())), false);
-        assert_eq!(is_musl(&Some("ld-musl-aarch64.so".to_string())), false);
-        assert_eq!(is_musl(&Some("ld-musl-aarch64.so.1".to_string())), true);
-        assert_eq!(is_musl(&Some("ld-musl-aarch64_be.so.1".to_string())), true);
-        assert_eq!(
-            is_musl(&Some("/lib/ld-musl-aarch64.so.1".to_string())),
-            true
-        );
-        assert_eq!(is_musl(&Some("/lib/ld-musl-x86_64.so.1".to_string())), true);
+        assert!(!is_musl(&None));
+        assert!(!is_musl(&Some("ld-linux-aarch64.so.1".to_string())));
+        assert!(!is_musl(&Some("ld-musl-aarch64.so".to_string())));
+        assert!(is_musl(&Some("ld-musl-aarch64.so.1".to_string())));
+        assert!(is_musl(&Some("ld-musl-aarch64_be.so.1".to_string())));
+        assert!(is_musl(&Some("/lib/ld-musl-aarch64.so.1".to_string())));
+        assert!(is_musl(&Some("/lib/ld-musl-x86_64.so.1".to_string())));
     }
 }
