@@ -6,6 +6,8 @@ use std::cell::OnceCell;
 use std::fs;
 use std::path::MAIN_SEPARATOR;
 
+use object::pe;
+
 // The identity of a dependent assembly, as recorded on the manifest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Assembly {
@@ -66,14 +68,21 @@ impl WinSxs {
         self.dirs().len()
     }
 
-    // The directory of the highest version of ASSEMBLY.  The manifest records
-    // the version the object was built against and the publisher policy
-    // redirects it to the installed build. So only the major and the minor
-    // are matched.
-    pub fn resolve(&self, assembly: &Assembly, is_32bit: bool) -> Option<String> {
+    // The directory of the highest version of ASSEMBLY for an object built
+    // for MACHINE.  The manifest records the version the object was built
+    // against and the publisher policy redirects it to the installed build.
+    // So only the major and the minor are matched.
+    pub fn resolve(&self, assembly: &Assembly, machine: pe::Machine) -> Option<String> {
+        arch_names(&assembly.arch, machine)
+            .iter()
+            .find_map(|arch| self.best_build(assembly, arch))
+            .map(|dir| format!("{}{MAIN_SEPARATOR}{dir}", self.root))
+    }
+
+    fn best_build(&self, assembly: &Assembly, arch: &str) -> Option<&String> {
         let prefix = format!(
             "{}_{}_{}_",
-            arch_name(&assembly.arch, is_32bit),
+            arch,
             assembly.name.to_lowercase(),
             assembly.token.to_lowercase()
         );
@@ -100,27 +109,41 @@ impl WinSxs {
             }
         }
 
-        best.map(|(_, dir)| format!("{}{MAIN_SEPARATOR}{dir}", self.root))
+        best.map(|(_, dir)| dir)
     }
 }
 
-// A manifest may record the architecture and the language as a wildcard,
-// which the loader matches against the process ones.
-fn arch_name(arch: &str, is_32bit: bool) -> String {
-    match arch {
-        "" | "*" => match is_32bit {
-            true => "x86".to_string(),
-            false => host_arch().to_string(),
-        },
-        arch => arch.to_lowercase(),
+// The names the assembly directories are prefixed with, in the order they are
+// searched.  A manifest may record the architecture as a wildcard, which the
+// loader matches against the one of the process.
+fn arch_names(arch: &str, machine: pe::Machine) -> Vec<String> {
+    let mut names = match arch {
+        "" | "*" => vec![image_arch(machine).to_string()],
+        arch => vec![arch.to_lowercase()],
+    };
+    // A Windows on ARM store holds no amd64 assembly, and the arm64 ones are
+    // ARM64X images (the loader loads asemulated x86_64 object).
+    if names[0] == "amd64" {
+        names.push("arm64".to_string());
     }
+    names
 }
 
-fn host_arch() -> &'static str {
-    if cfg!(target_arch = "aarch64") {
-        "arm64"
-    } else {
-        "amd64"
+// The store architecture of an object, which is the one of the process the
+// loader matches a wildcard against.
+fn image_arch(machine: pe::Machine) -> &'static str {
+    match machine {
+        pe::IMAGE_FILE_MACHINE_I386 => "x86",
+        pe::IMAGE_FILE_MACHINE_AMD64 => "amd64",
+        pe::IMAGE_FILE_MACHINE_ARM64
+        | pe::IMAGE_FILE_MACHINE_ARM64EC
+        | pe::IMAGE_FILE_MACHINE_ARM64X => "arm64",
+        pe::IMAGE_FILE_MACHINE_ARM
+        | pe::IMAGE_FILE_MACHINE_ARMNT
+        | pe::IMAGE_FILE_MACHINE_THUMB => "arm",
+        pe::IMAGE_FILE_MACHINE_IA64 => "ia64",
+        // No assembly is installed for the machines the store does not name.
+        _ => "",
     }
 }
 
@@ -217,8 +240,34 @@ mod tests {
         assert_eq!(assemblies[0].name, "Microsoft.Windows.Common-Controls");
         assert_eq!(assemblies[0].version, "1.2.3.4");
         assert_eq!(assemblies[0].token, "abcdefghijklmnopq");
-        assert_eq!(arch_name(&assemblies[0].arch, false), "amd64");
+        assert_eq!(
+            arch_names(&assemblies[0].arch, pe::IMAGE_FILE_MACHINE_AMD64),
+            ["amd64", "arm64"]
+        );
         assert_eq!(language_name(&assemblies[0].language), "none");
+    }
+
+    // The wildcard architecture follows the object, not the machine rldd
+    // itself was built for.
+    #[test]
+    fn wildcard_architecture() {
+        assert_eq!(
+            arch_names("*", pe::IMAGE_FILE_MACHINE_ARM64),
+            ["arm64".to_string()]
+        );
+        assert_eq!(
+            arch_names("", pe::IMAGE_FILE_MACHINE_I386),
+            ["x86".to_string()]
+        );
+        assert_eq!(
+            arch_names("*", pe::IMAGE_FILE_MACHINE_ARM64X),
+            ["arm64".to_string()]
+        );
+        // A recorded architecture is taken as it is.
+        assert_eq!(
+            arch_names("X86", pe::IMAGE_FILE_MACHINE_ARM64),
+            ["x86".to_string()]
+        );
     }
 
     #[test]
@@ -240,26 +289,60 @@ mod tests {
         let store = WinSxs::with_dirs(
             "W",
             &[
-                "amd64_microsoft.windows.common-controls_6595b64144ccf1df_5.82.26100.8328_none_a",
-                "amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.8875_none_b",
-                "amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.8972_none_c",
-                "x86_microsoft.windows.common-controls_6595b64144ccf1df_6.0.26100.9168_none_d",
+                // Another major and minor, which the manifest does not ask for.
+                "amd64_microsoft.windows.common-controls_abcdefghijklmnopq_1.1.5.0_none_a",
+                // The build the object was linked against, and a later one.
+                "amd64_microsoft.windows.common-controls_abcdefghijklmnopq_1.2.3.4_none_b",
+                "amd64_microsoft.windows.common-controls_abcdefghijklmnopq_1.2.5.0_none_c",
+                "x86_microsoft.windows.common-controls_abcdefghijklmnopq_1.2.6.0_none_d",
             ],
         );
         let assembly = &parse_manifest(MANIFEST)[0];
 
-        let resolved = store.resolve(assembly, false).unwrap();
-        assert!(resolved.ends_with("6.0.26100.8972_none_c"), "{resolved}");
+        let resolved = store
+            .resolve(assembly, pe::IMAGE_FILE_MACHINE_AMD64)
+            .unwrap();
+        assert!(resolved.ends_with("1.2.5.0_none_c"), "{resolved}");
 
         // A 32 bit object resolves the x86 assembly instead.
-        let resolved = store.resolve(assembly, true).unwrap();
-        assert!(resolved.ends_with("6.0.26100.9168_none_d"), "{resolved}");
+        let resolved = store
+            .resolve(assembly, pe::IMAGE_FILE_MACHINE_I386)
+            .unwrap();
+        assert!(resolved.ends_with("1.2.6.0_none_d"), "{resolved}");
+    }
+
+    // A Windows on ARM store holds the arm64 assemblies only, which an
+    // emulated x86_64 object falls back to.
+    #[test]
+    fn resolve_on_windows_on_arm() {
+        let store = WinSxs::with_dirs(
+            "W",
+            &["arm64_microsoft.windows.common-controls_abcdefghijklmnopq_1.2.5.0_none_e"],
+        );
+        let assembly = &parse_manifest(MANIFEST)[0];
+
+        for machine in [
+            pe::IMAGE_FILE_MACHINE_ARM64,
+            pe::IMAGE_FILE_MACHINE_ARM64X,
+            pe::IMAGE_FILE_MACHINE_AMD64,
+        ] {
+            let resolved = store.resolve(assembly, machine);
+            assert!(
+                resolved.is_some_and(|dir| dir.ends_with("_none_e")),
+                "{machine:?}"
+            );
+        }
+        assert!(store
+            .resolve(assembly, pe::IMAGE_FILE_MACHINE_I386)
+            .is_none());
     }
 
     #[test]
     fn resolve_missing_assembly() {
         let store = WinSxs::with_dirs("W", &[]);
-        assert!(store.resolve(&parse_manifest(MANIFEST)[0], false).is_none());
+        assert!(store
+            .resolve(&parse_manifest(MANIFEST)[0], pe::IMAGE_FILE_MACHINE_AMD64)
+            .is_none());
     }
 
     #[test]

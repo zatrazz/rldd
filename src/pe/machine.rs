@@ -22,20 +22,26 @@ pub fn compatible(image: pe::Machine, machine: pe::Machine) -> bool {
     if image == machine {
         return true;
     }
-    // ARM64 images load ARM64EC and ARM64X modules, and an ARM64EC image
-    // loads both the ARM64 and the x86_64 ones.
+    // The ARM64, the ARM64EC and the ARM64X modules load on each other, and
+    // an ARM64X one also holds an x86_64 view, so it loads on an emulated
+    // x86_64 image (and an ARM64EC or an ARM64X image loads the x86_64
+    // modules back).  A plain ARM64 module does not load on an x86_64 image.
     matches!(
         (image, machine),
         (
-            pe::IMAGE_FILE_MACHINE_ARM64 | pe::IMAGE_FILE_MACHINE_ARM64EC,
+            pe::IMAGE_FILE_MACHINE_ARM64
+                | pe::IMAGE_FILE_MACHINE_ARM64EC
+                | pe::IMAGE_FILE_MACHINE_ARM64X,
             pe::IMAGE_FILE_MACHINE_ARM64
                 | pe::IMAGE_FILE_MACHINE_ARM64EC
                 | pe::IMAGE_FILE_MACHINE_ARM64X
-        ) | (pe::IMAGE_FILE_MACHINE_ARM64EC, pe::IMAGE_FILE_MACHINE_AMD64)
-            | (
-                pe::IMAGE_FILE_MACHINE_AMD64,
-                pe::IMAGE_FILE_MACHINE_ARM64EC | pe::IMAGE_FILE_MACHINE_ARM64X
-            )
+        ) | (
+            pe::IMAGE_FILE_MACHINE_ARM64EC | pe::IMAGE_FILE_MACHINE_ARM64X,
+            pe::IMAGE_FILE_MACHINE_AMD64
+        ) | (
+            pe::IMAGE_FILE_MACHINE_AMD64,
+            pe::IMAGE_FILE_MACHINE_ARM64EC | pe::IMAGE_FILE_MACHINE_ARM64X
+        )
     )
 }
 
@@ -117,6 +123,28 @@ mod tests {
         assert!(!compatible(
             pe::IMAGE_FILE_MACHINE_ARM64,
             pe::IMAGE_FILE_MACHINE_I386
+        ));
+    }
+
+    // Windows on ARM builds the system modules as ARM64X.
+    #[test]
+    fn emulated_amd64_image() {
+        assert!(compatible(
+            pe::IMAGE_FILE_MACHINE_AMD64,
+            pe::IMAGE_FILE_MACHINE_ARM64X
+        ));
+        assert!(!compatible(
+            pe::IMAGE_FILE_MACHINE_AMD64,
+            pe::IMAGE_FILE_MACHINE_ARM64
+        ));
+        // An ARM64X image is both views at once.
+        assert!(compatible(
+            pe::IMAGE_FILE_MACHINE_ARM64X,
+            pe::IMAGE_FILE_MACHINE_ARM64
+        ));
+        assert!(compatible(
+            pe::IMAGE_FILE_MACHINE_ARM64X,
+            pe::IMAGE_FILE_MACHINE_AMD64
         ));
     }
 

@@ -3,7 +3,7 @@
 
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
-use std::path::MAIN_SEPARATOR;
+use std::path::{Path, MAIN_SEPARATOR};
 
 use windows_sys::Win32::Foundation::MAX_PATH;
 use windows_sys::Win32::System::SystemInformation::GetWindowsDirectoryW;
@@ -31,6 +31,22 @@ pub fn windows_dir() -> String {
 pub fn system_dir(windows: &str, is_32bit: bool) -> String {
     let name = if is_32bit { "SysWOW64" } else { "System32" };
     format!("{windows}{MAIN_SEPARATOR}{name}")
+}
+
+// The system directories, in the order the loader takes them.  A Windows on
+// ARM host also holds SyChpe32, the CHPE (hybrid x86) build of the core
+// modules, which the x86 emulation loads in place of the plain x86 ones on
+// SysWOW64.
+pub fn system_dirs(windows: &str, is_32bit: bool) -> Vec<String> {
+    let mut dirs = Vec::new();
+    if is_32bit {
+        let chpe = format!("{windows}{MAIN_SEPARATOR}SyChpe32");
+        if Path::new(&chpe).is_dir() {
+            dirs.push(chpe);
+        }
+    }
+    dirs.push(system_dir(windows, is_32bit));
+    dirs
 }
 
 pub fn add(dirs: &mut SearchDirs, entry: &str, mode: DepMode) {
@@ -78,11 +94,9 @@ pub fn build(
         }
     }
 
-    add(
-        &mut dirs,
-        &system_dir(windows, is_32bit),
-        DepMode::SystemDirs,
-    );
+    for dir in system_dirs(windows, is_32bit) {
+        add(&mut dirs, &dir, DepMode::SystemDirs);
+    }
     add(
         &mut dirs,
         &format!("{windows}{MAIN_SEPARATOR}System"),
@@ -121,6 +135,22 @@ mod tests {
     fn wow64_system_directory() {
         assert!(system_dir(r"C:\Windows", false).ends_with(r"\System32"));
         assert!(system_dir(r"C:\Windows", true).ends_with(r"\SysWOW64"));
+    }
+
+    #[test]
+    fn chpe_system_directory() {
+        let windows = windows_dir();
+
+        // A 64 bit image only has the system directory.
+        assert_eq!(system_dirs(&windows, false), [system_dir(&windows, false)]);
+
+        let dirs = system_dirs(&windows, true);
+        assert_eq!(*dirs.last().unwrap(), system_dir(&windows, true));
+        let chpe = format!("{windows}{MAIN_SEPARATOR}SyChpe32");
+        match Path::new(&chpe).is_dir() {
+            true => assert_eq!(dirs, [chpe, system_dir(&windows, true)]),
+            false => assert_eq!(dirs.len(), 1),
+        }
     }
 
     // The application directory is searched first, then the ones set with

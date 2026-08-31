@@ -115,13 +115,13 @@ pub fn create_context(safe_search: bool) -> PeContext {
 }
 
 impl PeContext {
-    // The directory the known DLLs are resolved from.  The registry values
+    // The directories the known DLLs are resolved from.  The registry values
     // are gone on the recent Windows versions, where the loader creates the
-    // known DLLs from the system directory.
-    fn knowndll_dir(&self, is_32bit: bool) -> String {
+    // known DLLs from the system directories.
+    fn knowndll_dirs(&self, is_32bit: bool) -> Vec<String> {
         match self.knowndlls.directory(is_32bit) {
-            Some(dir) => dir.to_string(),
-            None => search_dirs::system_dir(&self.windows_dir, is_32bit),
+            Some(dir) => vec![dir.to_string()],
+            None => search_dirs::system_dirs(&self.windows_dir, is_32bit),
         }
     }
 }
@@ -235,7 +235,7 @@ fn print_object_information(
         }
     ));
     for assembly in &pei.assemblies {
-        let dir = ctx.winsxs.resolve(assembly, machine::is_32bit(pei.machine));
+        let dir = ctx.winsxs.resolve(assembly, pei.machine);
         lines.push(format!(
             "  side-by-side: {} ({})",
             assembly.name,
@@ -298,7 +298,7 @@ fn assembly_dirs(
 fn sxs_dirs(ctx: &PeContext, assemblies: &[sxs::Assembly], machine: pe::Machine) -> Vec<String> {
     assemblies
         .iter()
-        .filter_map(|assembly| ctx.winsxs.resolve(assembly, machine::is_32bit(machine)))
+        .filter_map(|assembly| ctx.winsxs.resolve(assembly, machine))
         .collect()
 }
 
@@ -656,11 +656,12 @@ fn find_dependency(
     }
 
     if known || config.ctx.knowndlls.contains(name) {
-        let dir = config.ctx.knowndll_dir(machine::is_32bit(config.machine));
-        let candidate = Path::new(&dir).join(name);
-        searched.push(candidate.to_string_lossy().into_owned());
-        if let Some(info) = try_open(config, &candidate) {
-            return Some((info, dir, DepMode::LdCache));
+        for dir in config.ctx.knowndll_dirs(machine::is_32bit(config.machine)) {
+            let candidate = Path::new(&dir).join(name);
+            searched.push(candidate.to_string_lossy().into_owned());
+            if let Some(info) = try_open(config, &candidate) {
+                return Some((info, dir, DepMode::LdCache));
+            }
         }
     }
 
@@ -717,7 +718,7 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
     let headers = file.nt_headers();
 
     let mut pei = PeInfo {
-        machine: headers.file_header().machine.get(LE),
+        machine: image_machine(&file),
         subsystem: headers.optional_header().subsystem(),
         image_base: headers.optional_header().image_base(),
         is_dll: headers.file_header().characteristics.get(LE).0 & pe::IMAGE_FILE_DLL.0 != 0,
@@ -781,6 +782,51 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
     }
 
     Ok(pei)
+}
+
+// ARM64X object records plain uMAGE_FILE_MACHINE_ARM64 on the file header, and
+// the x86_64 view it also only shows on the CHPE metadata.  Windows on ARM
+// builds System32 as ARM64X, which is what lets an emulated x86_64 image
+// resolves, so telling the hybrid objects from the plain ARM64 ones is what
+// makes the machine check select the right modules.
+fn image_machine<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> pe::Machine {
+    let machine = file.nt_headers().file_header().machine.get(LE);
+    if machine == pe::IMAGE_FILE_MACHINE_ARM64 && has_chpe_metadata(file) {
+        return pe::IMAGE_FILE_MACHINE_ARM64X;
+    }
+    machine
+}
+
+// Whether the load configuration directory points at the CHPE metadata.  The
+// directory grew over the Windows releases and its first field records how
+// much of it the object holds, so the pointer is only read when it covers it.
+// Only the 64 bit layout is read, which is the only one an ARM64 object has.
+fn has_chpe_metadata<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> bool {
+    const OFFSET: usize =
+        std::mem::offset_of!(pe::ImageLoadConfigDirectory64, chpe_metadata_pointer);
+    const END: usize = OFFSET + std::mem::size_of::<u64>();
+
+    let sections = file.section_table();
+    let Some(directory) = file
+        .data_directories()
+        .get(pe::IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG)
+    else {
+        return false;
+    };
+    let Ok(data) = directory.data(file.data(), &sections) else {
+        return false;
+    };
+    let Some(size) = data.get(..4) else {
+        return false;
+    };
+    let size = u32::from_le_bytes(size.try_into().unwrap()) as usize;
+    if size < END {
+        return false;
+    }
+    let Some(pointer) = data.get(OFFSET..END) else {
+        return false;
+    };
+    u64::from_le_bytes(pointer.try_into().unwrap()) != 0
 }
 
 // The embedded RT_MANIFEST resource, which declares the side-by-side
@@ -977,6 +1023,25 @@ mod tests {
         assert!(!pei.exports.names.is_empty());
         // A good part of the kernel32 exports is forwarded to ntdll.
         assert!(pei.exports.names.values().any(|module| module.is_some()));
+    }
+
+    // Windows on ARM builds the system modules as ARM64X, and reading the
+    // hybrid metadata is what tells them from the plain ARM64 ones.
+    // TODO: maybe change it if/when Windows does not sure ARM64X.
+    #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn system_modules_are_hybrid() {
+        let system = search_dirs::system_dir(&search_dirs::windows_dir(), false);
+        let pei = open_pe_file(&Path::new(&system).join("kernel32.dll")).unwrap();
+        assert_eq!(pei.machine, pe::IMAGE_FILE_MACHINE_ARM64X);
+        assert!(machine::compatible(
+            pe::IMAGE_FILE_MACHINE_AMD64,
+            pei.machine
+        ));
+
+        // No hybrid view on rldd itself.
+        let pei = open_pe_file(&std::env::current_exe().unwrap()).unwrap();
+        assert_eq!(pei.machine, pe::IMAGE_FILE_MACHINE_ARM64);
     }
 
     #[test]
