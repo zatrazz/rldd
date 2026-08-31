@@ -47,6 +47,10 @@ All notable changes to this project will be documented in this file.
   with the file name duplicated), and the entries are skipped for an object
   without any `DT_NEEDED` entry (which the loader reports as statically
   linked).
+- ELF (Linux): a `DT_NEEDED` entry naming the program interpreter resolves
+  to the `PT_INTERP` path, mimicking how the glibc loader matches it against
+  its own soname without any search (it was resolved through the object
+  search paths, so a `DT_RUNPATH` could redirect it).
 
 ## [0.4.0] - 2026-08-17
 

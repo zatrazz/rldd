@@ -1072,6 +1072,32 @@ fn resolve_dependencies(
             }
         }
 
+        // A dependency naming the program interpreter resolves to the already
+        // loaded loader object. The glibc loader matches the DT_NEEDED entry
+        // against its own soname without any search, so the PT_INTERP path is
+        // used whatever the object search paths say.
+        if !item.preload && interp::is_glibc_name(dependency) {
+            if let Some(interp) = &parents[0].0.interp {
+                let path = Path::new(interp);
+                if pathutils::get_name(&path) == *dependency && path.exists() {
+                    deptree.addnode(
+                        DepNode {
+                            path: pathutils::get_path(&path),
+                            name: pathutils::get_name(&path),
+                            mode: DepMode::Direct,
+                            found: false,
+                            alias: None,
+                            attrs: Vec::new(),
+                            version: None,
+                            searched: Vec::new(),
+                        },
+                        item.depp,
+                    );
+                    continue;
+                }
+            }
+        }
+
         if let Some(mut dep) = resolve_dependency_1(dependency, config, elc, item.preload) {
             // The preload entries are always shown with the preload mode,
             // wherever the search resolved them.
