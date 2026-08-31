@@ -59,7 +59,7 @@ const MUSL_SUBARCH_SH: &[&str] = &[
     "eb",
     "-nofpu",
     "-fdpic",
-    "eb-nofpu",
+    "-nofpu-fdpic",
     "eb-nofpu",
     "eb-fdpic",
     "eb-nofpu-fdpic",
@@ -89,7 +89,7 @@ fn is_musl_arch(interp: &str) -> bool {
     } else if interp.starts_with("aarch64") {
         return check_name_suffix(interp, "aarch64", Some(&vec!["_be"]));
     } else if interp.starts_with("m68k") {
-        return check_name_suffix(interp, "arm", Some(&vec!["-fp64", "-sf"]));
+        return check_name_suffix(interp, "m68k", Some(&vec!["-fp64", "-sf"]));
     } else if interp.starts_with("mips64") {
         return check_name_suffix(interp, "mips64", Some(&MUSL_SUBARCH_MIPS.to_vec()));
     } else if interp.starts_with("mipsn32") {
@@ -105,7 +105,7 @@ fn is_musl_arch(interp: &str) -> bool {
     } else if interp.starts_with("riscv64") {
         return check_name_suffix(interp, "riscv64", Some(&vec!["sf", "-sf-sp", "-sp"]));
     } else if interp.starts_with("sh") {
-        return check_name_suffix(interp, "riscv64", Some(&MUSL_SUBARCH_SH.to_vec()));
+        return check_name_suffix(interp, "sh", Some(&MUSL_SUBARCH_SH.to_vec()));
     } else if ["nt32", "nt64", "or1k", "s390x", "x86_64", "x32", "i386"].contains(&interp) {
         return true;
     }
@@ -144,5 +144,12 @@ mod tests {
         assert!(is_musl(&Some("ld-musl-aarch64_be.so.1".to_string())));
         assert!(is_musl(&Some("/lib/ld-musl-aarch64.so.1".to_string())));
         assert!(is_musl(&Some("/lib/ld-musl-x86_64.so.1".to_string())));
+        assert!(is_musl(&Some("ld-musl-m68k.so.1".to_string())));
+        assert!(is_musl(&Some("ld-musl-m68k-sf.so.1".to_string())));
+        assert!(!is_musl(&Some("ld-musl-m68kel.so.1".to_string())));
+        assert!(is_musl(&Some("ld-musl-sh.so.1".to_string())));
+        assert!(is_musl(&Some("ld-musl-sh-nofpu-fdpic.so.1".to_string())));
+        assert!(is_musl(&Some("ld-musl-sheb-nofpu.so.1".to_string())));
+        assert!(!is_musl(&Some("ld-musl-shhf.so.1".to_string())));
     }
 }
