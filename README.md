@@ -2,7 +2,7 @@
 
 The rldd tool resolves and prints the binary or shared library dependencies with different visualization options.  Unlike the Linux ldd tool, it does not invoke the system loader; instead, it parses loading information directly from ELF, Mach-O, or PE files, along with any required system files (such as the loader cache or extra configuration files).
 
-Currently, it supports Linux (glibc, android, and musl), FreeBSD, OpenBSD, NetBSD, Illumos (no support for crle/ld.config, trusted directories, or any environment variable), macOS, and Windows.
+Currently, it supports Linux (glibc, musl, and Android), FreeBSD, OpenBSD, NetBSD, Illumos, macOS, and Windows.
 
 ![screenshot](doc/screenshot.png)
 
@@ -13,6 +13,52 @@ The default visualization option prints unique dependencies, including loader an
 Use the ‘-a’ option to print all dependencies (including already resolved ones), and the ‘-p’ option to print fully resolved paths instead of just the soname.
 
 The ‘-l’ option mimics the ldd output, listing unique libraries on separate lines.
+
+## Linux and BSD
+
+On the ELF platforms, the dependencies are tracked the way ldd does, from the DT_NEEDED entries, and resolved following the loader documented search order: the object DT_RPATH (ignored when the object also defines DT_RUNPATH), the ‘–library-path’ directories, the object DT_RUNPATH, the loader cache or hints file, and at last the default system directories.  The $ORIGIN, $LIB, and $PLATFORM tokens are expanded on the rpath and runpath entries, and DF_1_NODEFLIB suppresses the cache and the default directories.
+
+The DT_RPATH scope used for the indirect dependencies follows each loader: the glibc loader searches the object own DT_RPATH and then walks up the chain of loading objects (up to the executable), the FreeBSD and OpenBSD loaders search the object own DT_RPATH and then the main object one, and the NetBSD loader only searches the requesting object one.
+
+A DT_NEEDED entry naming the program interpreter resolves to the PT_INTERP path, the way the loader matches the entry against its own soname without any search.
+
+The loader environment variables are mimicked with options:
+
+* ‘–library-path LIST’ (LD_LIBRARY_PATH) searches the colon-separated directories.
+* ‘–preload LIST’ (LD_PRELOAD) preloads the listed objects; an entry containing a slash is taken as a file path, and the bare names are searched like a regular dependency.  On glibc the /etc/ld.so.preload file is also parsed.
+* ‘–platform NAME’ sets the $PLATFORM value used on the rpath and runpath expansion, instead of deriving it from the object architecture.
+
+The ‘-v’ option prints the search paths that apply to the input file (rpath, preload, library path, runpath, cache, and default directories), along with the locations searched for each dependency that was not found.
+
+### Linux (glibc)
+
+The loader cache is read directly from /etc/ld.so.cache, in both the old and the current format, with the entries filtered by the object architecture and hwcap bits, and with glibc-hwcaps extension support (an entry in a glibc-hwcaps subdirectory is only used when the running CPU supports it, and the best-fit subdirectory wins, for instance x86-64-v2/-v3/-v4).  The default directories are the slibdir hard-wired on the glibc install for the architecture (for instance /lib64 and /usr/lib64 on x86_64, or /libx32 and /usr/libx32 for x32 objects).
+
+Like ldd, the dynamic loader is always listed: the PT_INTERP path is used for executables, while for shared libraries the loader soname is resolved through the cache and the default directories.
+
+### Linux (musl)
+
+A binary is handled as a musl one when the interpreter is ld-musl-$(ARCH).so.1, when it depends on a libc.musl- object, or, for shared libraries without a PT_INTERP segment, when the system itself is a musl one.  There is no loader cache: the search path comes from the /etc/ld-musl-$(ARCH).path file (colon or newline separated), with /lib:/usr/local/lib:/usr/lib as the compiled-in default.  Since the musl loader and libc are the same shared object, the loader is listed as the binary libc, and a ‘libc.so’ dependency resolves to it.
+
+### Android
+
+The dependencies are resolved with the ld.config.txt namespace configuration associated with the executable: the default namespace is searched first, followed by the namespaces it links against, restricted to the names they make accessible.  When no configuration applies, the default system directories for the release are used (/system/lib[64], /odm/lib[64], and /vendor/lib[64], with the ASAN variants for instrumented binaries).
+
+### FreeBSD
+
+The search directories come from the /var/run/ld-elf.so.hints file (the 32-bit compat objects use /var/run/ld-elf32.so.hints) followed by the rtld standard paths (/lib/casper, /lib, and /usr/lib, or /lib32 and /usr/lib32 for the compat objects).  The /etc/libmap.conf mappings are applied to the dependency names following the rtld semantics: the mappings constrained to the referencing object (by exact path, directory prefix, or basename) are tried first, with the unconstrained ones as fallback.
+
+### OpenBSD
+
+The search directories come from /var/run/ld.so.hints and /usr/lib.  Like the OpenBSD loader, DT_SONAME is ignored: a dependency is matched by file name and major version, picking the best minor available in the directory (also for the input file itself when it is a shared library).  The loader is listed for executables, as the OpenBSD ldd does.
+
+### NetBSD
+
+The search directories come from /etc/ld.so.conf (the per-library hardware directives are not supported) and /usr/lib.
+
+### Illumos
+
+Only the default directories are searched (/lib and /usr/lib, or /lib64 and /usr/lib/64 for 64-bit objects): there is no support for the crle(1) configuration files, the trusted directories, or any loader environment variable.
 
 ## macOS
 
@@ -80,6 +126,8 @@ As with ldd, dynamic relocations can be processed to report unresolved symbol re
 * ‘-d’ processes the data relocations and reports the undefined symbols that no loaded object defines.
 * ‘-r’ processes both the data and the function (PLT) relocations.
 * ‘-u’ prints the direct dependencies that provide no symbol used by the binary's own relocations (like ldd; it suppresses the dependency listing and exits with status 1 when unused dependencies are found).
+
+For a musl binary the relocations are always processed, the way the musl ldd does (musl has no lazy binding): the unresolved references are reported after the listing as ‘Error relocating OBJECT: SYMBOL: symbol not found’ and the exit status is 127.
 
 ## Building from source
 
