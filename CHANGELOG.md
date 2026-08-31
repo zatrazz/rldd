@@ -51,6 +51,8 @@ All notable changes to this project will be documented in this file.
   to the `PT_INTERP` path, mimicking how the glibc loader matches it against
   its own soname without any search (it was resolved through the object
   search paths, so a `DT_RUNPATH` could redirect it).
+- ELF (Linux): the `-u`/`--unused` check also reports an unused preloaded
+  object, which the loader counts as a direct dependency.
 
 ## [0.4.0] - 2026-08-17
 

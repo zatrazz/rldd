@@ -1772,6 +1772,27 @@ pub fn check_relocations(
         .collect();
 
     let mut reported = HashSet::new();
+
+    // The preloaded objects are inserted right after the main map on the
+    // loader search list, so an unused one is reported as a direct
+    // dependency (and before the DT_NEEDED entries).
+    if let Some(root) = deptree.arena.first() {
+        for c in &root.children {
+            let node = &deptree.arena[*c].val;
+            if node.mode != DepMode::Preload {
+                continue;
+            }
+            let Some(path) = deptree_node_path(node) else {
+                continue;
+            };
+            if let Some(&i) = scope_index.get(path.as_str()) {
+                if !used[i] && reported.insert(path.clone()) {
+                    r.unused.push(path);
+                }
+            }
+        }
+    }
+
     for dtneeded in &root_elc.deps {
         // The loader map is always marked as used by the loader itself, so
         // ldd never reports an explicit loader dependency.
