@@ -79,7 +79,7 @@ pub fn create_context(arch: Option<&str>) -> Result<MachOContext, String> {
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_binary(
     ctx: &mut MachOContext,
-    preload: &search_path::SearchPathVec,
+    preload: &[String],
     env: &DyldEnv,
     all: bool,
     verbose: bool,
@@ -138,7 +138,7 @@ pub fn resolve_binary(
 
     for pload in preload {
         let dep = MachODep {
-            name: pload.path.clone(),
+            name: pload.clone(),
             attrs: Vec::new(),
             version: None,
         };

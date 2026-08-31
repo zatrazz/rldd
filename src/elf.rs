@@ -548,12 +548,13 @@ fn match_elf_soname(_dtneeded: &String, _elc: &ElfInfo) -> bool {
 }
 
 // Global configuration used on program dynamic resolution:
-// - ld_preload: Search path parser from ld.so.preload
+// - ld_preload: Preload entries from --preload and ld.so.preload, either file
+//   paths or names to be searched like a regular dependency.
 // - ld_library_path: Search path parsed from --ld-library-path.
 // - ld_so_conf: paths parsed from the ld.so.conf in the system.
 // - system_dirs: system defaults deirectories based on binary architecture.
 struct Config<'a> {
-    ld_preload: &'a search_path::SearchPathVec,
+    ld_preload: &'a [String],
     ld_library_path: &'a search_path::SearchPathVec,
     ld_cache: &'a Option<LoaderCache>,
     system_dirs: search_path::SearchPathVec,
@@ -605,6 +606,13 @@ fn format_ld_cache(ld_cache: &Option<LoaderCache>) -> String {
     }
 }
 
+fn format_preload_list(names: &[String]) -> String {
+    if names.is_empty() {
+        return "(none)".to_string();
+    }
+    names.join(&search_path::LIST_SEPARATOR.to_string())
+}
+
 fn push_searched(r: &mut Vec<String>, name: &str, searchpaths: &search_path::SearchPathVec) {
     if !searchpaths.is_empty() {
         r.push(format!("{name}: {}", search_path::format_list(searchpaths)));
@@ -644,7 +652,7 @@ fn print_search_path_information<P: AsRef<Path>>(filename: &P, config: &Config, 
         \x20 default paths: {}",
         filename.as_ref().display(),
         search_path::format_list(&elc.rpath),
-        search_path::format_list(config.ld_preload),
+        format_preload_list(config.ld_preload),
         search_path::format_list(config.ld_library_path),
         search_path::format_list(&elc.runpath),
         DepMode::LdCache,
@@ -718,7 +726,7 @@ pub fn create_context() -> Option<LoaderCache> {
 
 pub fn resolve_binary(
     ld_cache: &mut Option<LoaderCache>,
-    ld_preload: &search_path::SearchPathVec,
+    ld_preload: &[String],
     ld_library_path: &search_path::SearchPathVec,
     platform: &Option<String>,
     all: bool,
@@ -900,15 +908,15 @@ fn load_so_cache<P: AsRef<Path>>(_ld_cache: &mut Option<LoaderCache>, _binary: &
 }
 
 #[cfg(target_os = "linux")]
-fn load_ld_so_preload(interp: &Option<String>) -> search_path::SearchPathVec {
+fn load_ld_so_preload(interp: &Option<String>) -> Vec<String> {
     if interp::is_glibc(interp) {
         return ld_preload::parse_ld_so_preload(&Path::new("/etc/ld.so.preload"));
     }
-    search_path::SearchPathVec::new()
+    Vec::new()
 }
 #[cfg(all(target_family = "unix", not(target_os = "linux")))]
-fn load_ld_so_preload(_interp: &Option<String>) -> search_path::SearchPathVec {
-    search_path::SearchPathVec::new()
+fn load_ld_so_preload(_interp: &Option<String>) -> Vec<String> {
+    Vec::new()
 }
 
 // Return the path candidate for a dependency on a search directory.  OpenBSD
@@ -1007,13 +1015,18 @@ fn resolve_dependencies(
     let mut parents: Vec<(ElfInfo, String)> = Vec::new();
 
     let mut queue = VecDeque::new();
-    for searchpath in config.ld_preload {
-        queue.push_back(WorkItem {
-            dependency: searchpath.path.clone(),
-            parent: 0,
-            depp: root_depp,
-            preload: true,
-        });
+    // The glibc loader trace prints 'statically linked' for an object without
+    // any DT_NEEDED entry, whatever else was preloaded, so the preload
+    // entries are only tracked for objects with dependencies.
+    if !root_elc.deps.is_empty() {
+        for name in config.ld_preload {
+            queue.push_back(WorkItem {
+                dependency: name.clone(),
+                parent: 0,
+                depp: root_depp,
+                preload: true,
+            });
+        }
     }
     for dep in &root_elc.deps {
         queue.push_back(WorkItem {
@@ -1060,10 +1073,19 @@ fn resolve_dependencies(
         }
 
         if let Some(mut dep) = resolve_dependency_1(dependency, config, elc, item.preload) {
-            let r = if dep.mode == DepMode::Direct {
+            // The preload entries are always shown with the preload mode,
+            // wherever the search resolved them.
+            if item.preload {
+                dep.mode = DepMode::Preload;
+            }
+            let r = if dep.mode == DepMode::Direct
+                || (item.preload && dependency.contains(std::path::MAIN_SEPARATOR))
+            {
                 // Decompose the direct object path in path and filename so when
                 // print the dependencies only the file name is showed in
-                // default mode.
+                // default mode.  The preload entries given as a file path are
+                // resolved with the full path, so they are decomposed the same
+                // way.
                 let p = Path::new(dependency);
                 (pathutils::get_path(&p), pathutils::get_name(&p))
             } else {
@@ -1263,8 +1285,10 @@ fn resolve_dependency_1<'a>(
 ) -> Option<ResolvedDependency<'a>> {
     let path = Path::new(&dtneeded);
 
-    // If the path is absolute skip the other modes.
-    if path.is_absolute() {
+    // If the path is absolute skip the other modes.  glibc also treats a
+    // preload entry containing a slash as a file path (relative to the
+    // current directory), only the bare names are searched.
+    if path.is_absolute() || (preload && dtneeded.contains(std::path::MAIN_SEPARATOR)) {
         if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, preload) {
             return Some(ResolvedDependency {
                 elc,

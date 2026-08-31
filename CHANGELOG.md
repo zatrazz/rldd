@@ -39,6 +39,15 @@ All notable changes to this project will be documented in this file.
 - The `raw-cpuid` dependency is only used by the ELF backend, and is no
   longer pulled in on the other systems.
 
+### Fixed
+
+- ELF: the `--preload` entries mimic `LD_PRELOAD`. A name is searched like a
+  regular dependency (it was silently ignored), an entry containing a slash is
+  opened as a file path and printed as given (the resolved path was printed
+  with the file name duplicated), and the entries are skipped for an object
+  without any `DT_NEEDED` entry (which the loader reports as statically
+  linked).
+
 ## [0.4.0] - 2026-08-17
 
 This release contains a major rework of the Mach-O dependency resolution,

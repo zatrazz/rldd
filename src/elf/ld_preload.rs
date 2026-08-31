@@ -4,8 +4,6 @@ use std::fs::File;
 use std::io::{self, BufRead};
 use std::path::Path;
 
-use crate::search_path::*;
-
 fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>>
 where
     P: AsRef<Path>,
@@ -34,8 +32,8 @@ fn parse_line(line: &str) -> Option<String> {
 
 // Returns a vector of libraries read from file FILENAME.  The file contains names of
 // libraries to be loaded, separated by white spaces or `:'.
-pub fn parse_ld_so_preload<P: AsRef<Path>>(filename: &P) -> SearchPathVec {
-    let mut r = SearchPathVec::new();
+pub fn parse_ld_so_preload<P: AsRef<Path>>(filename: &P) -> Vec<String> {
+    let mut r = Vec::new();
 
     let mut lines = match read_lines(filename) {
         Ok(lines) => lines,
@@ -50,7 +48,9 @@ pub fn parse_ld_so_preload<P: AsRef<Path>>(filename: &P) -> SearchPathVec {
         };
 
         for entry in line.split(&[':', ' ', '\t'][..]) {
-            r.add_path(entry);
+            if !entry.is_empty() && !r.iter().any(|e| e == entry) {
+                r.push(entry.to_string());
+            }
         }
     }
 

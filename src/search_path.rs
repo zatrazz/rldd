@@ -101,21 +101,16 @@ pub fn from_string<S: AsRef<str>>(string: S, delim: &[char]) -> SearchPathVec {
     r
 }
 
-// There is no PE equivalent of LD_PRELOAD.
+// The loaders accept both file paths and bare names to be searched like
+// a regular dependency, so the entries are kept as given.
 #[cfg(unix)]
-pub fn from_preload<S: AsRef<str>>(string: S) -> SearchPathVec {
-    let mut r = SearchPathVec::new();
-    for path in string.as_ref().split(':') {
-        let path = match Path::new(path).canonicalize() {
-            Ok(path) => path,
-            // Maybe print an error message.
-            Err(_) => continue,
-        };
-        if let Some(path) = path.to_str() {
-            r.add_path(path);
-        }
-    }
-    r
+pub fn from_preload<S: AsRef<str>>(string: S) -> Vec<String> {
+    string
+        .as_ref()
+        .split(':')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| entry.to_string())
+        .collect()
 }
 
 // Format a search path list for diagnostics printing.  The PE backend prints
