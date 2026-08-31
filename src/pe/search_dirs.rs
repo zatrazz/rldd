@@ -33,17 +33,31 @@ pub fn system_dir(windows: &str, is_32bit: bool) -> String {
     format!("{windows}{MAIN_SEPARATOR}{name}")
 }
 
-// The system directories, in the order the loader takes them.  A Windows on
-// ARM host also holds SyChpe32, the CHPE (hybrid x86) build of the core
-// modules, which the x86 emulation loads in place of the plain x86 ones on
-// SysWOW64.
+// A Windows on ARM host holds SyChpe32, the CHPE (hybrid x86) build of the
+// core modules, which the x86 emulation loads in place of the plain x86 ones
+// on SysWOW64.  It is taken wherever thesearch order reaches it, so an object
+// that lives there resolves the CHPE modules too, while a copy on another
+// directory still wins.
+fn chpe_dir(windows: &str, is_32bit: bool) -> Option<String> {
+    if !is_32bit {
+        return None;
+    }
+    let chpe = format!("{windows}{MAIN_SEPARATOR}SyChpe32");
+    Path::new(&chpe).is_dir().then_some(chpe)
+}
+
+fn same_dir(one: &str, other: &str) -> bool {
+    match (std::fs::canonicalize(one), std::fs::canonicalize(other)) {
+        (Ok(one), Ok(other)) => one == other,
+        _ => false,
+    }
+}
+
+// The system directories, in the order the loader takes them.
 pub fn system_dirs(windows: &str, is_32bit: bool) -> Vec<String> {
     let mut dirs = Vec::new();
-    if is_32bit {
-        let chpe = format!("{windows}{MAIN_SEPARATOR}SyChpe32");
-        if Path::new(&chpe).is_dir() {
-            dirs.push(chpe);
-        }
+    if let Some(chpe) = chpe_dir(windows, is_32bit) {
+        dirs.push(chpe);
     }
     dirs.push(system_dir(windows, is_32bit));
     dirs
@@ -77,12 +91,25 @@ pub fn build(
     safe_search: bool,
 ) -> SearchDirs {
     let mut dirs = SearchDirs::new();
+    let wow64 = system_dir(windows, true);
+    let shadow = chpe_dir(windows, is_32bit);
+
+    // SyChpe32 shadows SysWOW64 wherever the order reaches it, the
+    // application directory of an object living there included.
+    let add_dir = |dirs: &mut SearchDirs, entry: &str, mode: DepMode| {
+        if let Some(chpe) = &shadow {
+            if same_dir(entry, &wow64) {
+                add(dirs, chpe, mode);
+            }
+        }
+        add(dirs, entry, mode);
+    };
 
     if let Some(application) = application {
-        add(&mut dirs, application, DepMode::Application);
+        add_dir(&mut dirs, application, DepMode::Application);
     }
     for path in user {
-        add(&mut dirs, &path.path, DepMode::LdLibraryPath);
+        add_dir(&mut dirs, &path.path, DepMode::LdLibraryPath);
     }
 
     let current = std::env::current_dir()
@@ -90,13 +117,15 @@ pub fn build(
         .map(|path| path.to_string_lossy().into_owned());
     if !safe_search {
         if let Some(current) = &current {
-            add(&mut dirs, current, DepMode::CurrentDir);
+            add_dir(&mut dirs, current, DepMode::CurrentDir);
         }
     }
 
-    for dir in system_dirs(windows, is_32bit) {
-        add(&mut dirs, &dir, DepMode::SystemDirs);
-    }
+    add_dir(
+        &mut dirs,
+        &system_dir(windows, is_32bit),
+        DepMode::SystemDirs,
+    );
     add(
         &mut dirs,
         &format!("{windows}{MAIN_SEPARATOR}System"),
@@ -106,14 +135,14 @@ pub fn build(
 
     if safe_search {
         if let Some(current) = &current {
-            add(&mut dirs, current, DepMode::CurrentDir);
+            add_dir(&mut dirs, current, DepMode::CurrentDir);
         }
     }
 
     if let Ok(path) = std::env::var("PATH") {
         for entry in path.split(LIST_SEPARATOR) {
             if !entry.is_empty() {
-                add(&mut dirs, entry, DepMode::EnvPath);
+                add_dir(&mut dirs, entry, DepMode::EnvPath);
             }
         }
     }
@@ -151,6 +180,27 @@ mod tests {
             true => assert_eq!(dirs, [chpe, system_dir(&windows, true)]),
             false => assert_eq!(dirs.len(), 1),
         }
+    }
+
+    // The CHPE directory shadows SysWOW64 wherever the order reaches it, so
+    // an object that lives there resolves the CHPE modules as well, while an
+    // object elsewhere keeps its own directory first.
+    #[test]
+    fn chpe_shadows_the_application_directory() {
+        let windows = windows_dir();
+        let wow64 = system_dir(&windows, true);
+        let Some(chpe) = chpe_dir(&windows, true) else {
+            return;
+        };
+
+        let dirs = build(Some(&wow64), &SearchPathVec::new(), &windows, true, true);
+        assert_eq!(dirs[0].1, DepMode::Application);
+        assert!(same_dir(&dirs[0].0.path, &chpe), "{}", dirs[0].0.path);
+        assert!(same_dir(&dirs[1].0.path, &wow64), "{}", dirs[1].0.path);
+
+        // A 64 bit object never takes it.
+        let dirs = build(Some(&wow64), &SearchPathVec::new(), &windows, false, true);
+        assert!(!dirs.iter().any(|(dir, _)| same_dir(&dir.path, &chpe)));
     }
 
     // The application directory is searched first, then the ones set with
