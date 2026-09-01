@@ -82,13 +82,14 @@ pub mod cpuid {
     pub const PPC_FEATURE2_MMA: auxv::AuxvType = 0x00020000; //  Matrix-Multiply Assist
 
     pub fn supported() -> Result<Vec<&'static str>, std::io::Error> {
+        // Priority sorted, best-fit first (the glibc _dl_hwcaps_subdirs order).
         let mut r = vec![];
         let hwcap2 = auxv::getauxval(auxv::AT_HWCAP2)?;
-        if hwcap2 & PPC_FEATURE2_ARCH_3_00 != 0 && hwcap2 & PPC_FEATURE2_HAS_IEEE128 != 0 {
-            r.push("power9");
-        }
         if hwcap2 & PPC_FEATURE2_ARCH_3_1 != 0 && hwcap2 & PPC_FEATURE2_MMA != 0 {
             r.push("power10");
+        }
+        if hwcap2 & PPC_FEATURE2_ARCH_3_00 != 0 && hwcap2 & PPC_FEATURE2_HAS_IEEE128 != 0 {
+            r.push("power9");
         }
         Ok(r)
     }
@@ -108,20 +109,21 @@ pub mod cpuid {
     pub const HWCAP_S390_VXRS_PDE2: auxv::AuxvType = 1 << 19;
 
     pub fn supported() -> Result<Vec<&'static str>, std::io::Error> {
+        // Priority sorted, best-fit first (the glibc _dl_hwcaps_subdirs order).
         let mut r = vec![];
         let hwcap = auxv::getauxval(auxv::AT_HWCAP)?;
-        if hwcap & HWCAP_S390_VX != 0 {
-            r.push("z13");
+        if hwcap & HWCAP_S390_VXRS_PDE2 != 0 {
+            r.push("z16");
+        }
+        if hwcap & HWCAP_S390_VXRS_EXT2 != 0 && hwcap & HWCAP_S390_VXRS_PDE != 0 {
+            r.push("z15");
         }
         if hwcap & HWCAP_S390_VXD != 0 && hwcap & HWCAP_S390_VXE != 0 && hwcap & HWCAP_S390_GS != 0
         {
             r.push("z14");
         }
-        if hwcap & HWCAP_S390_VXRS_EXT2 != 0 && hwcap & HWCAP_S390_VXRS_PDE != 0 {
-            r.push("z15");
-        }
-        if hwcap & HWCAP_S390_VXRS_PDE2 != 0 {
-            r.push("z16");
+        if hwcap & HWCAP_S390_VX != 0 {
+            r.push("z13");
         }
         Ok(r)
     }
