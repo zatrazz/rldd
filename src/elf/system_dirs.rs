@@ -47,8 +47,8 @@ pub fn get_slibdir(
         },
         // The non double-float ABIs use a suffixed directory.
         EM_LOONGARCH => {
-            let double = e_flags & FileFlags(EF_LARCH_ABI_MODIFIER_MASK)
-                == EF_LARCH_ABI_DOUBLE_FLOAT;
+            let double =
+                e_flags & FileFlags(EF_LARCH_ABI_MODIFIER_MASK) == EF_LARCH_ABI_DOUBLE_FLOAT;
             match ei_class {
                 ELFCLASS32 => Ok(if double { "/lib32" } else { "/lib32/sf" }),
                 ELFCLASS64 => Ok(if double { "/lib64" } else { "/lib64/sf" }),
@@ -56,11 +56,18 @@ pub fn get_slibdir(
             }
         }
         EM_RISCV => {
-            let double =
-                e_flags & FileFlags(EF_RISCV_FLOAT_ABI) == EF_RISCV_FLOAT_ABI_DOUBLE;
+            let double = e_flags & FileFlags(EF_RISCV_FLOAT_ABI) == EF_RISCV_FLOAT_ABI_DOUBLE;
             match ei_class {
-                ELFCLASS32 => Ok(if double { "/lib32/ilp32d" } else { "/lib32/ilp32" }),
-                ELFCLASS64 => Ok(if double { "/lib64/lp64d" } else { "/lib64/lp64" }),
+                ELFCLASS32 => Ok(if double {
+                    "/lib32/ilp32d"
+                } else {
+                    "/lib32/ilp32"
+                }),
+                ELFCLASS64 => Ok(if double {
+                    "/lib64/lp64d"
+                } else {
+                    "/lib64/lp64"
+                }),
                 _ => return_error(),
             }
         }

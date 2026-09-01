@@ -348,9 +348,12 @@ fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
     elf: &Elf,
     dynstr: &mut String,
 ) {
-    let libdir =
-        system_dirs::get_slibdir(elf.e_machine(endian), elf.e_ident().class, elf.e_flags(endian))
-            .unwrap();
+    let libdir = system_dirs::get_slibdir(
+        elf.e_machine(endian),
+        elf.e_ident().class,
+        elf.e_flags(endian),
+    )
+    .unwrap();
     *dynstr = replace_dyn_str(dynstr, "LIB", libdir);
 }
 
