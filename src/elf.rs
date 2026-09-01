@@ -1084,6 +1084,7 @@ fn resolve_dependencies(
         // loaded loader object. The glibc loader matches the DT_NEEDED entry
         // against its own soname without any search, so the PT_INTERP path is
         // used whatever the object search paths say.
+        #[cfg(target_os = "linux")]
         if !item.preload && interp::is_glibc_name(dependency) {
             if let Some(interp) = &parents[0].0.interp {
                 let path = Path::new(interp);
