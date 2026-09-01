@@ -131,13 +131,13 @@ fn check_file_entry_flags(
         },
         EM_MIPS => match ei_class {
             ELFCLASS32 => {
-                if e_flags & (EF_MIPS_NAN2008 | EF_MIPS_ABI_ON32)
-                    == EF_MIPS_NAN2008 | EF_MIPS_ABI_ON32
+                if e_flags & (EF_MIPS_NAN2008 | EF_MIPS_ABI2)
+                    == EF_MIPS_NAN2008 | EF_MIPS_ABI2
                 {
                     flags == FLAG_MIPS64_LIBN32_NAN2008 | FLAG_ELF_LIBC6
                 } else if e_flags & EF_MIPS_NAN2008 == EF_MIPS_NAN2008 {
                     flags == FLAG_MIPS_LIB32_NAN2008 | FLAG_ELF_LIBC6
-                } else if e_flags & EF_MIPS_ABI_ON32 == EF_MIPS_ABI_ON32 {
+                } else if e_flags & EF_MIPS_ABI2 == EF_MIPS_ABI2 {
                     flags == FLAG_MIPS64_LIBN32 | FLAG_ELF_LIBC6
                 } else {
                     flags == FLAG_ELF_LIBC6
