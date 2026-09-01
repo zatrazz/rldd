@@ -19,24 +19,51 @@ fn return_error<T>() -> Result<T, std::io::Error> {
 pub fn get_slibdir(
     e_machine: Machine,
     ei_class: FileClass,
+    e_flags: FileFlags,
 ) -> Result<&'static str, std::io::Error> {
     // Not all machines are supported by object crate.
     const EM_ARCV2: Machine = Machine(195);
 
     match e_machine {
-        EM_AARCH64 | EM_PPC64 | EM_LOONGARCH | EM_SPARCV9 => Ok("/lib64"),
+        EM_AARCH64 | EM_PPC64 | EM_SPARCV9 => Ok("/lib64"),
         EM_ALPHA | EM_ARCV2 | EM_ARM | EM_CSKY | EM_PARISC | EM_386 | EM_68K | EM_MICROBLAZE
         | EM_ALTERA_NIOS2 | EM_OPENRISC | EM_PPC | EM_SH => Ok("/lib"),
-        EM_S390 | EM_SPARC | EM_MIPS | EM_MIPS_RS3_LE | EM_SPARC32PLUS => match ei_class {
+        EM_S390 | EM_SPARC | EM_SPARC32PLUS => match ei_class {
             ELFCLASS32 => Ok("/lib"),
             ELFCLASS64 => Ok("/lib64"),
             _ => return_error(),
         },
-        EM_RISCV => match ei_class {
-            ELFCLASS32 => Ok("/lib32/ilp32d"),
-            ELFCLASS64 => Ok("/lib64/lp64d"),
+        // The N32 objects (EF_MIPS_ABI2) use a separate directory.
+        EM_MIPS | EM_MIPS_RS3_LE => match ei_class {
+            ELFCLASS32 => {
+                if e_flags.contains(EF_MIPS_ABI2) {
+                    Ok("/lib32")
+                } else {
+                    Ok("/lib")
+                }
+            }
+            ELFCLASS64 => Ok("/lib64"),
             _ => return_error(),
         },
+        // The non double-float ABIs use a suffixed directory.
+        EM_LOONGARCH => {
+            let double = e_flags & FileFlags(EF_LARCH_ABI_MODIFIER_MASK)
+                == EF_LARCH_ABI_DOUBLE_FLOAT;
+            match ei_class {
+                ELFCLASS32 => Ok(if double { "/lib32" } else { "/lib32/sf" }),
+                ELFCLASS64 => Ok(if double { "/lib64" } else { "/lib64/sf" }),
+                _ => return_error(),
+            }
+        }
+        EM_RISCV => {
+            let double =
+                e_flags & FileFlags(EF_RISCV_FLOAT_ABI) == EF_RISCV_FLOAT_ABI_DOUBLE;
+            match ei_class {
+                ELFCLASS32 => Ok(if double { "/lib32/ilp32d" } else { "/lib32/ilp32" }),
+                ELFCLASS64 => Ok(if double { "/lib64/lp64d" } else { "/lib64/lp64" }),
+                _ => return_error(),
+            }
+        }
         EM_X86_64 => match ei_class {
             ELFCLASS32 => Ok("/libx32"),
             ELFCLASS64 => Ok("/lib64"),
@@ -102,11 +129,12 @@ pub fn get_system_dirs(
     is_musl: bool,
     e_machine: Machine,
     ei_class: FileClass,
+    e_flags: FileFlags,
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
     if is_musl {
         return Ok(get_musl_system_dirs(interp));
     }
-    let path = get_slibdir(e_machine, ei_class)?;
+    let path = get_slibdir(e_machine, ei_class, e_flags)?;
     Ok(vec![
         search_path::SearchPath {
             path: path.to_string(),
@@ -130,6 +158,7 @@ pub fn get_system_dirs(
     _is_musl: bool,
     e_machine: Machine,
     ei_class: FileClass,
+    _e_flags: FileFlags,
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
     use crate::elf::android;
 
@@ -226,6 +255,7 @@ pub fn get_system_dirs(
     _is_musl: bool,
     _e_machine: object::elf::Machine,
     ei_class: object::elf::FileClass,
+    _e_flags: object::elf::FileFlags,
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
     // The rtld STANDARD_LIBRARY_PATH, with the COMPAT_libcompat suffix for
     // the 32-bit compat objects.
@@ -251,6 +281,7 @@ pub fn get_system_dirs(
     _is_musl: bool,
     _e_machine: object::elf::Machine,
     _ei_class: object::elf::FileClass,
+    _e_flags: object::elf::FileFlags,
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
     Ok(vec![search_path::SearchPath {
         path: "/usr/lib".to_string(),
@@ -265,6 +296,7 @@ pub fn get_system_dirs(
     _is_musl: bool,
     e_machine: Machine,
     _ei_class: FileClass,
+    _e_flags: FileFlags,
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
     match e_machine {
         EM_386 => Ok(vec![

@@ -348,7 +348,9 @@ fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
     elf: &Elf,
     dynstr: &mut String,
 ) {
-    let libdir = system_dirs::get_slibdir(elf.e_machine(endian), elf.e_ident().class).unwrap();
+    let libdir =
+        system_dirs::get_slibdir(elf.e_machine(endian), elf.e_ident().class, elf.e_flags(endian))
+            .unwrap();
     *dynstr = replace_dyn_str(dynstr, "LIB", libdir);
 }
 
@@ -782,7 +784,13 @@ pub fn resolve_binary(
     }
 
     let system_dirs = if load_system_dirs(&*ld_cache) {
-        system_dirs::get_system_dirs(&elc.interp, elc.is_musl, elc.e_machine, elc.ei_class)?
+        system_dirs::get_system_dirs(
+            &elc.interp,
+            elc.is_musl,
+            elc.e_machine,
+            elc.ei_class,
+            elc.e_flags,
+        )?
     } else {
         search_path::SearchPathVec::new()
     };
