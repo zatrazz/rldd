@@ -96,6 +96,11 @@ impl Arch {
         }
     }
 
+    // Whether the host can still run the cpu type through binary translation.
+    pub fn translated_cputype(&self, cputype: CpuType) -> bool {
+        self.cputype == CPU_TYPE_ARM64 && cputype == CPU_TYPE_X86_64
+    }
+
     // The dyld shared cache names for the architecture, in preference order.
     pub fn cache_names(&self) -> &'static [&'static str] {
         match self.cputype {

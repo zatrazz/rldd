@@ -41,6 +41,11 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Mach-O: a FAT file without a host architecture slice is still inspected
+  when `--arch` is not given. The slice the system run through translation
+  (x86_64 under Rosetta) is preferred, with the first slice as fallback
+  (previously such files were rejected with a missing architecture error, while
+  `dyld_info` and `otool` list them).
 - ELF: the `--preload` entries mimic `LD_PRELOAD`. A name is searched like a
   regular dependency (it was silently ignored), an entry containing a slash is
   opened as a file path and printed as given (the resolved path was printed

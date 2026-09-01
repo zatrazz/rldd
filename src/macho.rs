@@ -662,6 +662,19 @@ fn parse_macho_fat<FatArch: object::read::macho::FatArch>(
             }
         }
     }
+    // Like the thin objects, a FAT file without a host architecture slice is
+    // still inspected when the architecture was not explicitly requested.
+    if !arch.explicit() {
+        let fallback = arches
+            .iter()
+            .find(|slice| arch.translated_cputype(slice.cputype()))
+            .or_else(|| arches.first());
+        if let Some(slice) = fallback {
+            if let Ok(fatdata) = slice.data(data) {
+                return parse_object(fatdata, 0, arch, executable_path, loader_path);
+            }
+        }
+    }
     Err(format!(
         "file does not contain architecture {}",
         arch.name()
