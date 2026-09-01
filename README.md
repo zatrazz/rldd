@@ -12,7 +12,7 @@ The default visualization option prints unique dependencies, including loader an
 
 Use the ‘-a’ option to print all dependencies (including already resolved ones), and the ‘-p’ option to print fully resolved paths instead of just the soname.
 
-The ‘-l’ option mimics the ldd output, listing unique libraries on separate lines.
+The ‘-l’ option mimics the ldd output, listing unique libraries on separate lines.  Since the loader is not invoked, no load addresses are printed, the entries follow the dependency resolution order instead of the loader load order, and the virtual objects provided by the kernel (like the Linux vdso) are not listed.  It also resolves binaries the loader refuses to trace, such as the set-user-ID ones or the ones without execute permission on the BSDs, where ldd runs the target under the loader.  A header line is only printed when multiple files are given, with the file base name instead of the full path the BSD ldd prints.
 
 ## Linux and BSD
 
@@ -38,11 +38,11 @@ The ‘-v’ option prints the search paths that apply to the input file (rpath,
 
 The loader cache is read directly from /etc/ld.so.cache (both the old and the current format are supported) with the entries filtered by the object architecture and hwcap bits. Some ABI extends with withglibc-hwcaps extension, which is also supported (an entry in a glibc-hwcaps subdirectory is only used when the running CPU supports it, and the best-fit subdirectory wins, for instance x86-64-v2/-v3/-v4).  The default directories are the slibdir hard-wired on the glibc install for the architecture (for instance /lib64 and /usr/lib64 on x86_64, or /libx32 and /usr/libx32 for x32 objects).
 
-Like ldd, the dynamic loader is always listed, and the PT_INTERP path is used for executables.For shared libraries the loader soname is resolved through the cache and the default directories.
+Like ldd, the dynamic loader is always listed, and the PT_INTERP path is used for executables.For shared libraries the loader soname is resolved through the cache and the default directories.  On the ‘-l’ output the loader is printed as a regular ‘name => path’ entry instead of the bare path line ldd uses.
 
 ### Linux (musl)
 
-A binary is handled as a musl one when the interpreter is ld-musl-$(ARCH).so.1, when it depends on a libc.musl- object, or, for shared libraries without a PT_INTERP segment, when the system itself is a musl one.  There is no loader cache, the search path comes from the /etc/ld-musl-$(ARCH).path file (colon or newline separated), with /lib:/usr/local/lib:/usr/lib as the compiled-in default.  Since the musl loader and libc are the same shared object, the loader is listed as the binary libc, and a ‘libc.so’ dependency resolves to it.
+A binary is handled as a musl one when the interpreter is ld-musl-$(ARCH).so.1, when it depends on a libc.musl- object, or, for shared libraries without a PT_INTERP segment, when the system itself is a musl one.  There is no loader cache: the search path comes from the /etc/ld-musl-$(ARCH).path file (colon or newline separated), with /lib:/usr/local/lib:/usr/lib as the compiled-in default.  Since the musl loader and libc are the same shared object, the loader is listed as the binary libc, and a ‘libc.so’ dependency resolves to it.  On the ‘-l’ output the loader is printed as a regular ‘name => path’ entry instead of the bare interpreter path the musl ldd uses, and a libc dependency resolves to the path found on the search directories (usually a symlink to the loader) where the musl ldd prints the loader path directly.
 
 ### Android
 
@@ -52,13 +52,17 @@ The dependencies are resolved with the ld.config.txt namespace configuration ass
 
 The search directories come from the /var/run/ld-elf.so.hints file (the 32-bit compat objects use /var/run/ld-elf32.so.hints) followed by the rtld standard paths (/lib/casper, /lib, and /usr/lib, or /lib32 and /usr/lib32 for the compat objects).  The /etc/libmap.conf mappings are applied to the dependency names following the rtld semantics: the mappings constrained to the referencing object (by exact path, directory prefix, or basename) are tried first, with the unconstrained ones as fallback.
 
+Like the FreeBSD ldd, the loader is not listed on the ‘-l’ output; the ‘[vdso]’ pseudo entry ldd prints is not listed either.
+
 ### OpenBSD
 
-The search directories come from /var/run/ld.so.hints and /usr/lib.  Like the OpenBSD loader, DT_SONAME is ignored, a dependency is matched by file name and major version, picking the best minor available in the directory (also for the input file itself when it is a shared library).  The loader is listed for executables, as the OpenBSD ldd does.
+The search directories come from /var/run/ld.so.hints and /usr/lib.  Like the OpenBSD loader, DT_SONAME is ignored, a dependency is matched by file name and major version, picking the best minor available in the directory (also for the input file itself when it is a shared library).  The loader is listed for executables, as the OpenBSD ldd does.  The ‘-l’ output keeps the ‘name => path’ format instead of the table the OpenBSD ldd prints (Start, End, Type, and so on), and the input object itself is not listed.
 
 ### NetBSD
 
 The search directories come from /etc/ld.so.conf (the per-library hardware directives are not supported) and /usr/lib.
+
+Like the NetBSD ldd, the loader is not listed on the ‘-l’ output; the dependencies are printed with their object name (libc.so.12 => ...) instead of the linker flag style names the NetBSD ldd uses (-lc.12 => ...).
 
 ### Illumos
 
