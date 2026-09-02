@@ -84,9 +84,18 @@ pub fn get_vndk_version_string<S: AsRef<str>>(default: S) -> String {
     }
 }
 
-pub fn is_asan<S: AsRef<str>>(interp: S) -> bool {
+// The sanitizer in use is derived from the loader name, the way bionic builds
+// a separate linker for each one.  A shared library has no PT_INTERP segment.
+fn interp_name(interp: Option<&str>) -> String {
+    match interp {
+        Some(interp) => pathutils::get_name(&std::path::Path::new(interp)),
+        None => String::new(),
+    }
+}
+
+pub fn is_asan(interp: Option<&str>) -> bool {
     matches!(
-        pathutils::get_name(&std::path::Path::new(interp.as_ref())).as_str(),
+        interp_name(interp).as_str(),
         "linker_asan" | "linker_asan64"
     )
 }

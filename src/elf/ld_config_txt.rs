@@ -284,10 +284,10 @@ pub fn read_version_file<P: AsRef<Path>>(binary: &P) -> Result<i64, &'static str
     Err("error reading version file")
 }
 
-pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>, S: AsRef<str>>(
+pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
     filename: &P2,
     binary: &P1,
-    interp: S,
+    interp: Option<&str>,
     e_machine: Machine,
     ei_class: FileClass,
 ) -> Result<LdCache, &'static str> {
@@ -631,7 +631,7 @@ mod tests {
             false => vec![systemlib.to_str().unwrap()],
         };
 
-        match parse_ld_config_txt(&cfgpath, &binpath, interp, EM_386, ELFCLASS32) {
+        match parse_ld_config_txt(&cfgpath, &binpath, Some(interp), EM_386, ELFCLASS32) {
             Ok(ldcache) => {
                 let default_ns = ldcache
                     .get_default_namespace()

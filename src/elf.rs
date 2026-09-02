@@ -881,10 +881,11 @@ fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, binary: &P,
     {
         // On Android 10 and forward each executable might have a associated ld.config.txt
         // file in different paths, so we need to reload for each argument.
+        // A shared library has no PT_INTERP segment, so no sanitizer applies.
         *ld_cache = ld_config_txt::parse_ld_config_txt(
             &Path::new(&ld_config_path),
             binary,
-            elc.interp.as_ref().unwrap(),
+            elc.interp.as_deref(),
             elc.e_machine,
             elc.ei_class,
         )

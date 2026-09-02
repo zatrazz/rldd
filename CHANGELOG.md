@@ -63,6 +63,9 @@ All notable changes to this project will be documented in this file.
   search paths, so a `DT_RUNPATH` could redirect it).
 - ELF (Linux): the `-u`/`--unused` check also reports an unused preloaded
   object, which the loader counts as a direct dependency.
+- ELF (Android): any object without a `PT_INTERP` segment (including the
+  loader itself) no longer panics, and its dependencies are resolved with
+  the default system directories.
 
 ## [0.4.0] - 2026-08-17
 

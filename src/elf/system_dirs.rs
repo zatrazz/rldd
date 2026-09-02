@@ -230,21 +230,19 @@ pub fn get_system_dirs(
         Ok(r)
     }
 
-    if let Some(interp) = interp {
-        let is_asan = android::is_asan(interp);
+    // A shared library has no PT_INTERP segment, so no sanitizer applies.
+    let is_asan = android::is_asan(interp.as_deref());
 
-        return match e_machine {
-            EM_AARCH64 | EM_X86_64 => get_system_dirs_xx("64", is_asan),
-            EM_ARM | EM_386 => get_system_dirs_xx("", is_asan),
-            EM_MIPS => match ei_class {
-                ELFCLASS64 => get_system_dirs_xx("64", is_asan),
-                ELFCLASS32 => get_system_dirs_xx("", is_asan),
-                _ => return_error(),
-            },
+    match e_machine {
+        EM_AARCH64 | EM_X86_64 => get_system_dirs_xx("64", is_asan),
+        EM_ARM | EM_386 => get_system_dirs_xx("", is_asan),
+        EM_MIPS => match ei_class {
+            ELFCLASS64 => get_system_dirs_xx("64", is_asan),
+            ELFCLASS32 => get_system_dirs_xx("", is_asan),
             _ => return_error(),
-        };
-    };
-    return_error()
+        },
+        _ => return_error(),
+    }
 }
 
 #[cfg(target_os = "freebsd")]
