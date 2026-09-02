@@ -175,8 +175,8 @@ pub fn get_system_dirs(
     ) -> Result<search_path::SearchPathVec, std::io::Error> {
         let release = android::get_release()?;
 
-        let add_odm =
-            release >= android::AndroidRelease::R28 && release <= android::AndroidRelease::R33;
+        // The /odm partition was added on Android 9.
+        let add_odm = release >= android::AndroidRelease::R28;
 
         let mut r = search_path::SearchPathVec::new();
         if is_asan {

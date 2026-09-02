@@ -69,6 +69,8 @@ All notable changes to this project will be documented in this file.
 - ELF (Android): a `${LIB}` substitution and a default directory of an
   architecture without an explicit entry (`riscv64`) no longer panics or
   fails. Both are now derived from the object ELF class like the loader does.
+- ELF (Android): the `/odm/lib[64]` default directory is used from Android 9
+  onward (it was dropped again from Android 14).
 
 ## [0.4.0] - 2026-08-17
 

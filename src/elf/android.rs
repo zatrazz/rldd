@@ -18,8 +18,6 @@ impl AndroidRelease {
     pub const R29: AndroidRelease = AndroidRelease(29);
     // Android 11, which added the generated /linkerconfig files.
     pub const R30: AndroidRelease = AndroidRelease(30);
-    // Android 13, the last release the /odm partition was handled for.
-    pub const R33: AndroidRelease = AndroidRelease(33);
 }
 
 impl fmt::Display for AndroidRelease {
