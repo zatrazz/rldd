@@ -572,7 +572,7 @@ mod tests {
     use object::elf::*;
     use std::fs;
     use std::fs::File;
-    use std::io::{Error, ErrorKind, Write};
+    use std::io::{Error, Write};
     use std::iter::zip;
     use tempfile::TempDir;
 
@@ -712,10 +712,10 @@ mod tests {
             Ok(ldcache) => {
                 let default_ns = ldcache
                     .get_default_namespace()
-                    .ok_or(Error::new(ErrorKind::Other, "default namespace not found"))?;
+                    .ok_or(Error::other("default namespace not found"))?;
 
-                assert_eq!(default_ns.isolated, true);
-                assert_eq!(default_ns.visible, false);
+                assert!(default_ns.isolated);
+                assert!(!default_ns.visible);
                 assert_eq!(
                     default_ns.search_paths.len(),
                     expected_default_search_paths.len()
@@ -741,8 +741,8 @@ mod tests {
 
                 let system_ns = ldcache.namespaces_config.get("system").unwrap();
                 assert_eq!(system_ns.name, "system");
-                assert_eq!(system_ns.isolated, true);
-                assert_eq!(system_ns.visible, true);
+                assert!(system_ns.isolated);
+                assert!(system_ns.visible);
                 assert_eq!(
                     system_ns.search_paths.len(),
                     expected_system_search_paths.len()
@@ -753,8 +753,8 @@ mod tests {
 
                 let vndk_ns = ldcache.namespaces_config.get("vndk").unwrap();
                 assert_eq!(vndk_ns.name, "vndk");
-                assert_eq!(vndk_ns.isolated, false);
-                assert_eq!(vndk_ns.visible, false);
+                assert!(!vndk_ns.isolated);
+                assert!(!vndk_ns.visible);
                 assert_eq!(vndk_ns.search_paths.len(), expected_vndk_search_paths.len());
                 for (d, e) in zip(&vndk_ns.search_paths, &expected_vndk_search_paths) {
                     assert_eq!(d, e);
@@ -765,8 +765,8 @@ mod tests {
 
                 let vndk_ns_system = ldcache.namespaces_config.get("vndk_in_system").unwrap();
                 assert_eq!(vndk_ns_system.name, "vndk_in_system");
-                assert_eq!(vndk_ns_system.isolated, true);
-                assert_eq!(vndk_ns_system.visible, true);
+                assert!(vndk_ns_system.isolated);
+                assert!(vndk_ns_system.visible);
                 assert_eq!(
                     vndk_ns_system.search_paths.len(),
                     expected_vndk_in_system_search_paths.len()
@@ -784,7 +784,7 @@ mod tests {
 
                 Ok(())
             }
-            Err(e) => Err(Error::new(ErrorKind::Other, e)),
+            Err(e) => Err(Error::other(e)),
         }
     }
 
