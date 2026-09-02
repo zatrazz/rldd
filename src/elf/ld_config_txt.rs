@@ -222,10 +222,10 @@ pub fn get_ld_config_path<P: AsRef<Path>>(
         linkerconfig: bool,
     ) -> Option<String> {
         let parts: Vec<&OsStr> = executable.as_ref().iter().collect();
-        if parts.len() == 5 && parts[1] == "apex" && parts[3] == "bin" {
+        if parts.len() >= 3 && parts[1] == "apex" && parts[2] != "com.android.runtime" {
             let name = parts[2].to_string_lossy();
             if linkerconfig {
-                let linkerconfig_path = format!("/linkerconfig/{name}/ld.config.txt)");
+                let linkerconfig_path = format!("/linkerconfig/{name}/ld.config.txt");
                 if Path::new(&linkerconfig_path).exists() {
                     return Some(linkerconfig_path);
                 }

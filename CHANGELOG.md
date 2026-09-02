@@ -71,6 +71,9 @@ All notable changes to this project will be documented in this file.
   fails. Both are now derived from the object ELF class like the loader does.
 - ELF (Android): the `/odm/lib[64]` default directory is used from Android 9
   onward (it was dropped again from Android 14).
+- ELF (Android): the `/linkerconfig/<apex>/ld.config.txt` path had a stray
+  character, so an executable shipped on an APEX always fell back to the
+  system configuration.
 
 ## [0.4.0] - 2026-08-17
 
