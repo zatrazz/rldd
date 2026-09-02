@@ -54,7 +54,13 @@ fn print_deps_children(p: &Printer, deps: &DepTree, children: &[usize], deptrace
             }
         }
         if dep.val.mode == deptree::DepMode::NotFound {
-            p.print_not_found(&dep.val.name, &dep.val.attrs, &dep.val.searched, deptrace);
+            p.print_not_found(
+                &dep.val.name,
+                dep.val.alias.as_deref(),
+                &dep.val.attrs,
+                &dep.val.searched,
+                deptrace,
+            );
         } else if dep.val.found {
             p.print_already_found(
                 &dep.val.name,

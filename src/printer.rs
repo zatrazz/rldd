@@ -196,6 +196,7 @@ impl Printer {
     pub fn print_not_found(
         &self,
         dtneeded: &String,
+        alias: Option<&str>,
         attrs: &[&'static str],
         searched: &[String],
         deptrace: &[bool],
@@ -206,9 +207,14 @@ impl Printer {
             format!(" [{}]", attrs.join(" "))
         };
         if self.ldd {
-            println!("        {dtneeded} => not found{attrs}");
+            println!("        {} => not found{attrs}", alias.unwrap_or(dtneeded));
             return;
         }
+        // The recorded name, when the resolved module differs from it.
+        let dtneeded = match alias {
+            Some(alias) => format!("{alias} -> {dtneeded}"),
+            None => dtneeded.clone(),
+        };
         self.print_preamble(deptrace);
         let writer = BufferWriter::stdout(ColorChoice::Always);
         let mut buffer = writer.buffer();
