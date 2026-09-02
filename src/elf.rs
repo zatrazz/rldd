@@ -1480,8 +1480,14 @@ fn resolve_dependency_ld_cache<'a>(
             return Some(resolved);
         }
 
-        for linked_ns in &default_ns.namespaces {
-            if let Some(namespace) = ld_cache.get_namespace(linked_ns) {
+        for link in &default_ns.namespaces {
+            // A link only makes the libraries on its shared_libs list
+            // accessible (unless it allows all of them).
+            if !link.is_accessible(dtneeded) {
+                continue;
+            }
+
+            if let Some(namespace) = ld_cache.get_namespace(&link.namespace) {
                 if !namespace.is_accessible(dtneeded) {
                     continue;
                 }

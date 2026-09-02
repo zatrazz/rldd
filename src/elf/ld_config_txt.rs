@@ -9,7 +9,23 @@ use crate::search_path;
 
 use object::elf::{FileClass, Machine};
 
-pub type NamespaceLinkingConfigVec = Vec<String>;
+// A link from one namespace to another, along the set of libraries the link
+// makes accessible (the 'namespace.<ns>.link.<linked>.shared_libs' list, or
+// every library when 'allow_all_shared_libs' is set).
+#[derive(Debug)]
+pub struct NamespaceLink {
+    pub namespace: String,
+    shared_libs: Vec<String>,
+    allow_all_shared_libs: bool,
+}
+
+impl NamespaceLink {
+    pub fn is_accessible<S: AsRef<str>>(&self, file: S) -> bool {
+        self.allow_all_shared_libs || self.shared_libs.iter().any(|lib| lib == file.as_ref())
+    }
+}
+
+pub type NamespaceLinkingConfigVec = Vec<NamespaceLink>;
 
 #[derive(Debug)]
 pub struct NamespaceConfig {
@@ -364,7 +380,15 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
                     return Err("both shared_libs and allow_all_shared_libs are set.");
                 }
 
-                ns.namespaces.push(ns_linked.to_string());
+                ns.namespaces.push(NamespaceLink {
+                    namespace: ns_linked.to_string(),
+                    shared_libs: shared_libs
+                        .split(':')
+                        .filter(|lib| !lib.is_empty())
+                        .map(|lib| lib.to_string())
+                        .collect(),
+                    allow_all_shared_libs: allow_all,
+                });
             }
         }
 
@@ -637,8 +661,17 @@ mod tests {
                 }
 
                 assert_eq!(default_ns.namespaces.len(), 2);
-                assert_eq!(default_ns.namespaces[0], "system");
-                assert_eq!(default_ns.namespaces[1], "vndk");
+                assert_eq!(default_ns.namespaces[0].namespace, "system");
+                assert_eq!(default_ns.namespaces[1].namespace, "vndk");
+
+                // A link only makes the libraries on its shared_libs list
+                // accessible.
+                for lib in ["libc.so", "libm.so", "libdl.so", "libstdc++.so"] {
+                    assert!(default_ns.namespaces[0].is_accessible(lib));
+                }
+                assert!(!default_ns.namespaces[0].is_accessible("libcutils.so"));
+                assert!(default_ns.namespaces[1].is_accessible("libcutils.so"));
+                assert!(!default_ns.namespaces[1].is_accessible("libc.so"));
 
                 assert_eq!(ldcache.namespaces_config.len(), 4);
 
@@ -663,6 +696,8 @@ mod tests {
                     assert_eq!(d, e);
                 }
                 assert_eq!(vndk_ns.namespaces.len(), 1);
+                // The link allows every shared library.
+                assert!(vndk_ns.namespaces[0].is_accessible("libanything.so"));
 
                 let vndk_ns_system = ldcache.namespaces_config.get("vndk_in_system").unwrap();
                 assert_eq!(vndk_ns_system.name, "vndk_in_system");

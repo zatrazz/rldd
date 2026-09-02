@@ -78,6 +78,9 @@ All notable changes to this project will be documented in this file.
   instead of the `-` one used by `${VNDK_VER}`, and the `current` VNDK
   version is the one that expands to an empty string (`default` was checked
   instead).
+- ELF (Android): a namespace link only makes the libraries listed on its
+  `shared_libs` property accessible, unless `allow_all_shared_libs` is set
+  (the list was parsed for validation but not used on the resolution).
 
 ## [0.4.0] - 2026-08-17
 

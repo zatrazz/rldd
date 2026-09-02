@@ -46,7 +46,7 @@ A binary is handled as a musl one when the interpreter is ld-musl-$(ARCH).so.1, 
 
 ### Android
 
-The dependencies are resolved with the ld.config.txt namespace configuration associated with the executable, the default namespace is searched first, followed by the namespaces it links against, restricted to the names they make accessible.  When no configuration applies, the default system directories for the release are used (/system/lib[64], /odm/lib[64], and /vendor/lib[64], with the ASAN variants for instrumented binaries).
+The dependencies are resolved with the ld.config.txt namespace configuration associated with the executable, the default namespace is searched first, followed by the namespaces it links against, restricted to the libraries each link makes accessible (the link ‘shared_libs’ list, unless it allows all of them) and to the names the linked namespace allows.  When no configuration applies, the default system directories for the release are used (/system/lib[64], /odm/lib[64], and /vendor/lib[64], with the ASAN variants for instrumented binaries).
 
 ### FreeBSD
 
