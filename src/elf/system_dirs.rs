@@ -159,6 +159,10 @@ pub fn get_system_dirs(
     ])
 }
 
+// The bionic loader default search paths, used when no ld.config.txt applies:
+// the system, odm, and vendor library directories, each one preceded by the
+// sanitizer specific variant for an instrumented binary.  The /odm partition
+// was only added on Android 9.
 #[cfg(target_os = "android")]
 pub fn get_system_dirs(
     interp: &Option<String>,
@@ -169,79 +173,49 @@ pub fn get_system_dirs(
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
     use crate::elf::android;
 
-    pub fn get_system_dirs_xx(
-        suffix: &str,
-        is_asan: bool,
-    ) -> Result<search_path::SearchPathVec, std::io::Error> {
-        let release = android::get_release()?;
+    let release = android::get_release()?;
+    let interp = interp.as_deref();
+    let is_asan = android::is_asan(interp);
+    let is_hwasan = android::is_hwasan(interp);
 
+    let lib = android::libpath(ei_class);
+
+    // Android 8 moved the asan directories below /data/asan, the older
+    // releases use /data/$(LIB) for the system one and /data/vendor/$(LIB)
+    // for the vendor one.
+    let asan_dir = |partition: &str| {
+        if release < android::AndroidRelease::R26 {
+            match partition {
+                "/system" => format!("/data/{lib}"),
+                _ => format!("/data{partition}/{lib}"),
+            }
+        } else {
+            format!("/data/asan{partition}/{lib}")
+        }
+    };
+
+    let mut r = search_path::SearchPathVec::new();
+    let mut push = |path: String| {
+        r.push(search_path::SearchPath {
+            path,
+            dev: 0,
+            ino: 0,
+        })
+    };
+
+    for partition in ["/system", "/odm", "/vendor"] {
         // The /odm partition was added on Android 9.
-        let add_odm = release >= android::AndroidRelease::R28;
-
-        let mut r = search_path::SearchPathVec::new();
-        if is_asan {
-            let path = if release < android::AndroidRelease::R26 {
-                format!("/data/lib{suffix}")
-            } else {
-                format!("/data/asan/system/lib{suffix}")
-            };
-            r.push(search_path::SearchPath {
-                path,
-                dev: 0,
-                ino: 0,
-            });
-        }
-        r.push(search_path::SearchPath {
-            path: format!("/system/lib{suffix}"),
-            dev: 0,
-            ino: 0,
-        });
-        if is_asan && add_odm {
-            r.push(search_path::SearchPath {
-                path: format!("/data/asan/odm/lib{suffix}"),
-                dev: 0,
-                ino: 0,
-            });
-        }
-        if add_odm {
-            r.push(search_path::SearchPath {
-                path: format!("/odm/lib{suffix}"),
-                dev: 0,
-                ino: 0,
-            });
+        if partition == "/odm" && release < android::AndroidRelease::R28 {
+            continue;
         }
         if is_asan {
-            let path = if release < android::AndroidRelease::R26 {
-                format!("/vendor/lib{suffix}")
-            } else {
-                format!("/data/asan/vendor/lib{suffix}")
-            };
-            r.push(search_path::SearchPath {
-                path,
-                dev: 0,
-                ino: 0,
-            });
+            push(asan_dir(partition));
+        } else if is_hwasan {
+            push(format!("{partition}/{lib}/hwasan"));
         }
-        r.push(search_path::SearchPath {
-            path: format!("/vendor/lib{suffix}"),
-            dev: 0,
-            ino: 0,
-        });
-        Ok(r)
+        push(format!("{partition}/{lib}"));
     }
-
-    // A shared library has no PT_INTERP segment, so no sanitizer applies.
-    let is_asan = android::is_asan(interp.as_deref());
-
-    // The bionic loader hardwires the directory as 'lib64' for the LP64 ABIs
-    // and 'lib' for the ILP32 ones.
-    get_system_dirs_xx(
-        match ei_class {
-            ELFCLASS64 => "64",
-            _ => "",
-        },
-        is_asan,
-    )
+    Ok(r)
 }
 
 #[cfg(target_os = "freebsd")]

@@ -29,6 +29,9 @@ All notable changes to this project will be documented in this file.
   module list (so the same name may be loaded from more than one assembly).
 - PE: the `.local` DLL redirection and the `bound` attribute for the imports
   bound at link time.
+- ELF (Android): support for the HWASan instrumented objects, which use the
+  `linker_hwasan64` loader, the `namespace.<ns>.hwasan.search.paths`
+  properties, and the `$(PARTITION)/lib64/hwasan` default directories.
 - The CI workflow also builds on Windows, and checks the Android targets
   (which are only cross compiled).
 

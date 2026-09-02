@@ -98,7 +98,15 @@ pub fn is_asan(interp: Option<&str>) -> bool {
     )
 }
 
-// The ${LIB} substitution and the system directories suffix.
+pub fn is_hwasan(interp: Option<&str>) -> bool {
+    matches!(
+        interp_name(interp).as_str(),
+        "linker_hwasan" | "linker_hwasan64"
+    )
+}
+
+// The ${LIB} substitution and the system directories suffix, which the bionic
+// loader hardwires as 'lib64' for the LP64 ABIs and 'lib' for the ILP32 ones.
 pub fn libpath(ei_class: FileClass) -> &'static str {
     match ei_class {
         ELFCLASS64 => "lib64",

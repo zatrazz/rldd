@@ -300,6 +300,7 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
     ei_class: FileClass,
 ) -> Result<LdCache, &'static str> {
     let is_asan = is_asan(interp);
+    let is_hwasan = is_hwasan(interp);
     let release = get_release().map_err(|_| "invalid android release")?;
 
     if is_asan && release == AndroidRelease::R26 {
@@ -418,6 +419,8 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
 
         if is_asan {
             property_name_prefix.push_str(".asan");
+        } else if is_hwasan {
+            property_name_prefix.push_str(".hwasan");
         }
 
         ns.search_paths =
@@ -559,6 +562,8 @@ mod tests {
       namespace.default.asan.search.paths = {base}/data\n\
       namespace.default.asan.search.paths += {base}/vendor/${{LIB}}\n\
       namespace.default.asan.permitted.paths = {base}/data:{base}/vendor\n\
+      namespace.default.hwasan.search.paths = {base}/vendor/${{LIB}}/hwasan\n\
+      namespace.default.hwasan.search.paths += {base}/vendor/${{LIB}}\n\
       namespace.default.links = system\n\
       namespace.default.links += vndk\n\
       namespace.default.link.system.shared_libs=  libc.so\n\
@@ -571,6 +576,8 @@ mod tests {
       namespace.system.permitted.paths = {base}/system/${{LIB}}\n\
       namespace.system.asan.search.paths = {base}/data:{base}/system/${{LIB}}\n\
       namespace.system.asan.permitted.paths = {base}/data:{base}/system\n\
+      namespace.system.hwasan.search.paths = {base}/system/${{LIB}}/hwasan\n\
+      namespace.system.hwasan.search.paths += {base}/system/${{LIB}}\n\
       namespace.vndk.isolated = tr\n\
       namespace.vndk.isolated += ue\n\
       namespace.vndk.search.paths = {base}/system/${{LIB}}/vndk\n\
@@ -589,11 +596,9 @@ mod tests {
         )
     }
 
-    fn test_skeleton(is_asan: bool) -> Result<(), std::io::Error> {
-        let interp = match &is_asan {
-            true => "linker_asan",
-            false => "linker",
-        };
+    fn test_skeleton(interp: &str) -> Result<(), std::io::Error> {
+        let is_asan = is_asan(Some(interp));
+        let is_hwasan = is_hwasan(Some(interp));
 
         let tmpdir = TempDir::new()?;
         let cfgpath = tmpdir.path().join("ld.config.txt");
@@ -614,6 +619,9 @@ mod tests {
         let vendorlib = dirtest.join("vendor/lib");
         fs::create_dir(&vendorlib)?;
 
+        let vendorlibhwasan = dirtest.join("vendor/lib/hwasan");
+        fs::create_dir(&vendorlibhwasan)?;
+
         let data = dirtest.join("data");
         fs::create_dir(&data)?;
 
@@ -623,6 +631,9 @@ mod tests {
         let systemlib = dirtest.join("system/lib");
         fs::create_dir(&systemlib)?;
 
+        let systemlibhwasan = dirtest.join("system/lib/hwasan");
+        fs::create_dir(&systemlibhwasan)?;
+
         let vndklib = dirtest.join("system/lib/vndk");
         fs::create_dir(&vndklib)?;
 
@@ -631,21 +642,39 @@ mod tests {
         let mut file = File::create(&cfgpath)?;
         file.write_all(cfgcontent.as_bytes())?;
 
-        let expected_default_search_paths = match &is_asan {
-            true => vec![data.to_str().unwrap(), vendorlib.to_str().unwrap()],
-            false => vec![vendorlib.to_str().unwrap()],
+        // Only the namespaces with a sanitizer specific property have one, the
+        // others end up with an empty search path list.
+        let expected_default_search_paths = if is_asan {
+            vec![data.to_str().unwrap(), vendorlib.to_str().unwrap()]
+        } else if is_hwasan {
+            vec![
+                vendorlibhwasan.to_str().unwrap(),
+                vendorlib.to_str().unwrap(),
+            ]
+        } else {
+            vec![vendorlib.to_str().unwrap()]
         };
-        let expected_system_search_paths = match &is_asan {
-            true => vec![data.to_str().unwrap(), systemlib.to_str().unwrap()],
-            false => vec![systemlib.to_str().unwrap()],
+        let expected_system_search_paths = if is_asan {
+            vec![data.to_str().unwrap(), systemlib.to_str().unwrap()]
+        } else if is_hwasan {
+            vec![
+                systemlibhwasan.to_str().unwrap(),
+                systemlib.to_str().unwrap(),
+            ]
+        } else {
+            vec![systemlib.to_str().unwrap()]
         };
-        let expected_vndk_search_paths = match &is_asan {
-            true => vec![data.to_str().unwrap(), vndklib.to_str().unwrap()],
-            false => vec![vndklib.to_str().unwrap()],
+        let expected_vndk_search_paths = if is_asan {
+            vec![data.to_str().unwrap(), vndklib.to_str().unwrap()]
+        } else if is_hwasan {
+            vec![]
+        } else {
+            vec![vndklib.to_str().unwrap()]
         };
-        let expected_vndk_in_system_search_paths = match &is_asan {
-            true => vec![],
-            false => vec![systemlib.to_str().unwrap()],
+        let expected_vndk_in_system_search_paths = if is_asan || is_hwasan {
+            vec![]
+        } else {
+            vec![systemlib.to_str().unwrap()]
         };
 
         match parse_ld_config_txt(&cfgpath, &binpath, Some(interp), ELFCLASS32) {
@@ -730,11 +759,16 @@ mod tests {
 
     #[test]
     fn smoke() -> Result<(), std::io::Error> {
-        test_skeleton(false)
+        test_skeleton("linker")
     }
 
     #[test]
     fn smoke_asan() -> Result<(), std::io::Error> {
-        test_skeleton(true)
+        test_skeleton("linker_asan")
+    }
+
+    #[test]
+    fn smoke_hwasan() -> Result<(), std::io::Error> {
+        test_skeleton("linker_hwasan64")
     }
 }
