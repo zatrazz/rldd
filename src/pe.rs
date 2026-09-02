@@ -6,10 +6,7 @@ use std::{fs, str};
 
 use object::pe;
 use object::read::pe::ExportTarget;
-use object::read::pe::{
-    DelayLoadImportTable, ExportTable, ImageNtHeaders, ImageOptionalHeader, Import, ImportTable,
-    PeFile,
-};
+use object::read::pe::{ExportTable, ImageNtHeaders, ImageOptionalHeader, ImageThunkData, PeFile};
 use object::{FileKind, LittleEndian as LE};
 
 use crate::deptree::*;
@@ -731,7 +728,7 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
     if let Ok(Some(table)) = file.import_table() {
         if let Ok(mut descriptors) = table.descriptors() {
             while let Ok(Some(descriptor)) = descriptors.next() {
-                if let Ok(name) = table.name(descriptor.name.get(LE)) {
+                if let Some(name) = rva_name(&file, descriptor.name.get(LE)) {
                     // The import name table holds the names, and is only
                     // absent on the old bound objects.
                     let thunks = match descriptor.original_first_thunk.get(LE) {
@@ -747,7 +744,7 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
                     pei.deps.push(PeDep {
                         name: String::from_utf8_lossy(name).into_owned(),
                         attrs,
-                        imports: import_names::<Pe>(&table, thunks),
+                        imports: import_names::<Pe>(&file, thunks),
                     });
                 }
             }
@@ -758,12 +755,12 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
     if let Ok(Some(table)) = file.delay_load_import_table() {
         if let Ok(mut descriptors) = table.descriptors() {
             while let Ok(Some(descriptor)) = descriptors.next() {
-                if let Ok(name) = table.name(descriptor.dll_name_rva.get(LE)) {
+                if let Some(name) = rva_name(&file, descriptor.dll_name_rva.get(LE)) {
                     pei.deps.push(PeDep {
                         name: String::from_utf8_lossy(name).into_owned(),
                         attrs: vec!["delay-load"],
-                        imports: delay_import_names::<Pe>(
-                            &table,
+                        imports: import_names::<Pe>(
+                            &file,
                             descriptor.import_name_table_rva.get(LE),
                         ),
                     });
@@ -855,42 +852,42 @@ fn manifest_resource<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> Option<String> {
     Some(String::from_utf8_lossy(data).into_owned())
 }
 
-fn import_names<Pe: ImageNtHeaders>(table: &ImportTable, rva: u32) -> Vec<ImportName> {
-    let mut names = Vec::new();
-    let Ok(mut thunks) = table.thunks(rva) else {
-        return names;
-    };
-    while let Ok(Some(thunk)) = thunks.next::<Pe>() {
-        match table.import::<Pe>(thunk) {
-            Ok(import) => names.push(import_name(import)),
-            Err(_) => break,
-        }
-    }
-    names
+// The name and the thunk array a descriptor points at do not need to live on
+// the section the directory itself does (the delay load descriptors on .didat
+// with the names on .rdata are the usual case), so the addresses are resolved
+// against the whole image.
+fn rva_data<'data, Pe: ImageNtHeaders>(file: &PeFile<'data, Pe>, rva: u32) -> Option<&'data [u8]> {
+    file.section_table().pe_data_at(file.data(), rva)
 }
 
-fn delay_import_names<Pe: ImageNtHeaders>(
-    table: &DelayLoadImportTable,
-    rva: u32,
-) -> Vec<ImportName> {
-    let mut names = Vec::new();
-    let Ok(mut thunks) = table.thunks(rva) else {
-        return names;
-    };
-    while let Ok(Some(thunk)) = thunks.next::<Pe>() {
-        match table.import::<Pe>(thunk) {
-            Ok(import) => names.push(import_name(import)),
-            Err(_) => break,
-        }
-    }
-    names
+fn rva_name<'data, Pe: ImageNtHeaders>(file: &PeFile<'data, Pe>, rva: u32) -> Option<&'data [u8]> {
+    let data = rva_data(file, rva)?;
+    let end = data.iter().position(|byte| *byte == 0)?;
+    Some(&data[..end])
 }
 
-fn import_name(import: Import) -> ImportName {
-    match import {
-        Import::Name(_, name) => ImportName::Name(String::from_utf8_lossy(name).into_owned()),
-        Import::Ordinal(ordinal) => ImportName::Ordinal(ordinal),
+fn import_names<Pe: ImageNtHeaders>(file: &PeFile<Pe>, rva: u32) -> Vec<ImportName> {
+    let mut names = Vec::new();
+    let Some(mut data) = rva_data(file, rva) else {
+        return names;
+    };
+    while let Ok((thunk, rest)) = object::pod::from_bytes::<Pe::ImageThunkData>(data) {
+        data = rest;
+        if thunk.raw() == 0 {
+            break;
+        }
+        if thunk.is_ordinal() {
+            names.push(ImportName::Ordinal(thunk.ordinal()));
+            continue;
+        }
+        // The thunk points at the hint/name entry, with the name following the
+        // two bytes hint.
+        let Some(name) = rva_name(file, thunk.address().wrapping_add(2)) else {
+            break;
+        };
+        names.push(ImportName::Name(String::from_utf8_lossy(name).into_owned()));
     }
+    names
 }
 
 fn parse_exports(table: &ExportTable) -> PeExports {
