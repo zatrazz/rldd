@@ -74,6 +74,10 @@ All notable changes to this project will be documented in this file.
 - ELF (Android): the `/linkerconfig/<apex>/ld.config.txt` path had a stray
   character, so an executable shipped on an APEX always fell back to the
   system configuration.
+- ELF (Android): the `${VNDK_APEX_VER}` substitution uses the `v` delimiter
+  instead of the `-` one used by `${VNDK_VER}`, and the `current` VNDK
+  version is the one that expands to an empty string (`default` was checked
+  instead).
 
 ## [0.4.0] - 2026-08-17
 

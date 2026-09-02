@@ -146,10 +146,10 @@ impl Properties {
 
         path = path.replace("${SDK_VER}", self.target_sdk_version.as_str());
 
-        let vndk_version_str = get_vndk_version_str('-');
-
-        path = path.replace("${VNDK_VER}", vndk_version_str.as_str());
-        path = path.replace("${VNDK_APEX_VER}", vndk_version_str.as_str());
+        // The VNDK APEX uses a different delimiter than the VNDK version
+        // itself ('v30' against '-30').
+        path = path.replace("${VNDK_VER}", get_vndk_version_str('-').as_str());
+        path = path.replace("${VNDK_APEX_VER}", get_vndk_version_str('v').as_str());
 
         path = path.replace("${LIB}", libpath(ei_class));
 
@@ -167,7 +167,7 @@ enum Token {
 
 fn get_vndk_version_str(delimiter: char) -> String {
     let vndk_str = get_vndk_version_string("");
-    if vndk_str.is_empty() || vndk_str == "default" {
+    if vndk_str.is_empty() || vndk_str == "current" {
         return "".to_string();
     }
     format!("{delimiter}{vndk_str}")
