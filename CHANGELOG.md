@@ -39,6 +39,10 @@ All notable changes to this project will be documented in this file.
   set.
 - The `raw-cpuid` dependency is only used by the Linux ELF backend, and is no
   longer pulled in on the other systems.
+- ELF (Android): the release is handled as the API level number it is, so a
+  device newer than the ones known at build time behaves like the most recent
+  handled one (it was an enumeration that stopped at Android 14, and anything
+  newer failed with an unsupported release error).
 
 ### Fixed
 

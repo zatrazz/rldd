@@ -175,23 +175,15 @@ pub fn get_system_dirs(
     ) -> Result<search_path::SearchPathVec, std::io::Error> {
         let release = android::get_release()?;
 
-        let add_odm = matches!(
-            release,
-            android::AndroidRelease::AndroidR28
-                | android::AndroidRelease::AndroidR29
-                | android::AndroidRelease::AndroidR30
-                | android::AndroidRelease::AndroidR31
-                | android::AndroidRelease::AndroidR32
-                | android::AndroidRelease::AndroidR33
-        );
+        let add_odm =
+            release >= android::AndroidRelease::R28 && release <= android::AndroidRelease::R33;
 
         let mut r = search_path::SearchPathVec::new();
         if is_asan {
-            let path = match release {
-                android::AndroidRelease::AndroidR24 | android::AndroidRelease::AndroidR25 => {
-                    format!("/data/lib{suffix}")
-                }
-                _ => format!("/data/asan/system/lib{suffix}"),
+            let path = if release < android::AndroidRelease::R26 {
+                format!("/data/lib{suffix}")
+            } else {
+                format!("/data/asan/system/lib{suffix}")
             };
             r.push(search_path::SearchPath {
                 path,
@@ -219,11 +211,10 @@ pub fn get_system_dirs(
             });
         }
         if is_asan {
-            let path = match release {
-                android::AndroidRelease::AndroidR24 | android::AndroidRelease::AndroidR25 => {
-                    format!("/vendor/lib{suffix}")
-                }
-                _ => format!("/data/asan/vendor/lib{suffix}"),
+            let path = if release < android::AndroidRelease::R26 {
+                format!("/vendor/lib{suffix}")
+            } else {
+                format!("/data/asan/vendor/lib{suffix}")
             };
             r.push(search_path::SearchPath {
                 path,

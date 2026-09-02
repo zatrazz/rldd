@@ -245,39 +245,32 @@ pub fn get_ld_config_path<P: AsRef<Path>>(
         None
     }
 
-    if let Ok(release) = get_release() {
-        return match release {
-            // Android 7.0/7.1 does not support ld.config.txt.
-            AndroidRelease::AndroidR24 | AndroidRelease::AndroidR25 => None,
+    let Ok(release) = get_release() else {
+        return None;
+    };
 
-            // Android 8.0/8.1 has the ld.config.txt hardcoded.
-            AndroidRelease::AndroidR26 | AndroidRelease::AndroidR27 => get_default_ld_config_path(),
-
-            // Android 9 added support for abi and vndk specific path.
-            AndroidRelease::AndroidR28 => get_vndk_ld_config_path(e_machine, ei_class, false),
-
-            // Android 10 added support per binary ld.config.txt.
-            AndroidRelease::AndroidR29 => {
-                if let Some(cfg) = get_apex_ld_config_path(executable, false) {
-                    return Some(cfg);
-                }
-                get_vndk_ld_config_path(e_machine, ei_class, false)
-            }
-
-            // Android 11 added the /linkerconfig folder support.
-            AndroidRelease::AndroidR30
-            | AndroidRelease::AndroidR31
-            | AndroidRelease::AndroidR32
-            | AndroidRelease::AndroidR33
-            | AndroidRelease::AndroidR34 => {
-                if let Some(cfg) = get_apex_ld_config_path(executable, true) {
-                    return Some(cfg);
-                }
-                get_vndk_ld_config_path(e_machine, ei_class, true)
-            }
-        };
+    // Android 7.0/7.1 does not support ld.config.txt.
+    if release < AndroidRelease::R26 {
+        return None;
     }
-    None
+
+    // Android 8.0/8.1 has the ld.config.txt hardcoded.
+    if release < AndroidRelease::R28 {
+        return get_default_ld_config_path();
+    }
+
+    // Android 11 added the /linkerconfig folder support.
+    let linkerconfig = release >= AndroidRelease::R30;
+
+    // Android 10 added support per binary ld.config.txt.
+    if release >= AndroidRelease::R29 {
+        if let Some(cfg) = get_apex_ld_config_path(executable, linkerconfig) {
+            return Some(cfg);
+        }
+    }
+
+    // Android 9 added support for abi and vndk specific path.
+    get_vndk_ld_config_path(e_machine, ei_class, linkerconfig)
 }
 
 pub fn read_version_file<P: AsRef<Path>>(binary: &P) -> Result<i64, &'static str> {
@@ -301,7 +294,7 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>, S: AsRef<str>>(
     let is_asan = is_asan(interp);
     let release = get_release().map_err(|_| "invalid android release")?;
 
-    if is_asan && matches!(release, AndroidRelease::AndroidR26) {
+    if is_asan && release == AndroidRelease::R26 {
         return Err("asan not supported");
     }
 

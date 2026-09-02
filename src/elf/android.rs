@@ -1,40 +1,30 @@
 use object::elf::*;
 use std::ffi::CString;
 use std::fmt;
-use std::io::{Error, ErrorKind};
+use std::io::Error;
 
 use crate::pathutils;
 
-pub enum AndroidRelease {
-    AndroidR24 = 24, // 7.0
-    AndroidR25 = 25, // 7.1
-    AndroidR26 = 26, // 8.0
-    AndroidR27 = 27, // 8.1
-    AndroidR28 = 28, // 9.0
-    AndroidR29 = 29, // 10
-    AndroidR30 = 30, // 11
-    AndroidR31 = 31, // 12
-    AndroidR32 = 32, // 12.1
-    AndroidR33 = 33, // 13
-    AndroidR34 = 34, // 14
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AndroidRelease(u32);
+
+impl AndroidRelease {
+    // Android 8.0, which added the ld.config.txt file on a hardcoded path.
+    pub const R26: AndroidRelease = AndroidRelease(26);
+    // Android 9, which added the abi and vndk specific configuration paths
+    // along with the /odm partition.
+    pub const R28: AndroidRelease = AndroidRelease(28);
+    // Android 10, which added the per APEX configuration.
+    pub const R29: AndroidRelease = AndroidRelease(29);
+    // Android 11, which added the generated /linkerconfig files.
+    pub const R30: AndroidRelease = AndroidRelease(30);
+    // Android 13, the last release the /odm partition was handled for.
+    pub const R33: AndroidRelease = AndroidRelease(33);
 }
 
 impl fmt::Display for AndroidRelease {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        match &self {
-            AndroidRelease::AndroidR24 => fmt.write_str("24")?,
-            AndroidRelease::AndroidR25 => fmt.write_str("25")?,
-            AndroidRelease::AndroidR26 => fmt.write_str("26")?,
-            AndroidRelease::AndroidR27 => fmt.write_str("27")?,
-            AndroidRelease::AndroidR28 => fmt.write_str("28")?,
-            AndroidRelease::AndroidR29 => fmt.write_str("29")?,
-            AndroidRelease::AndroidR30 => fmt.write_str("30")?,
-            AndroidRelease::AndroidR31 => fmt.write_str("31")?,
-            AndroidRelease::AndroidR32 => fmt.write_str("32")?,
-            AndroidRelease::AndroidR33 => fmt.write_str("33")?,
-            AndroidRelease::AndroidR34 => fmt.write_str("34")?,
-        };
-        Ok(())
+        write!(fmt, "{}", self.0)
     }
 }
 
@@ -59,7 +49,7 @@ pub fn get_property<S1: AsRef<str>, S2: AsRef<str>>(
     match ret as usize {
         0 => Ok(default.as_ref().to_string()),
         l => std::str::from_utf8(&val[..l.min(PROP_VALUE_MAX)])
-            .map_err(|_e| Error::new(ErrorKind::Other, "Invalid UTF8 sequence"))
+            .map_err(|_e| Error::other("Invalid UTF8 sequence"))
             .map(|s| s.trim_matches(char::from(0)).to_string()),
     }
 }
@@ -69,20 +59,11 @@ pub fn get_release_str() -> Result<String, std::io::Error> {
 }
 
 pub fn get_release() -> Result<AndroidRelease, std::io::Error> {
-    match get_release_str()?.as_str() {
-        "24" => Ok(AndroidRelease::AndroidR24),
-        "25" => Ok(AndroidRelease::AndroidR25),
-        "26" => Ok(AndroidRelease::AndroidR26),
-        "27" => Ok(AndroidRelease::AndroidR27),
-        "28" => Ok(AndroidRelease::AndroidR28),
-        "29" => Ok(AndroidRelease::AndroidR29),
-        "30" => Ok(AndroidRelease::AndroidR30),
-        "31" => Ok(AndroidRelease::AndroidR31),
-        "32" => Ok(AndroidRelease::AndroidR32),
-        "33" => Ok(AndroidRelease::AndroidR33),
-        "34" => Ok(AndroidRelease::AndroidR34),
-        _ => Err(Error::new(ErrorKind::Other, "Unsupported Android release")),
-    }
+    get_release_str()?
+        .trim()
+        .parse::<u32>()
+        .map(AndroidRelease)
+        .map_err(|_| Error::other("Could not read the Android release"))
 }
 
 pub fn get_property_bool<S: AsRef<str>>(
