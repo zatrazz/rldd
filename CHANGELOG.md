@@ -36,7 +36,7 @@ All notable changes to this project will be documented in this file.
 - A dependency whose resolved file differs from the recorded name is printed
   as `NAME -> FILE`, which on Windows shows the module that implements an API
   set.
-- The `raw-cpuid` dependency is only used by the ELF backend, and is no
+- The `raw-cpuid` dependency is only used by the Linux ELF backend, and is no
   longer pulled in on the other systems.
 
 ### Fixed

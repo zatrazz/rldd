@@ -28,8 +28,7 @@ argh = "0.1.19"
 [target.'cfg(any(target_os = "macos", target_os = "android"))'.dependencies]
 libc = "0.2.138"
 
-# Only used by the ELF glibc-hwcap support.
-[target.'cfg(all(target_family = "unix", any(target_arch = "x86", target_arch = "x86_64")))'.dependencies]
+[target.'cfg(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64")))'.dependencies]
 raw-cpuid = "11.6.0"
 
 # The KnownDLLs registry key and the Windows directory.
