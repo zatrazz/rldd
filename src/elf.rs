@@ -996,7 +996,22 @@ struct ResolvedDependency<'a> {
     // (for instance on OpenBSD minor version matching).
     filename: String,
     mode: DepMode,
+    // The namespace the object was loaded in, used to resolve its own
+    // dependencies (Android only).
+    namespace: ObjectNamespace,
 }
+
+// The Android linker namespace an object is loaded in, where it can be
+// the ld.config.txt namespace name, or None for the default one.  A dependency
+// is resolved from the namespace of the object that requests it, and not always
+// from the default one.  So a library loaded through a namespace link resolves
+// its own dependencies with the linked namespace search paths.
+#[cfg(target_os = "android")]
+type ObjectNamespace = Option<String>;
+#[cfg(all(target_family = "unix", not(target_os = "android")))]
+#[derive(Clone, Debug, Default)]
+// The other loaders have no equivalent, so the field carries nothing there.
+struct ObjectNamespace;
 
 // A pending dependency to resolve: the DT_NEEDED name along the index of the
 // loading object information (on the parents vector) and the dependency tree
@@ -1023,7 +1038,9 @@ fn resolve_dependencies(
 
     // The already loaded objects information, used to resolve their own
     // dependencies (rpath chain and libmap reference path).
-    let mut parents: Vec<(ElfInfo, String)> = Vec::new();
+    // Or, in the Android case, the already loaded objects information, along
+    // the namespace each one was loaded in.
+    let mut parents: Vec<(ElfInfo, String, ObjectNamespace)> = Vec::new();
 
     let mut queue = VecDeque::new();
     // The glibc loader trace prints 'statically linked' for an object without
@@ -1047,10 +1064,10 @@ fn resolve_dependencies(
             preload: false,
         });
     }
-    parents.push((root_elc, root_refpath));
+    parents.push((root_elc, root_refpath, Default::default()));
 
     while let Some(item) = queue.pop_front() {
-        let (elc, refpath) = &parents[item.parent];
+        let (elc, refpath, namespace) = &parents[item.parent];
 
         // FreeBSD libmap.conf may remap the dependency name based on the
         // referencing object path.
@@ -1115,7 +1132,9 @@ fn resolve_dependencies(
             }
         }
 
-        if let Some(mut dep) = resolve_dependency_1(dependency, config, elc, item.preload) {
+        if let Some(mut dep) =
+            resolve_dependency_1(dependency, config, elc, namespace, item.preload)
+        {
             // The preload entries are always shown with the preload mode,
             // wherever the search resolved them.
             if item.preload {
@@ -1179,7 +1198,7 @@ fn resolve_dependencies(
                     preload: item.preload,
                 });
             }
-            parents.push((dep.elc, depref));
+            parents.push((dep.elc, depref, dep.namespace));
         } else {
             let path = Path::new(dependency);
             let searched = searched_locations(config, elc, dependency);
@@ -1248,7 +1267,13 @@ fn add_loader_dependency(config: &Config, elc: &ElfInfo, deptree: &mut DepTree, 
         let dtneeded = name.to_string();
         let mut dep = None;
         if let Some(ld_cache) = config.ld_cache {
-            dep = resolve_dependency_ld_cache(&dtneeded, ld_cache, config.platform, elc);
+            dep = resolve_dependency_ld_cache(
+                &dtneeded,
+                ld_cache,
+                config.platform,
+                elc,
+                &Default::default(),
+            );
         }
         if dep.is_none() {
             for searchpath in &config.system_dirs {
@@ -1261,6 +1286,7 @@ fn add_loader_dependency(config: &Config, elc: &ElfInfo, deptree: &mut DepTree, 
                         path: &searchpath.path,
                         filename: pathutils::get_name(&path),
                         mode: DepMode::SystemDirs,
+                        namespace: Default::default(),
                     });
                     break;
                 }
@@ -1324,6 +1350,8 @@ fn resolve_dependency_1<'a>(
     dtneeded: &'a String,
     config: &'a Config,
     elc: &'a ElfInfo,
+    // Android only: the namespace of the object requesting the dependency.
+    namespace: &ObjectNamespace,
     preload: bool,
 ) -> Option<ResolvedDependency<'a>> {
     let path = Path::new(&dtneeded);
@@ -1342,6 +1370,7 @@ fn resolve_dependency_1<'a>(
                 } else {
                     DepMode::Direct
                 },
+                namespace: namespace.clone(),
             });
         }
         return None;
@@ -1362,6 +1391,7 @@ fn resolve_dependency_1<'a>(
                     path: &searchpath.path,
                     filename: pathutils::get_name(&path),
                     mode: DepMode::DtRpath,
+                    namespace: namespace.clone(),
                 });
             }
         }
@@ -1376,6 +1406,7 @@ fn resolve_dependency_1<'a>(
                 path: &searchpath.path,
                 filename: pathutils::get_name(&path),
                 mode: DepMode::LdLibraryPath,
+                namespace: namespace.clone(),
             });
         }
     }
@@ -1389,6 +1420,7 @@ fn resolve_dependency_1<'a>(
                 path: &searchpath.path,
                 filename: pathutils::get_name(&path),
                 mode: DepMode::DtRunpath,
+                namespace: namespace.clone(),
             });
         }
     }
@@ -1400,7 +1432,9 @@ fn resolve_dependency_1<'a>(
 
     // Check the loader cache.
     if let Some(ld_cache) = config.ld_cache {
-        if let Some(dep) = resolve_dependency_ld_cache(dtneeded, ld_cache, config.platform, elc) {
+        if let Some(dep) =
+            resolve_dependency_ld_cache(dtneeded, ld_cache, config.platform, elc, namespace)
+        {
             return Some(dep);
         }
     }
@@ -1414,6 +1448,7 @@ fn resolve_dependency_1<'a>(
                 path: &searchpath.path,
                 filename: pathutils::get_name(&path),
                 mode: DepMode::SystemDirs,
+                namespace: namespace.clone(),
             });
         }
     }
@@ -1427,6 +1462,7 @@ fn resolve_dependency_ld_cache<'a>(
     ld_cache: &'a LoaderCache,
     platform: Option<&String>,
     elc: &'a ElfInfo,
+    _namespace: &ObjectNamespace,
 ) -> Option<ResolvedDependency<'a>> {
     use std::path::PathBuf;
     if let Some(path) = ld_cache.get(dtneeded) {
@@ -1439,6 +1475,7 @@ fn resolve_dependency_ld_cache<'a>(
                 path,
                 filename: pathutils::get_name(&pathbuf),
                 mode: DepMode::LdCache,
+                namespace: Default::default(),
             });
         }
     }
@@ -1451,6 +1488,7 @@ fn resolve_dependency_ld_cache<'a>(
     ld_cache: &'a LoaderCache,
     platform: Option<&String>,
     elc: &'a ElfInfo,
+    namespace: &ObjectNamespace,
 ) -> Option<ResolvedDependency<'a>> {
     // The constraint function is used to instruct the compiler with a higher-ranked trait
     // bounds (for <...>) that the closure must return a reference of the same lifetime as
@@ -1472,34 +1510,43 @@ fn resolve_dependency_ld_cache<'a>(
                     path: &searchpath.path,
                     filename: pathutils::get_name(&path),
                     mode: DepMode::LdCache,
+                    namespace: Default::default(),
                 });
             }
         }
         None
     });
 
-    // First check the default namespace and then the linked namespaces for the default one.
-    // For latter, do not follow further linked namespaces.
-    if let Some(default_ns) = ld_cache.get_default_namespace() {
-        if let Some(resolved) = search_namespace(default_ns) {
-            return Some(resolved);
+    // The search starts on the namespace the requesting object was loaded in
+    // (the default one for the executable itself) and follows the namespaces
+    // it links against, without following further links.  An object resolved
+    // through a link is loaded on the linked namespace, which is the one its
+    // own dependencies are then resolved from.
+    let current_ns = match namespace {
+        Some(name) => ld_cache.get_namespace(name)?,
+        None => ld_cache.get_default_namespace()?,
+    };
+
+    if let Some(mut resolved) = search_namespace(current_ns) {
+        resolved.namespace = namespace.clone();
+        return Some(resolved);
+    }
+
+    for link in &current_ns.namespaces {
+        // A link only makes the libraries on its shared_libs list
+        // accessible (unless it allows all of them).
+        if !link.is_accessible(dtneeded) {
+            continue;
         }
 
-        for link in &default_ns.namespaces {
-            // A link only makes the libraries on its shared_libs list
-            // accessible (unless it allows all of them).
-            if !link.is_accessible(dtneeded) {
+        if let Some(linked_ns) = ld_cache.get_namespace(&link.namespace) {
+            if !linked_ns.is_accessible(dtneeded) {
                 continue;
             }
 
-            if let Some(namespace) = ld_cache.get_namespace(&link.namespace) {
-                if !namespace.is_accessible(dtneeded) {
-                    continue;
-                }
-
-                if let Some(resolved) = search_namespace(namespace) {
-                    return Some(resolved);
-                }
+            if let Some(mut resolved) = search_namespace(linked_ns) {
+                resolved.namespace = Some(link.namespace.clone());
+                return Some(resolved);
             }
         }
     }
@@ -1516,6 +1563,7 @@ fn resolve_dependency_ld_cache<'a>(
     ld_cache: &'a LoaderCache,
     platform: Option<&String>,
     elc: &'a ElfInfo,
+    _namespace: &ObjectNamespace,
 ) -> Option<ResolvedDependency<'a>> {
     for searchpath in ld_cache {
         let path = dependency_path(&searchpath.path, dtneeded);
@@ -1525,6 +1573,7 @@ fn resolve_dependency_ld_cache<'a>(
                 path: &searchpath.path,
                 filename: pathutils::get_name(&path),
                 mode: DepMode::LdCache,
+                namespace: Default::default(),
             });
         }
     }
