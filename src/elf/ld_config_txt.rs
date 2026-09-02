@@ -195,7 +195,7 @@ pub fn get_ld_config_path<P: AsRef<Path>>(
     ei_class: FileClass,
 ) -> Option<String> {
     fn get_ld_config_vndk_path() -> String {
-        if get_property_bool("ro.vndk.lite", false).unwrap() {
+        if get_property_bool("ro.vndk.lite", false).unwrap_or(false) {
             return "/system/etc/ld.config.vndk_lite.txt".to_string();
         }
 
@@ -334,12 +334,16 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
         }
     }
 
-    let target_sdk_version = if properties.get_bool("enable.target.sdk.version") {
-        read_version_file(binary)?.to_string()
+    // The '.version' file is only present for the binaries the configuration
+    // opts in, the running release is used otherwise (and if the file can not
+    // be read, the way the loader falls back to the current version).
+    properties.target_sdk_version = if properties.get_bool("enable.target.sdk.version") {
+        read_version_file(binary)
+            .map(|version| version.to_string())
+            .unwrap_or_else(|_| release.to_string())
     } else {
         release.to_string()
     };
-    properties.target_sdk_version = target_sdk_version;
 
     let mut ldcache = LdCache::new();
 

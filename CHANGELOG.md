@@ -81,6 +81,9 @@ All notable changes to this project will be documented in this file.
 - ELF (Android): a namespace link only makes the libraries listed on its
   `shared_libs` property accessible, unless `allow_all_shared_libs` is set
   (the list was parsed for validation but not used on the resolution).
+- ELF (Android): a `.version` file that can not be read falls back to the
+  running release instead of failing the whole configuration parsing, and
+  an unreadable `ro.vndk.lite` property no longer panics.
 
 ## [0.4.0] - 2026-08-17
 
