@@ -268,10 +268,10 @@ pub fn get_ld_config_path<P: AsRef<Path>>(
         return get_default_ld_config_path();
     }
 
-    // Android 11 added the /linkerconfig folder support.
+    // Android 11 added the /linkerconfig generated files.
     let linkerconfig = release >= AndroidRelease::R30;
 
-    // Android 10 added support per binary ld.config.txt.
+    // Android 10 added the per binary (APEX) ld.config.txt.
     if release >= AndroidRelease::R29 {
         if let Some(cfg) = get_apex_ld_config_path(executable, linkerconfig) {
             return Some(cfg);
@@ -360,9 +360,9 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
     // keys is used.
     let ns_configs_set = ldcache.config_set();
 
-    for (_, ns) in ldcache.namespaces_config.iter_mut() {
+    for ns in ldcache.namespaces_config.values_mut() {
         let mut property_name_prefix = format!("namespace.{}", ns.name);
-        if let Some(linked_namespaces) = properties.get(&format!("{property_name_prefix}.links")) {
+        if let Some(linked_namespaces) = properties.get(format!("{property_name_prefix}.links")) {
             for ns_linked in linked_namespaces.split(',') {
                 if !ns_configs_set.contains(ns_linked) {
                     return Err("undefined namespace");
