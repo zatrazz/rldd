@@ -359,7 +359,9 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
                 deptree.addnode(
                     DepNode {
                         path: entry.path.clone(),
-                        name: entry.name.clone(),
+                        // The name this entry records, which only matches the
+                        // one already on the tree without regard to case.
+                        name: name.clone(),
                         mode: entry.mode,
                         found: true,
                         alias,
