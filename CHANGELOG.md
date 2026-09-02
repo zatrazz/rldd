@@ -29,7 +29,8 @@ All notable changes to this project will be documented in this file.
   module list (so the same name may be loaded from more than one assembly).
 - PE: the `.local` DLL redirection and the `bound` attribute for the imports
   bound at link time.
-- The CI workflow also builds on Windows.
+- The CI workflow also builds on Windows, and checks the Android targets
+  (which are only cross compiled).
 
 ### Changed
 
