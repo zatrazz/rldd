@@ -54,6 +54,8 @@ The ‘dir.’ mappings only cover the directories an executable is run from, so
 
 When no configuration applies, the default system directories for the release are used: /system/lib[64], /odm/lib[64] (from Android 9 on), and /vendor/lib[64], each one preceded by the sanitizer specific directory for an ASan (/data/asan/...) or HWASan (.../hwasan) instrumented object, which are detected from the loader name (linker_asan[64] and linker_hwasan[64]).
 
+DT_RPATH is not searched, since the bionic loader does not implement it (it warns about the unused dynamic entry and fails the load); only DT_RUNPATH is.  The recorded DT_RPATH is still shown on the ‘-v’ output, so an object that relies on one can be told apart from one with no search path at all.
+
 The ${LIB} substitution and the library directory suffix follow the object ELF class, so a 32-bit object is resolved against the ‘lib’ directories even on a 64-bit device.  A DT_NEEDED entry naming the vDSO is not listed, since the loader resolves it against the image the kernel maps.
 
 ### FreeBSD

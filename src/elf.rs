@@ -632,7 +632,7 @@ fn searched_locations(config: &Config, elc: &ElfInfo, dependency: &str) -> Vec<S
         r.push(dependency.to_string());
         return r;
     }
-    if !elc.has_runpath {
+    if rpath_search(elc) {
         push_searched(&mut r, "rpath", &elc.rpath);
     }
     push_searched(&mut r, "library path", config.ld_library_path);
@@ -982,7 +982,16 @@ fn dependency_path(dir: &str, dtneeded: &str) -> std::path::PathBuf {
 fn rpath_search(elc: &ElfInfo) -> bool {
     !elc.has_runpath
 }
-#[cfg(all(target_family = "unix", not(target_os = "linux")))]
+// The bionic loader does not implement DT_RPATH at all: it warns about the
+// unused dynamic entry and only searches DT_RUNPATH.
+#[cfg(target_os = "android")]
+fn rpath_search(_elc: &ElfInfo) -> bool {
+    false
+}
+#[cfg(all(
+    target_family = "unix",
+    not(any(target_os = "linux", target_os = "android"))
+))]
 fn rpath_search(_elc: &ElfInfo) -> bool {
     true
 }

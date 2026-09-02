@@ -95,6 +95,8 @@ All notable changes to this project will be documented in this file.
   that maps the executable directory of its partition (`/system/lib64` uses
   the `/system/bin` one) instead of falling back to the default system
   directories, which left every dependency provided by an APEX unresolved.
+- ELF (Android): `DT_RPATH` is not searched, since the bionic loader does not
+  implement it.
 
 ## [0.4.0] - 2026-08-17
 
