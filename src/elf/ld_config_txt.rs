@@ -141,15 +141,8 @@ impl Properties {
             .to_string()
     }
 
-    fn get_paths<S: AsRef<str>>(
-        &self,
-        name: S,
-        e_machine: Machine,
-        ei_class: FileClass,
-    ) -> search_path::SearchPathVec {
+    fn get_paths<S: AsRef<str>>(&self, name: S, ei_class: FileClass) -> search_path::SearchPathVec {
         let mut path = self.get_string(name);
-
-        let lib = libpath(e_machine, ei_class).unwrap();
 
         path = path.replace("${SDK_VER}", self.target_sdk_version.as_str());
 
@@ -158,7 +151,7 @@ impl Properties {
         path = path.replace("${VNDK_VER}", vndk_version_str.as_str());
         path = path.replace("${VNDK_APEX_VER}", vndk_version_str.as_str());
 
-        path = path.replace("${LIB}", lib);
+        path = path.replace("${LIB}", libpath(ei_class));
 
         search_path::from_string(path, &[':'])
     }
@@ -288,7 +281,6 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
     filename: &P2,
     binary: &P1,
     interp: Option<&str>,
-    e_machine: Machine,
     ei_class: FileClass,
 ) -> Result<LdCache, &'static str> {
     let is_asan = is_asan(interp);
@@ -400,11 +392,8 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
             property_name_prefix.push_str(".asan");
         }
 
-        ns.search_paths = properties.get_paths(
-            format!("{property_name_prefix}.search.paths"),
-            e_machine,
-            ei_class,
-        );
+        ns.search_paths =
+            properties.get_paths(format!("{property_name_prefix}.search.paths"), ei_class);
 
         // Skip the permitted.paths, since it is not required for program loading.
     }
@@ -631,7 +620,7 @@ mod tests {
             false => vec![systemlib.to_str().unwrap()],
         };
 
-        match parse_ld_config_txt(&cfgpath, &binpath, Some(interp), EM_386, ELFCLASS32) {
+        match parse_ld_config_txt(&cfgpath, &binpath, Some(interp), ELFCLASS32) {
             Ok(ldcache) => {
                 let default_ns = ldcache
                     .get_default_namespace()

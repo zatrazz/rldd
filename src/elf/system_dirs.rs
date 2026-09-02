@@ -163,7 +163,7 @@ pub fn get_system_dirs(
 pub fn get_system_dirs(
     interp: &Option<String>,
     _is_musl: bool,
-    e_machine: Machine,
+    _e_machine: Machine,
     ei_class: FileClass,
     _e_flags: FileFlags,
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
@@ -233,16 +233,15 @@ pub fn get_system_dirs(
     // A shared library has no PT_INTERP segment, so no sanitizer applies.
     let is_asan = android::is_asan(interp.as_deref());
 
-    match e_machine {
-        EM_AARCH64 | EM_X86_64 => get_system_dirs_xx("64", is_asan),
-        EM_ARM | EM_386 => get_system_dirs_xx("", is_asan),
-        EM_MIPS => match ei_class {
-            ELFCLASS64 => get_system_dirs_xx("64", is_asan),
-            ELFCLASS32 => get_system_dirs_xx("", is_asan),
-            _ => return_error(),
+    // The bionic loader hardwires the directory as 'lib64' for the LP64 ABIs
+    // and 'lib' for the ILP32 ones.
+    get_system_dirs_xx(
+        match ei_class {
+            ELFCLASS64 => "64",
+            _ => "",
         },
-        _ => return_error(),
-    }
+        is_asan,
+    )
 }
 
 #[cfg(target_os = "freebsd")]

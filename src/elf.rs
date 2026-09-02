@@ -886,7 +886,6 @@ fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, binary: &P,
             &Path::new(&ld_config_path),
             binary,
             elc.interp.as_deref(),
-            elc.e_machine,
             elc.ei_class,
         )
         .ok();

@@ -100,19 +100,16 @@ pub fn is_asan(interp: Option<&str>) -> bool {
     )
 }
 
-pub fn libpath(e_machine: Machine, ei_class: FileClass) -> Option<&'static str> {
-    match e_machine {
-        EM_AARCH64 | EM_X86_64 => Some("lib64"),
-        EM_ARM | EM_386 => Some("lib"),
-        EM_MIPS => match ei_class {
-            ELFCLASS64 => Some("lib64"),
-            ELFCLASS32 => Some("lib"),
-            _ => None,
-        },
-        _ => None,
+// The ${LIB} substitution and the system directories suffix.
+pub fn libpath(ei_class: FileClass) -> &'static str {
+    match ei_class {
+        ELFCLASS64 => "lib64",
+        _ => "lib",
     }
 }
 
+// The bionic ABI_STRING, used on the architecture specific configuration file
+// name.
 pub fn abi_string(e_machine: Machine, ei_class: FileClass) -> Option<&'static str> {
     match e_machine {
         EM_AARCH64 => Some("arm64"),

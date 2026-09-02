@@ -66,6 +66,9 @@ All notable changes to this project will be documented in this file.
 - ELF (Android): any object without a `PT_INTERP` segment (including the
   loader itself) no longer panics, and its dependencies are resolved with
   the default system directories.
+- ELF (Android): a `${LIB}` substitution and a default directory of an
+  architecture without an explicit entry (`riscv64`) no longer panics or
+  fails. Both are now derived from the object ELF class like the loader does.
 
 ## [0.4.0] - 2026-08-17
 
