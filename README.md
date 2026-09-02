@@ -50,7 +50,7 @@ The dependencies are resolved with the ld.config.txt namespace configuration ass
 
 When no configuration applies (which is the case for a shared library), the default system directories for the release are: /system/lib[64], /odm/lib[64] (from Android 9 on), and /vendor/lib[64], each one preceded by the sanitizer specific directory for an ASan (/data/asan/...) or HWASan (.../hwasan) instrumented object.
 
-The ${LIB} substitution and the library directory suffix follow the object ELF class, so a 32-bit object is resolved against the ‘lib’ directories even on a 64-bit device.
+The ${LIB} substitution and the library directory suffix follow the object ELF class, so a 32-bit object is resolved against the ‘lib’ directories even on a 64-bit device.  A DT_NEEDED entry naming the vDSO is not listed, since the loader resolves it against the image the kernel maps.
 
 ### FreeBSD
 

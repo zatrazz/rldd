@@ -87,6 +87,9 @@ All notable changes to this project will be documented in this file.
 - ELF (Android): a `.version` file that can not be read falls back to the
   running release instead of failing the whole configuration parsing, and
   an unreadable `ro.vndk.lite` property no longer panics.
+- ELF (Android): a `DT_NEEDED` entry naming the vDSO (the arm translation
+  objects have one) is not reported as not found, since the loader resolves
+  it against the image the kernel maps.
 
 ## [0.4.0] - 2026-08-17
 

@@ -1060,6 +1060,11 @@ fn resolve_dependencies(
             continue;
         }
 
+        #[cfg(target_os = "android")]
+        if matches!(dependency.as_str(), "linux-vdso.so.1" | "linux-gate.so.1") {
+            continue;
+        }
+
         // If DF_1_NODEFLIB is set ignore the search cache in the case a
         // dependency could resolve the library.
         if !elc.nodeflibs {
