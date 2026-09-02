@@ -48,7 +48,11 @@ A binary is handled as a musl one when the interpreter is ld-musl-$(ARCH).so.1, 
 
 The dependencies are resolved with the ld.config.txt namespace configuration associated with the executable, the default namespace is searched first, followed by the namespaces it links against, restricted to the libraries each link makes accessible (the link ‘shared_libs’ list, unless it allows all of them) and to the names the linked namespace allows.  The configuration file is selected the way the loader does for the API level of the device: the one generated for the APEX the executable belongs to (/linkerconfig/&lt;apex&gt;/ld.config.txt), the architecture specific /system/etc/ld.config.&lt;abi&gt;.txt, the generated /linkerconfig/ld.config.txt, and the VNDK ones, in this order.
 
-When no configuration applies (which is the case for a shared library), the default system directories for the release are: /system/lib[64], /odm/lib[64] (from Android 9 on), and /vendor/lib[64], each one preceded by the sanitizer specific directory for an ASan (/data/asan/...) or HWASan (.../hwasan) instrumented object.
+A dependency is searched on the namespace the requesting object was loaded in, and then on the namespaces it links against. An object resolved through a link has its own dependencies searched on the linked namespace.
+
+The ‘dir.’ mappings only cover the directories an executable is run from, so a shared library never matches one.  Since a library is loaded by an executable, the section that maps the executable directory of the partition the library is on is used instead: /system/lib64/libfoo.so is resolved with the /system/bin section, and an object below /apex/&lt;name&gt; with the section of that APEX.  An executable that matches no directory does not fall back, the way the loader uses the default system directories for it.
+
+When no configuration applies, the default system directories for the release are used: /system/lib[64], /odm/lib[64] (from Android 9 on), and /vendor/lib[64], each one preceded by the sanitizer specific directory for an ASan (/data/asan/...) or HWASan (.../hwasan) instrumented object, which are detected from the loader name (linker_asan[64] and linker_hwasan[64]).
 
 The ${LIB} substitution and the library directory suffix follow the object ELF class, so a 32-bit object is resolved against the ‘lib’ directories even on a 64-bit device.  A DT_NEEDED entry naming the vDSO is not listed, since the loader resolves it against the image the kernel maps.
 

@@ -307,18 +307,18 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
         return Err("asan not supported");
     }
 
-    let mut lines = match read_lines(filename) {
+    let lines = match read_lines(filename) {
         Ok(lines) => lines,
         Err(_e) => return Err("Could not open the filename"),
     };
 
-    let section = find_initial_section(binary, &mut lines)?;
+    let section = find_initial_section(binary, &lines, interp.is_none())?;
 
-    find_section(&section, &mut lines)?;
+    let start = find_section(&section, &lines)?;
 
     let mut properties = Properties::new();
-    while let Some(Ok(line)) = lines.next() {
-        let (token, line) = match next_token(&line) {
+    for line in &lines[start..] {
+        let (token, line) = match next_token(line) {
             Some(fields) => fields,
             None => continue,
         };
@@ -432,12 +432,33 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
     Ok(ldcache)
 }
 
+// The path prefix that identifies the partition a file belongs to. The first
+// path component, along the APEX name for the /apex ones.
+fn partition_prefix<P: AsRef<Path>>(path: &P) -> Option<std::path::PathBuf> {
+    let mut parts = path.as_ref().iter();
+    // Skip the root component.
+    parts.next()?;
+    let first = parts.next()?;
+    let mut prefix = std::path::PathBuf::from(first);
+    if first == "apex" {
+        prefix.push(parts.next()?);
+    }
+    Some(prefix)
+}
+
+// Find the section that applies to the binary, from the 'dir.<section>' entries
+// that precede the first one.  The 'fallback' flag enables the partition match
+// described on find_section_fallback.
 fn find_initial_section<P: AsRef<Path>>(
     binary: &P,
-    lines: &mut io::Lines<io::BufReader<File>>,
+    lines: &[String],
+    fallback: bool,
 ) -> Result<String, &'static str> {
-    while let Some(Ok(line)) = lines.next() {
-        let (token, line) = match next_token(&line) {
+    // The mappings, in file order, with the directory already resolved.
+    let mut dirs: Vec<(String, std::path::PathBuf)> = Vec::new();
+
+    for line in lines {
+        let (token, line) = match next_token(line) {
             Some(fields) => fields,
             None => continue,
         };
@@ -450,46 +471,56 @@ fn find_initial_section<P: AsRef<Path>>(
                 }
 
                 if let Ok(resolved) = std::fs::canonicalize(value) {
-                    if binary.as_ref().starts_with(resolved) {
+                    if binary.as_ref().starts_with(&resolved) {
                         return Ok(name[4..].to_string());
                     }
+                    dirs.push((name[4..].to_string(), resolved));
                 }
             }
             Token::Section => break,
             Token::PropertyAppend | Token::Error => continue,
         }
     }
+
+    if fallback {
+        if let Some(section) = find_section_fallback(binary, &dirs) {
+            return Ok(section);
+        }
+    }
+
     Err("initial section for binary not found")
 }
 
-fn find_section(
-    section: &String,
-    lines: &mut io::Lines<io::BufReader<File>>,
-) -> Result<(), &'static str> {
-    while let Some(Ok(line)) = lines.next() {
-        let (token, line) = match next_token(&line) {
+fn find_section_fallback<P: AsRef<Path>>(
+    binary: &P,
+    dirs: &[(String, std::path::PathBuf)],
+) -> Option<String> {
+    let partition = partition_prefix(binary)?;
+    dirs.iter()
+        .find(|(_, dir)| partition_prefix(dir).is_some_and(|prefix| prefix == partition))
+        .map(|(section, _)| section.clone())
+}
+
+// Return the index of the line that follows the section header.
+fn find_section(section: &String, lines: &[String]) -> Result<usize, &'static str> {
+    for (index, line) in lines.iter().enumerate() {
+        let (token, line) = match next_token(line) {
             Some(line) => line,
             None => continue,
         };
-        match token {
-            Token::PropertyAssign | Token::PropertyAppend => continue,
-            Token::Section => {
-                if section == &line {
-                    return Ok(());
-                }
-            }
-            _ => break,
+        if matches!(token, Token::Section) && section == &line {
+            return Ok(index + 1);
         }
     }
     Err("section for binary not found")
 }
 
-fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>>
+fn read_lines<P>(filename: P) -> io::Result<Vec<String>>
 where
     P: AsRef<Path>,
 {
     let file = File::open(filename)?;
-    Ok(io::BufReader::new(file).lines())
+    io::BufReader::new(file).lines().collect()
 }
 
 fn next_token(line: &str) -> Option<(Token, String)> {
@@ -770,5 +801,64 @@ mod tests {
     #[test]
     fn smoke_hwasan() -> Result<(), std::io::Error> {
         test_skeleton("linker_hwasan64")
+    }
+
+    #[test]
+    fn partition_prefixes() {
+        let prefix = |path: &str| {
+            partition_prefix(&Path::new(path)).map(|p| p.to_string_lossy().into_owned())
+        };
+
+        assert_eq!(prefix("/system/lib64/libfoo.so").as_deref(), Some("system"));
+        assert_eq!(prefix("/system/bin/"), prefix("/system/lib64/libfoo.so"));
+        assert_eq!(prefix("/vendor/bin"), prefix("/vendor/lib64/hw/libfoo.so"));
+        assert_ne!(prefix("/odm/bin"), prefix("/vendor/lib64/libfoo.so"));
+
+        // The APEX name is part of the prefix, so each one has its own.
+        assert_eq!(
+            prefix("/apex/com.android.art/lib64/libart.so").as_deref(),
+            Some("apex/com.android.art")
+        );
+        assert_eq!(
+            prefix("/apex/com.android.art/bin"),
+            prefix("/apex/com.android.art/lib64/libart.so")
+        );
+        assert_ne!(
+            prefix("/apex/com.android.i18n/bin"),
+            prefix("/apex/com.android.art/lib64/libart.so")
+        );
+
+        assert_eq!(prefix("/"), None);
+    }
+
+    #[test]
+    fn shared_library_section() -> Result<(), std::io::Error> {
+        let tmpdir = TempDir::new()?;
+        let cfgpath = tmpdir.path().join("ld.config.txt");
+
+        let dirtest = tmpdir.path().join("tmp");
+        fs::create_dir(&dirtest)?;
+        fs::create_dir(dirtest.join("vendor"))?;
+        let vendorlib = dirtest.join("vendor/lib");
+        fs::create_dir(&vendorlib)?;
+
+        let mut file = File::create(&cfgpath)?;
+        file.write_all(create_cfg(&dirtest.to_string_lossy()).as_bytes())?;
+
+        // Outside the mapped directory, but on the same partition.
+        let libpath = tmpdir.path().join("libfoo.so");
+        File::create(&libpath)?;
+
+        assert!(parse_ld_config_txt(&cfgpath, &libpath, Some("linker"), ELFCLASS32).is_err());
+
+        let ldcache =
+            parse_ld_config_txt(&cfgpath, &libpath, None, ELFCLASS32).map_err(Error::other)?;
+        let default_ns = ldcache
+            .get_default_namespace()
+            .ok_or(Error::other("default namespace not found"))?;
+        assert_eq!(default_ns.search_paths.len(), 1);
+        assert_eq!(default_ns.search_paths[0], vendorlib.to_str().unwrap());
+
+        Ok(())
     }
 }

@@ -90,6 +90,11 @@ All notable changes to this project will be documented in this file.
 - ELF (Android): a `DT_NEEDED` entry naming the vDSO (the arm translation
   objects have one) is not reported as not found, since the loader resolves
   it against the image the kernel maps.
+- ELF (Android): a shared library, which never matches a `dir.` mapping since
+  those only cover the executable directories, is resolved with the section
+  that maps the executable directory of its partition (`/system/lib64` uses
+  the `/system/bin` one) instead of falling back to the default system
+  directories, which left every dependency provided by an APEX unresolved.
 
 ## [0.4.0] - 2026-08-17
 
