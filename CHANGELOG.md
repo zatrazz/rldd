@@ -49,6 +49,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- The dependency tree output is no longer colorized when stdout is not a
+  terminal, and the `-l` output never is (the file header line carried
+  escape sequences on a pipe).
 - Mach-O: a FAT file without a host architecture slice is still inspected
   when `--arch` is not given. The slice the system run through translation
   (x86_64 under Rosetta) is preferred, with the first slice as fallback

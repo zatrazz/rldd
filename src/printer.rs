@@ -1,6 +1,6 @@
 // Configurable printer module.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use termcolor::{BufferWriter, ColorChoice, WriteColor};
 
 // Ignore output error for now.
@@ -18,15 +18,22 @@ pub struct Printer {
     ldd: bool,
     one: bool,
     verbose: bool,
+    color: ColorChoice,
 }
 
 impl Printer {
     pub fn new(pp: bool, ldd: bool, one: bool, verbose: bool) -> Self {
+        let color = if !ldd && std::io::stdout().is_terminal() {
+            ColorChoice::Auto
+        } else {
+            ColorChoice::Never
+        };
         Self {
             pp,
             ldd,
             one,
             verbose,
+            color,
         }
     }
 
@@ -55,7 +62,7 @@ impl Printer {
     }
 
     pub fn print_executable(&self, path: &Option<String>, name: &String) {
-        let writer = BufferWriter::stdout(ColorChoice::Always);
+        let writer = BufferWriter::stdout(self.color);
         let mut buffer = writer.buffer();
 
         let mut color_path = termcolor::ColorSpec::new();
@@ -95,7 +102,7 @@ impl Printer {
         mode: &str,
         found: bool,
     ) {
-        let writer = BufferWriter::stdout(ColorChoice::Always);
+        let writer = BufferWriter::stdout(self.color);
         let mut buffer = writer.buffer();
 
         let mut color = termcolor::ColorSpec::new();
@@ -137,7 +144,7 @@ impl Printer {
     }
 
     fn print_ldd(&self, dtneeded: &String, alias: Option<&str>, path: &String) {
-        let writer = BufferWriter::stdout(ColorChoice::Always);
+        let writer = BufferWriter::stdout(self.color);
         let mut buffer = writer.buffer();
 
         ok!(buffer.write_all(
@@ -216,7 +223,7 @@ impl Printer {
             None => dtneeded.clone(),
         };
         self.print_preamble(deptrace);
-        let writer = BufferWriter::stdout(ColorChoice::Always);
+        let writer = BufferWriter::stdout(self.color);
         let mut buffer = writer.buffer();
         self.writeln_colorized(
             &mut buffer,
