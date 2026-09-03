@@ -31,7 +31,7 @@ A DT_NEEDED entry naming the program interpreter resolves to the PT_INTERP path,
 The loader environment variables are mimicked with options:
 
 * ‘–library-path LIST’ (LD_LIBRARY_PATH) searches the colon-separated directories.
-* ‘–preload LIST’ (LD_PRELOAD) preloads the listed objects (colon or whitespace separated). An entry containing a slash is taken as a file path, and the bare names are searched like a regular dependency.  On glibc the /etc/ld.so.preload file is also parsed.
+* ‘–preload LIST’ (LD_PRELOAD) preloads the listed objects (colon or whitespace separated). An entry containing a slash is taken as a file path, and the bare names are searched like a regular dependency (except on NetBSD, whose loader opens every entry as a file path).  On glibc the /etc/ld.so.preload file is also parsed.
 * ‘–platform NAME’ sets the $PLATFORM value used on the rpath and runpath expansion, instead of deriving it from the object architecture.
 
 The ‘-v’ option prints the search paths that apply to the input file (rpath, preload, library path, runpath, cache, and default directories), along with the locations searched for each dependency that was not found.
@@ -74,7 +74,7 @@ The search directories come from /var/run/ld.so.hints and /usr/lib.  Like the Op
 
 The NetBSD loader searches the ‘–library-path’ directories first, then the /etc/ld.so.conf ones (the per-library hardware directives are not supported), then the requesting object DT_RPATH or DT_RUNPATH (both handled the same way, the last tag wins), and at last /usr/lib, followed by the compat subdirectory for an object of another architecture (for instance /usr/lib/i386 for a 32-bit object on amd64).  The loader does not check the ELF OS ABI, so an object tagged with another one (for instance ELFOSABI_GNU) also matches.
 
-Like the NetBSD ldd, the loader is not listed on the ‘-l’ output; the dependencies are printed with their object name (libc.so.12 => ...) instead of the linker flag style names the NetBSD ldd uses (-lc.12 => ...).
+Like the NetBSD ldd, the loader is not listed on the ‘-l’ output; the dependencies are printed with their object name (libc.so.12 => ...) instead of the linker flag style names the NetBSD ldd uses (-lc.12 => ...).  The NetBSD ldd does not process LD_PRELOAD, while the ‘–preload’ objects are listed.
 
 ### Illumos
 

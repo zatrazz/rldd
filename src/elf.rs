@@ -1469,8 +1469,11 @@ fn resolve_dependency_1<'a>(
 
     // If the path is absolute skip the other modes.  glibc also treats a
     // preload entry containing a slash as a file path (relative to the
-    // current directory), only the bare names are searched.
-    if path.is_absolute() || (preload && dtneeded.contains(std::path::MAIN_SEPARATOR)) {
+    // current directory), only the bare names are searched.  The NetBSD
+    // loader opens every preload entry as a file path.
+    let preload_is_path =
+        preload && (dtneeded.contains(std::path::MAIN_SEPARATOR) || cfg!(target_os = "netbsd"));
+    if path.is_absolute() || preload_is_path {
         if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, preload) {
             return Some(ResolvedDependency {
                 elc,
