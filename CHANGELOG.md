@@ -61,6 +61,8 @@ All notable changes to this project will be documented in this file.
 - ELF (NetBSD): the compat subdirectory (for instance `/usr/lib/i386`)
   is searched for an object of another architecture.
 - ELF (NetBSD): the ELF OS ABI of a candidate object is not checked.
+- The `--preload` list also accepts whitespace as separator, like the
+  loaders do with `LD_PRELOAD`.
 - Mach-O: a FAT file without a host architecture slice is still inspected
   when `--arch` is not given. The slice the system run through translation
   (x86_64 under Rosetta) is preferred, with the first slice as fallback

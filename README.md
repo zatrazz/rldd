@@ -31,7 +31,7 @@ A DT_NEEDED entry naming the program interpreter resolves to the PT_INTERP path,
 The loader environment variables are mimicked with options:
 
 * ‘–library-path LIST’ (LD_LIBRARY_PATH) searches the colon-separated directories.
-* ‘–preload LIST’ (LD_PRELOAD) preloads the listed objects; an entry containing a slash is taken as a file path, and the bare names are searched like a regular dependency.  On glibc the /etc/ld.so.preload file is also parsed.
+* ‘–preload LIST’ (LD_PRELOAD) preloads the listed objects (colon or whitespace separated). An entry containing a slash is taken as a file path, and the bare names are searched like a regular dependency.  On glibc the /etc/ld.so.preload file is also parsed.
 * ‘–platform NAME’ sets the $PLATFORM value used on the rpath and runpath expansion, instead of deriving it from the object architecture.
 
 The ‘-v’ option prints the search paths that apply to the input file (rpath, preload, library path, runpath, cache, and default directories), along with the locations searched for each dependency that was not found.

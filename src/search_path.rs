@@ -102,15 +102,32 @@ pub fn from_string<S: AsRef<str>>(string: S, delim: &[char]) -> SearchPathVec {
 }
 
 // The loaders accept both file paths and bare names to be searched like
-// a regular dependency, so the entries are kept as given.
+// a regular dependency, so the entries are kept as given.  The list is
+// separated by colons or whitespace on every loader.
 #[cfg(unix)]
 pub fn from_preload<S: AsRef<str>>(string: S) -> Vec<String> {
     string
         .as_ref()
-        .split(':')
+        .split(|c: char| c == ':' || c.is_whitespace())
         .filter(|entry| !entry.is_empty())
         .map(|entry| entry.to_string())
         .collect()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preload_list() {
+        assert_eq!(from_preload(""), Vec::<String>::new());
+        assert_eq!(from_preload("libz.so.1"), vec!["libz.so.1"]);
+        assert_eq!(
+            from_preload("libz.so.1:/lib/libm.so.6 libc.so.6"),
+            vec!["libz.so.1", "/lib/libm.so.6", "libc.so.6"]
+        );
+        assert_eq!(from_preload("::a: "), vec!["a"]);
+    }
 }
 
 // Format a search path list for diagnostics printing.  The PE backend prints
