@@ -65,6 +65,8 @@ All notable changes to this project will be documented in this file.
   loaders do with `LD_PRELOAD`.
 - ELF (NetBSD): the `--preload` entries are opened as file paths, the way
   the loader handles `LD_PRELOAD` (a bare name was searched).
+- ELF (glibc, FreeBSD): a dependency or preload entry naming the input
+  object own `DT_SONAME` is taken as already loaded, like the loaders do.
 - Mach-O: a FAT file without a host architecture slice is still inspected
   when `--arch` is not given. The slice the system run through translation
   (x86_64 under Rosetta) is preferred, with the first slice as fallback

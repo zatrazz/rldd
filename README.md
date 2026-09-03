@@ -26,7 +26,7 @@ The DT_RPATH scope used for the indirect dependencies follows each loader semant
 * The FreeBSD and OpenBSD loaders search the object own DT_RPATH and then the main object one.
 * The NetBSD loader only searches the requesting object one.
 
-A DT_NEEDED entry naming the program interpreter resolves to the PT_INTERP path, the way the loader matches the entry against its own soname without any search.
+A DT_NEEDED entry naming the program interpreter resolves to the PT_INTERP path, the way the loader matches the entry against its own soname without any search.  Likewise, on glibc and FreeBSD a dependency or preload entry naming the input object own DT_SONAME is taken as already loaded and is not listed.
 
 The loader environment variables are mimicked with options:
 

@@ -1188,6 +1188,13 @@ fn resolve_dependencies(
             continue;
         }
 
+        // The glibc and FreeBSD loaders also match a name against the main
+        // object DT_SONAME.
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if !elc.is_musl && parents[0].0.soname.as_deref() == Some(dependency.as_str()) {
+            continue;
+        }
+
         #[cfg(target_os = "android")]
         if matches!(dependency.as_str(), "linux-vdso.so.1" | "linux-gate.so.1") {
             continue;
