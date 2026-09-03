@@ -49,6 +49,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Mach-O: a run-path entry ending with a slash no longer yields a double
+  slash on the expanded @rpath candidate, which missed the dyld cache image
+  (dyld joins the entry without a second slash).
 - The dependency tree output is no longer colorized when stdout is not a
   terminal, and the `-l` output never is (the file header line carried
   escape sequences on a pipe).

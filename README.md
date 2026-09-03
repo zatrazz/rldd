@@ -86,6 +86,8 @@ On macOS, the dependencies are tracked the way ‘dyld_info -dependents’ and �
 
 Like dyld_info, the input file may be the install name of an image that exists only in the dyld shared cache.
 
+Each absolute candidate path is checked against the dyld shared cache and the filesystem.  The expanded @rpath and environment candidates get no path normalization, but a run-path entry ending with a slash is joined without a second one, like dyld.
+
 The ‘–arch NAME’ option selects the specified slice of a universal binary instead of the host architecture, along with the matching dyld shared cache flavor (for instance, ‘–arch x86_64’ on Apple Silicon resolves to the Rosetta cache when installed).
 
 Since the recursive listing of a system binary expands to most of the dyld shared cache, only the direct dependencies are printed by default, and the tree can be pruned with:

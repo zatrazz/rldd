@@ -384,10 +384,7 @@ fn candidate_paths(
 
     if dependency.contains("@rpath") {
         for rpath in rpaths {
-            candidates.push((
-                dependency.replace("@rpath", rpath.path.as_str()),
-                DepMode::DtRpath,
-            ));
+            candidates.push((expand_rpath(dependency, &rpath.path), DepMode::DtRpath));
         }
     } else {
         let mode = if preload {
@@ -417,6 +414,10 @@ fn candidate_paths(
     }
 
     candidates
+}
+
+fn expand_rpath(dependency: &str, rpath: &str) -> String {
+    dependency.replace("@rpath", rpath.strip_suffix('/').unwrap_or(rpath))
 }
 
 // The framework partial path (Foo.framework/Versions/A/Foo) of a load path
@@ -897,5 +898,36 @@ fn parse_load_command<Mach: MachHeader>(
         }
         LoadCommandVariant::Uuid(x) => Some(LoadCommand::Uuid(format_uuid(&x.uuid))),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rpath_expansion_trailing_slash() {
+        assert_eq!(
+            expand_rpath(
+                "@rpath/Foo.framework/Foo",
+                "/System/Library/PrivateFrameworks"
+            ),
+            "/System/Library/PrivateFrameworks/Foo.framework/Foo"
+        );
+        assert_eq!(
+            expand_rpath(
+                "@rpath/Foo.framework/Foo",
+                "/System/Library/PrivateFrameworks/"
+            ),
+            "/System/Library/PrivateFrameworks/Foo.framework/Foo"
+        );
+        assert_eq!(
+            expand_rpath("@rpath/libfoo.dylib", "/usr/lib//"),
+            "/usr/lib//libfoo.dylib"
+        );
+        assert_eq!(
+            expand_rpath("@rpath/libfoo.dylib", "@loader_path/../lib"),
+            "@loader_path/../lib/libfoo.dylib"
+        );
     }
 }
