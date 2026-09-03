@@ -632,19 +632,52 @@ fn searched_locations(config: &Config, elc: &ElfInfo, dependency: &str) -> Vec<S
         r.push(dependency.to_string());
         return r;
     }
-    if rpath_search(elc) {
-        push_searched(&mut r, "rpath", &elc.rpath);
-    }
-    push_searched(&mut r, "library path", config.ld_library_path);
-    push_searched(&mut r, "runpath", &elc.runpath);
-    if !elc.nodeflibs {
-        if config.ld_cache.is_some() {
-            r.push(format!("cache {}", DepMode::LdCache));
+    for step in SEARCH_ORDER {
+        match step {
+            SearchStep::Rpath => {
+                if rpath_search(elc) {
+                    push_searched(&mut r, "rpath", &elc.rpath);
+                }
+            }
+            SearchStep::LibraryPath => {
+                push_searched(&mut r, "library path", config.ld_library_path)
+            }
+            SearchStep::Runpath => push_searched(&mut r, "runpath", &elc.runpath),
+            SearchStep::Cache => {
+                if !elc.nodeflibs && config.ld_cache.is_some() {
+                    r.push(format!("cache {}", DepMode::LdCache));
+                }
+            }
+            SearchStep::SystemDirs => {
+                if !elc.nodeflibs {
+                    push_searched(&mut r, "default paths", &config.system_dirs);
+                }
+            }
         }
-        push_searched(&mut r, "default paths", &config.system_dirs);
     }
     r
 }
+
+// The search order for a dependency name, following each loader semantics.
+#[derive(Clone, Copy)]
+enum SearchStep {
+    Rpath,
+    LibraryPath,
+    Runpath,
+    Cache,
+    SystemDirs,
+}
+
+// The loaders search the object DT_RPATH, the LD_LIBRARY_PATH directories,
+// the object DT_RUNPATH, the loader cache/hints, and at last the default
+// directories.
+const SEARCH_ORDER: &[SearchStep] = &[
+    SearchStep::Rpath,
+    SearchStep::LibraryPath,
+    SearchStep::Runpath,
+    SearchStep::Cache,
+    SearchStep::SystemDirs,
+];
 
 fn print_search_path_information<P: AsRef<Path>>(filename: &P, config: &Config, elc: &ElfInfo) {
     println!(
@@ -1385,13 +1418,10 @@ fn resolve_dependency_1<'a>(
         return None;
     }
 
-    // The rpath field holds the object own DT_RPATH along with any inherited
-    // part.  The glibc loader skips the whole search (including the inherited
-    // chain) if the object issuing the load has a DT_RUNPATH, while the BSD
-    // loaders still search the main object DT_RPATH (the object own rpath is
-    // already cleared on DT_RUNPATH presence).
-    if rpath_search(elc) {
-        for searchpath in &elc.rpath {
+    // Search a directory list, returning the first directory with a matching
+    // object.
+    let search = |searchpaths: &'a search_path::SearchPathVec, mode: DepMode| {
+        for searchpath in searchpaths {
             let path = dependency_path(&searchpath.path, dtneeded);
             if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false)
             {
@@ -1399,66 +1429,35 @@ fn resolve_dependency_1<'a>(
                     elc,
                     path: &searchpath.path,
                     filename: pathutils::get_name(&path),
-                    mode: DepMode::DtRpath,
+                    mode,
                     namespace: namespace.clone(),
                 });
             }
         }
-    }
+        None
+    };
 
-    // Check LD_LIBRARY_PATH paths.
-    for searchpath in config.ld_library_path {
-        let path = dependency_path(&searchpath.path, dtneeded);
-        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false) {
-            return Some(ResolvedDependency {
-                elc,
-                path: &searchpath.path,
-                filename: pathutils::get_name(&path),
-                mode: DepMode::LdLibraryPath,
-                namespace: namespace.clone(),
-            });
-        }
-    }
-
-    // Check DT_RUNPATH.
-    for searchpath in &elc.runpath {
-        let path = dependency_path(&searchpath.path, dtneeded);
-        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false) {
-            return Some(ResolvedDependency {
-                elc,
-                path: &searchpath.path,
-                filename: pathutils::get_name(&path),
-                mode: DepMode::DtRunpath,
-                namespace: namespace.clone(),
-            });
-        }
-    }
-
-    // Skip system paths if DF_1_NODEFLIB is set.
-    if elc.nodeflibs {
-        return None;
-    }
-
-    // Check the loader cache.
-    if let Some(ld_cache) = config.ld_cache {
-        if let Some(dep) =
-            resolve_dependency_ld_cache(dtneeded, ld_cache, config.platform, elc, namespace)
-        {
-            return Some(dep);
-        }
-    }
-
-    // Finally the system directories.
-    for searchpath in &config.system_dirs {
-        let path = dependency_path(&searchpath.path, dtneeded);
-        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false) {
-            return Some(ResolvedDependency {
-                elc,
-                path: &searchpath.path,
-                filename: pathutils::get_name(&path),
-                mode: DepMode::SystemDirs,
-                namespace: namespace.clone(),
-            });
+    for step in SEARCH_ORDER {
+        let dep = match step {
+            // The rpath field holds the object own DT_RPATH along with any
+            // inherited part.  The glibc loader skips the whole search
+            // (including the inherited chain) if the object issuing the load
+            // has a DT_RUNPATH, while the BSD loaders still search the main
+            // object DT_RPATH (the object own rpath is already cleared on
+            // DT_RUNPATH presence).
+            SearchStep::Rpath if rpath_search(elc) => search(&elc.rpath, DepMode::DtRpath),
+            SearchStep::Rpath => None,
+            SearchStep::LibraryPath => search(config.ld_library_path, DepMode::LdLibraryPath),
+            SearchStep::Runpath => search(&elc.runpath, DepMode::DtRunpath),
+            // Skip the system paths if DF_1_NODEFLIB is set.
+            SearchStep::Cache | SearchStep::SystemDirs if elc.nodeflibs => None,
+            SearchStep::Cache => config.ld_cache.as_ref().and_then(|ld_cache| {
+                resolve_dependency_ld_cache(dtneeded, ld_cache, config.platform, elc, namespace)
+            }),
+            SearchStep::SystemDirs => search(&config.system_dirs, DepMode::SystemDirs),
+        };
+        if dep.is_some() {
+            return dep;
         }
     }
 
