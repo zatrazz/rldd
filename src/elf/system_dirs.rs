@@ -244,7 +244,7 @@ pub fn get_system_dirs(
         .collect())
 }
 
-#[cfg(any(target_os = "openbsd", target_os = "netbsd"))]
+#[cfg(target_os = "openbsd")]
 pub fn get_system_dirs(
     _interp: &Option<String>,
     _is_musl: bool,
@@ -257,6 +257,82 @@ pub fn get_system_dirs(
         dev: 0,
         ino: 0,
     }])
+}
+
+// The NetBSD compat loaders (ld.elf_so-$(MLIBDIR) search the
+// RTLD_DEFAULT_LIBRARY_PATH/$(MLIBDIR) directoryafter the default one.
+// The subdirectory name follows the compat directories the system
+// provides for each host architecture.
+#[cfg(target_os = "netbsd")]
+pub fn netbsd_compat_subdir(
+    e_machine: object::elf::Machine,
+    ei_class: object::elf::FileClass,
+    e_flags: object::elf::FileFlags,
+) -> Option<&'static str> {
+    use object::elf::*;
+    if cfg!(target_arch = "x86_64") && e_machine == EM_386 {
+        Some("i386")
+    } else if cfg!(target_arch = "sparc64") && matches!(e_machine, EM_SPARC | EM_SPARC32PLUS) {
+        Some("sparc")
+    } else if cfg!(target_arch = "powerpc64") && e_machine == EM_PPC {
+        Some("powerpc")
+    } else if cfg!(target_arch = "riscv64") && e_machine == EM_RISCV && ei_class == ELFCLASS32 {
+        Some("rv32")
+    } else if cfg!(target_arch = "aarch64") && e_machine == EM_ARM {
+        if e_flags.contains(FileFlags(EF_ARM_ABI_FLOAT_HARD)) {
+            Some("eabihf")
+        } else {
+            Some("eabi")
+        }
+    } else if cfg!(target_arch = "mips64") && e_machine == EM_MIPS && ei_class == ELFCLASS32 {
+        if e_flags.contains(EF_MIPS_ABI2) {
+            Some("n32")
+        } else {
+            Some("o32")
+        }
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "netbsd")]
+pub fn get_system_dirs(
+    _interp: &Option<String>,
+    _is_musl: bool,
+    e_machine: object::elf::Machine,
+    ei_class: object::elf::FileClass,
+    e_flags: object::elf::FileFlags,
+) -> Result<search_path::SearchPathVec, std::io::Error> {
+    let mut dirs = vec!["/usr/lib".to_string()];
+    if let Some(subdir) = netbsd_compat_subdir(e_machine, ei_class, e_flags) {
+        dirs.push(format!("/usr/lib/{subdir}"));
+    }
+    Ok(dirs
+        .into_iter()
+        .map(|path| search_path::SearchPath {
+            path,
+            dev: 0,
+            ino: 0,
+        })
+        .collect())
+}
+
+#[cfg(all(test, target_os = "netbsd"))]
+mod tests {
+    use super::*;
+    use object::elf::*;
+
+    #[test]
+    fn compat_subdir() {
+        let native = netbsd_compat_subdir(EM_X86_64, ELFCLASS64, FileFlags(0));
+        assert_eq!(native, None);
+        if cfg!(target_arch = "x86_64") {
+            assert_eq!(
+                netbsd_compat_subdir(EM_386, ELFCLASS32, FileFlags(0)),
+                Some("i386")
+            );
+        }
+    }
 }
 
 #[cfg(any(target_os = "illumos", target_os = "solaris"))]

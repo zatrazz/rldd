@@ -72,7 +72,7 @@ The search directories come from /var/run/ld.so.hints and /usr/lib.  Like the Op
 
 ### NetBSD
 
-The NetBSD loader searches the ‘–library-path’ directories first, then the /etc/ld.so.conf ones (the per-library hardware directives are not supported), then the requesting object DT_RPATH or DT_RUNPATH (both handled the same way, the last tag wins), and at last /usr/lib.
+The NetBSD loader searches the ‘–library-path’ directories first, then the /etc/ld.so.conf ones (the per-library hardware directives are not supported), then the requesting object DT_RPATH or DT_RUNPATH (both handled the same way, the last tag wins), and at last /usr/lib, followed by the compat subdirectory for an object of another architecture (for instance /usr/lib/i386 for a 32-bit object on amd64).
 
 Like the NetBSD ldd, the loader is not listed on the ‘-l’ output; the dependencies are printed with their object name (libc.so.12 => ...) instead of the linker flag style names the NetBSD ldd uses (-lc.12 => ...).
 

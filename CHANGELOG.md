@@ -58,7 +58,8 @@ All notable changes to this project will be documented in this file.
   and the `$ORIGIN` token expands to the executable directory for every
   object.
 - ELF (FreeBSD, OpenBSD): the `$ORIGIN` token is expanded from the
-  canonical object path.
+- ELF (NetBSD): the compat subdirectory (for instance `/usr/lib/i386`)
+  is searched for an object of another architecture.
 - Mach-O: a FAT file without a host architecture slice is still inspected
   when `--arch` is not given. The slice the system run through translation
   (x86_64 under Rosetta) is preferred, with the first slice as fallback
