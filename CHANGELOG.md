@@ -70,6 +70,8 @@ All notable changes to this project will be documented in this file.
 - ELF (musl): the reserved names (`lib{c,pthread,rt,m,dl,util,xnet}.*`)
   resolve to the loader itself without any search, reported once per
   prefix as the musl ldd does.
+- ELF (musl): the preloaded objects are always loaded, even for an object
+  without any `DT_NEEDED` entry.
 - Mach-O: a FAT file without a host architecture slice is still inspected
   when `--arch` is not given. The slice the system run through translation
   (x86_64 under Rosetta) is preferred, with the first slice as fallback
