@@ -86,7 +86,7 @@ On macOS, the dependencies are tracked the way ‘dyld_info -dependents’ and �
 
 Like dyld_info, the input file may be the install name of an image that exists only in the dyld shared cache.
 
-Each absolute candidate path is checked against the dyld shared cache and the filesystem, and then retried below the OS cryptex mount (/System/Volumes/Preboot/Cryptexes/OS), where dyld also looks for the images that are not on the root filesystem.  The expanded @rpath and environment candidates get no path normalization, but a run-path entry ending with a slash is joined without a second one, like dyld.
+Each absolute candidate path is checked against the dyld shared cache and the filesystem, and then retried below the OS cryptex mount (/System/Volumes/Preboot/Cryptexes/OS), where dyld also looks for the images that are not on the root filesystem.  A recorded load path found nowhere is at last resolved through realpath (as dyld does), so a symlinked directory still reaches an image that exists only in the cache; the expanded @rpath and environment candidates get no such normalization, but a run-path entry ending with a slash is joined without a second one, like dyld.
 
 The ‘–arch NAME’ option selects the specified slice of a universal binary instead of the host architecture, along with the matching dyld shared cache flavor (for instance, ‘–arch x86_64’ on Apple Silicon resolves to the Rosetta cache when installed).
 

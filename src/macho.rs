@@ -429,6 +429,18 @@ fn cryptex_path(path: &Path) -> Option<PathBuf> {
         .map(|rest| Path::new(CRYPTEX_OS_PATH).join(rest))
 }
 
+// The realpath(3) of an absolute path whose leaf may not exist (the macOS
+// semantics, which resolve the symlinks of the directory components).
+fn realpath_leaf(path: &Path) -> Option<String> {
+    let parent = path.parent()?.canonicalize().ok()?;
+    Some(
+        parent
+            .join(path.file_name()?)
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
 // The framework partial path (Foo.framework/Versions/A/Foo) of a load path
 // whose leaf name matches the framework name, mimicking the dyld
 // getFrameworkPartialPath check used for the framework search paths.
@@ -511,30 +523,9 @@ fn resolve_path(
     deptree: &mut DepTree,
     depp: usize,
 ) -> ResolveResult {
-    // The expanded candidates require their own check against the
-    // dependency tree, since the recorded nodes hold the resolved path.
-    if check_already_resolved(config, dependency, dep, deptree, depp) {
-        return ResolveResult::Skip;
-    }
-
-    // Try the dyld system cache, if existent.
-    if let Some(elc) = config.ctx.get(dependency, config.executable_path) {
-        let path = Path::new(dependency);
-        let dir = pathutils::get_path(&path);
-        let depd = deptree.addnode(
-            DepNode {
-                path: dir.clone(),
-                name: pathutils::get_name(&path),
-                mode: DepMode::LdCache,
-                found: false,
-                alias: None,
-                attrs: dep.attrs.clone(),
-                version: dep.version.clone(),
-                searched: Vec::new(),
-            },
-            depp,
-        );
-        return ResolveResult::Found((elc, depd, dir.unwrap_or_default()));
+    match resolve_cache(config, dependency, dep, deptree, depp) {
+        ResolveResult::Miss => {}
+        result => return result,
     }
 
     // Then the filesystem, only for absolute paths.
@@ -547,9 +538,52 @@ fn resolve_path(
         result => return result,
     }
     if let Some(cryptex) = cryptex_path(path) {
-        return resolve_file(config, &cryptex, dep, mode, deptree, depp);
+        match resolve_file(config, &cryptex, dep, mode, deptree, depp) {
+            ResolveResult::Miss => {}
+            result => return result,
+        }
+    }
+
+    if matches!(mode, DepMode::Direct | DepMode::Preload) {
+        if let Some(real) = realpath_leaf(path).filter(|real| real != dependency) {
+            return resolve_cache(config, &real, dep, deptree, depp);
+        }
     }
     ResolveResult::Miss
+}
+
+// Try NAME against the dyld cache, if existent.
+fn resolve_cache(
+    config: &Config,
+    name: &str,
+    dep: &MachODep,
+    deptree: &mut DepTree,
+    depp: usize,
+) -> ResolveResult {
+    // The expanded candidates require their own check against the
+    // dependency tree, since the recorded nodes hold the resolved path.
+    if check_already_resolved(config, name, dep, deptree, depp) {
+        return ResolveResult::Skip;
+    }
+    let Some(elc) = config.ctx.get(name, config.executable_path) else {
+        return ResolveResult::Miss;
+    };
+    let path = Path::new(name);
+    let dir = pathutils::get_path(&path);
+    let depd = deptree.addnode(
+        DepNode {
+            path: dir.clone(),
+            name: pathutils::get_name(&path),
+            mode: DepMode::LdCache,
+            found: false,
+            alias: None,
+            attrs: dep.attrs.clone(),
+            version: dep.version.clone(),
+            searched: Vec::new(),
+        },
+        depp,
+    );
+    ResolveResult::Found((elc, depd, dir.unwrap_or_default()))
 }
 
 fn resolve_file(
