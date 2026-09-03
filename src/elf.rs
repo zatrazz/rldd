@@ -76,6 +76,9 @@ struct ElfInfo {
     has_runpath: bool,
     nodeflibs: bool,
     is_musl: bool,
+    // NetBSD loader expands the token to the executable directory for every object.
+    #[cfg_attr(not(target_os = "netbsd"), allow(dead_code))]
+    origin: String,
 
     deps: DepsVec,
 }
@@ -178,6 +181,18 @@ fn is_musl_system() -> bool {
 #[cfg(all(target_family = "unix", not(target_os = "linux")))]
 fn handle_loader(_elc: &mut ElfInfo) {}
 
+// The NetBSD loader handles DT_RPATH and DT_RUNPATH the same way, where both
+// are recorded as the object rpath (the last tag wins).
+#[cfg(target_os = "netbsd")]
+fn handle_search_paths(elc: &mut ElfInfo) {
+    if elc.has_runpath {
+        elc.rpath = std::mem::take(&mut elc.runpath);
+        elc.has_runpath = false;
+    }
+}
+#[cfg(all(target_family = "unix", not(target_os = "netbsd")))]
+fn handle_search_paths(_elc: &mut ElfInfo) {}
+
 fn parse_elf_program_headers<Elf: FileHeader>(
     endian: Elf::Endian,
     data: &[u8],
@@ -190,6 +205,7 @@ fn parse_elf_program_headers<Elf: FileHeader>(
         Ok(mut elc) => {
             elc.interp = parse_elf_interp::<Elf>(endian, data, headers);
             handle_loader(&mut elc);
+            handle_search_paths(&mut elc);
             Ok(elc)
         }
         Err(e) => Err(e),
@@ -290,6 +306,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
                 nodeflibs,
                 deps: dtneeded,
                 is_musl: false,
+                origin: origin.to_string(),
             }),
             Err(e) => Err(e),
         };
@@ -454,13 +471,9 @@ fn open_elf_file<P: AsRef<Path>>(
         Err(_) => return Err(Error::other("Failed to map file")),
     };
 
-    let parent = filename
-        .as_ref()
-        .parent()
-        .and_then(Path::to_str)
-        .unwrap_or("");
+    let origin = origin_directory(filename, melc);
 
-    match parse_object(&mmap, parent, platform) {
+    match parse_object(&mmap, &origin, platform) {
         Ok(elc) => {
             if let Some(melc) = melc {
                 // Skip DT_NEEDED and SONAME checks for preload objects.
@@ -472,6 +485,33 @@ fn open_elf_file<P: AsRef<Path>>(
         }
         Err(e) => Err(Error::other(e)),
     }
+}
+
+// The directory the $ORIGIN token expands to for the object being opened:
+// - The glibc loader uses the directory of the path the object was loaded
+//   through (the executable one is canonicalized beforehand).
+// - The NetBSD loader expands the token to the executable directory for
+//   every object, so the requesting object value is propagated.
+#[cfg(target_os = "netbsd")]
+fn origin_directory<P: AsRef<Path>>(filename: &P, melc: Option<&ElfInfo>) -> String {
+    match melc {
+        Some(melc) => melc.origin.clone(),
+        None => filename
+            .as_ref()
+            .parent()
+            .and_then(Path::to_str)
+            .unwrap_or("")
+            .to_string(),
+    }
+}
+#[cfg(all(target_family = "unix", not(target_os = "netbsd")))]
+fn origin_directory<P: AsRef<Path>>(filename: &P, _melc: Option<&ElfInfo>) -> String {
+    filename
+        .as_ref()
+        .parent()
+        .and_then(Path::to_str)
+        .unwrap_or("")
+        .to_string()
 }
 
 fn match_elf_name(melc: &ElfInfo, dtneeded: Option<&String>, elc: &ElfInfo) -> bool {
@@ -660,6 +700,7 @@ fn searched_locations(config: &Config, elc: &ElfInfo, dependency: &str) -> Vec<S
 
 // The search order for a dependency name, following each loader semantics.
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 enum SearchStep {
     Rpath,
     LibraryPath,
@@ -668,9 +709,20 @@ enum SearchStep {
     SystemDirs,
 }
 
-// The loaders search the object DT_RPATH, the LD_LIBRARY_PATH directories,
-// the object DT_RUNPATH, the loader cache/hints, and at last the default
-// directories.
+// The NetBSD loader searches the LD_LIBRARY_PATH directories, then the
+// ld.so.conf ones, then the requesting object DT_RPATH/DT_RUNPATH, and at last
+// the default directories.
+#[cfg(target_os = "netbsd")]
+const SEARCH_ORDER: &[SearchStep] = &[
+    SearchStep::LibraryPath,
+    SearchStep::Cache,
+    SearchStep::Rpath,
+    SearchStep::SystemDirs,
+];
+// The other loaders search the object DT_RPATH, the LD_LIBRARY_PATH
+// directories, the object DT_RUNPATH, the loader cache/hints, and at last the
+// default directories.
+#[cfg(all(target_family = "unix", not(target_os = "netbsd")))]
 const SEARCH_ORDER: &[SearchStep] = &[
     SearchStep::Rpath,
     SearchStep::LibraryPath,

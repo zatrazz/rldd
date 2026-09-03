@@ -52,6 +52,11 @@ All notable changes to this project will be documented in this file.
 - The dependency tree output is no longer colorized when stdout is not a
   terminal, and the `-l` output never is (the file header line carried
   escape sequences on a pipe).
+- ELF (NetBSD): the search order follows the loader (`--library-path`,
+  the `ld.so.conf` directories, the requesting object `DT_RPATH` or
+  `DT_RUNPATH`, handled the same way, and then the default directories),
+  and the `$ORIGIN` token expands to the executable directory for every
+  object.
 - Mach-O: a FAT file without a host architecture slice is still inspected
   when `--arch` is not given. The slice the system run through translation
   (x86_64 under Rosetta) is preferred, with the first slice as fallback

@@ -16,7 +16,9 @@ The ‘-l’ option mimics the ldd output, listing unique libraries on separate 
 
 ## Linux and BSD
 
-On the ELF platforms, the dependencies are tracked from the DT_NEEDED entries (as ldd does), and resolved following the loader documented search order: the object DT_RPATH (ignored when the object also defines DT_RUNPATH), the ‘–library-path’ directories, the object DT_RUNPATH, the loader cache or hints file, and at last the default system directories.  The $ORIGIN, $LIB, and $PLATFORM tokens are expanded on the rpath and runpath entries, and DF_1_NODEFLIB suppresses the cache and the default directories.
+On the ELF platforms, the dependencies are tracked from the DT_NEEDED entries (as ldd does), and resolved following the loader documented search order: the object DT_RPATH (ignored when the object also defines DT_RUNPATH), the ‘–library-path’ directories, the object DT_RUNPATH, the loader cache or hints file, and at last the default system directories (the NetBSD order differs, see below).  The $ORIGIN, $LIB, and $PLATFORM tokens are expanded on the rpath and runpath entries, and DF_1_NODEFLIB suppresses the cache and the default directories.
+
+The $ORIGIN token follows each loader: glibc expands it to the directory of the path the object was loaded through, and the NetBSD loader expands it to the executable directory for every object.
 
 The DT_RPATH scope used for the indirect dependencies follows each loader semantics:
 
@@ -70,7 +72,7 @@ The search directories come from /var/run/ld.so.hints and /usr/lib.  Like the Op
 
 ### NetBSD
 
-The search directories come from /etc/ld.so.conf (the per-library hardware directives are not supported) and /usr/lib.
+The NetBSD loader searches the ‘–library-path’ directories first, then the /etc/ld.so.conf ones (the per-library hardware directives are not supported), then the requesting object DT_RPATH or DT_RUNPATH (both handled the same way, the last tag wins), and at last /usr/lib.
 
 Like the NetBSD ldd, the loader is not listed on the ‘-l’ output; the dependencies are printed with their object name (libc.so.12 => ...) instead of the linker flag style names the NetBSD ldd uses (-lc.12 => ...).
 
