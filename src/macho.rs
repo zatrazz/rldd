@@ -1,5 +1,5 @@
 use std::io::Error;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{fs, str};
 
 use object::macho::*;
@@ -420,6 +420,15 @@ fn expand_rpath(dependency: &str, rpath: &str) -> String {
     dependency.replace("@rpath", rpath.strip_suffix('/').unwrap_or(rpath))
 }
 
+const CRYPTEX_OS_PATH: &str = "/System/Volumes/Preboot/Cryptexes/OS";
+
+// The candidate path below the OS cryptex mount.
+fn cryptex_path(path: &Path) -> Option<PathBuf> {
+    path.strip_prefix("/")
+        .ok()
+        .map(|rest| Path::new(CRYPTEX_OS_PATH).join(rest))
+}
+
 // The framework partial path (Foo.framework/Versions/A/Foo) of a load path
 // whose leaf name matches the framework name, mimicking the dyld
 // getFrameworkPartialPath check used for the framework search paths.
@@ -462,7 +471,11 @@ fn searched_locations(
     }
     for (candidate, _) in candidate_paths(config, rpaths, dependency, preload) {
         for variant in suffix_variants(config, &candidate) {
+            let cryptex = cryptex_path(Path::new(&variant));
             searched.push(variant);
+            if let Some(cryptex) = cryptex {
+                searched.push(cryptex.to_string_lossy().into_owned());
+            }
         }
     }
     searched.push(
@@ -487,7 +500,9 @@ enum ResolveResult {
 }
 
 // Try to resolve a candidate path against the dyld cache and then the
-// filesystem, adding a node to the dependency tree when found.
+// filesystem, adding a node to the dependency tree when found.  An
+// absolute path not found on the root filesystem is retried below the OS
+// cryptex mount.
 fn resolve_path(
     config: &Config,
     dependency: &str,
@@ -527,6 +542,24 @@ fn resolve_path(
     if !path.is_absolute() {
         return ResolveResult::Miss;
     }
+    match resolve_file(config, path, dep, mode, deptree, depp) {
+        ResolveResult::Miss => {}
+        result => return result,
+    }
+    if let Some(cryptex) = cryptex_path(path) {
+        return resolve_file(config, &cryptex, dep, mode, deptree, depp);
+    }
+    ResolveResult::Miss
+}
+
+fn resolve_file(
+    config: &Config,
+    path: &Path,
+    dep: &MachODep,
+    mode: DepMode,
+    deptree: &mut DepTree,
+    depp: usize,
+) -> ResolveResult {
     // The canonicalization also checks the file existence.
     let Ok(path) = path.canonicalize() else {
         return ResolveResult::Miss;

@@ -49,6 +49,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Mach-O: an absolute dependency path not found on the root filesystem is
+  retried below the OS cryptex mount, like dyld does for the images that
+  are not on the root filesystem.
 - Mach-O: a run-path entry ending with a slash no longer yields a double
   slash on the expanded @rpath candidate, which missed the dyld cache image
   (dyld joins the entry without a second slash).
