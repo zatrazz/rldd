@@ -68,7 +68,7 @@ Like the FreeBSD ldd, the loader is not listed on the ‘-l’ output; the ‘[v
 
 ### OpenBSD
 
-The search directories come from /var/run/ld.so.hints and /usr/lib.  Like the OpenBSD loader, DT_SONAME is ignored, a dependency is matched by file name and major version, picking the best minor available in the directory (also for the input file itself when it is a shared library).  The loader is listed for executables, as the OpenBSD ldd does.  The ‘-l’ output keeps the ‘name => path’ format instead of the table the OpenBSD ldd prints (Start, End, Type, and so on), and the input object itself is not listed.
+The search directories come from /var/run/ld.so.hints and /usr/lib.  Like the OpenBSD loader, DT_SONAME is ignored, a dependency is matched by file name and major version, picking the best minor available in the directory (also for the input file itself when it is a shared library).  The loader is listed for executables, as the OpenBSD ldd does.  The ‘-l’ output keeps the ‘name => path’ format instead of the table the OpenBSD ldd prints (Start, End, Type, and so on), and the input object itself is not listed.  Since the loader can not load two libc versions in a process, the first libc.so.* dependency found is used for every further libc load, whatever major the other objects were linked against.
 
 ### NetBSD
 

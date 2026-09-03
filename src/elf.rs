@@ -1186,6 +1186,11 @@ fn resolve_dependencies(
     #[cfg(target_os = "linux")]
     let mut musl_reported = [false; interp::MUSL_RESERVED_COUNT];
 
+    // The OpenBSD loader can not load two libc versions in a single process,
+    // so use the first one.
+    #[cfg(target_os = "openbsd")]
+    let mut openbsd_libc: Option<String> = None;
+
     parents.push((root_elc, root_refpath, Default::default()));
 
     while let Some(item) = queue.pop_front() {
@@ -1193,7 +1198,19 @@ fn resolve_dependencies(
 
         // FreeBSD libmap.conf may remap the dependency name based on the
         // referencing object path.
-        let dependency = &libmap_dependency(config, refpath, &item.dependency);
+        let dependency = libmap_dependency(config, refpath, &item.dependency);
+
+        #[cfg(target_os = "openbsd")]
+        let dependency = match &openbsd_libc {
+            Some(libc) if dependency.starts_with("libc.so.") => libc.clone(),
+            _ => {
+                if dependency.starts_with("libc.so.") {
+                    openbsd_libc = Some(dependency.clone());
+                }
+                dependency
+            }
+        };
+        let dependency = &dependency;
 
         #[cfg(target_os = "linux")]
         if let Some(loader) = &musl_loader {

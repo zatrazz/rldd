@@ -72,6 +72,8 @@ All notable changes to this project will be documented in this file.
   prefix as the musl ldd does.
 - ELF (musl): the preloaded objects are always loaded, even for an object
   without any `DT_NEEDED` entry.
+- ELF (OpenBSD): the first `libc.so.*` dependency found is used for every
+  further libc load, like the loader does.
 - Mach-O: a FAT file without a host architecture slice is still inspected
   when `--arch` is not given. The slice the system run through translation
   (x86_64 under Rosetta) is preferred, with the first slice as fallback
