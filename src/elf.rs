@@ -57,6 +57,8 @@ type DepsVec = Vec<String>;
 struct ElfInfo {
     ei_class: FileClass,
     ei_data: DataEncoding,
+    // Not checked on NetBSD, whose loader ignores the OS ABI.
+    #[cfg_attr(target_os = "netbsd", allow(dead_code))]
     ei_osabi: OsAbi,
     #[allow(dead_code)]
     ei_abiver: u8,
@@ -577,9 +579,10 @@ fn check_elf_header(elc: &ElfInfo) -> bool {
 fn check_elf_header(elc: &ElfInfo) -> bool {
     elc.ei_osabi == ELFOSABI_SYSV || elc.ei_osabi == ELFOSABI_OPENBSD
 }
+// The NetBSD loader does not check the EI_OSABI field.
 #[cfg(target_os = "netbsd")]
-fn check_elf_header(elc: &ElfInfo) -> bool {
-    elc.ei_osabi == ELFOSABI_SYSV || elc.ei_osabi == ELFOSABI_NETBSD
+fn check_elf_header(_elc: &ElfInfo) -> bool {
+    true
 }
 #[cfg(any(target_os = "illumos", target_os = "solaris"))]
 fn check_elf_header(elc: &ElfInfo) -> bool {
