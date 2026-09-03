@@ -490,8 +490,19 @@ fn open_elf_file<P: AsRef<Path>>(
 // The directory the $ORIGIN token expands to for the object being opened:
 // - The glibc loader uses the directory of the path the object was loaded
 //   through (the executable one is canonicalized beforehand).
+// - The FreeBSD and OpenBSD loaders canonicalize the object path first
+//   (realpath), so a symlink or a '..' component on a search path does not
+//   leak into the expansion.
 // - The NetBSD loader expands the token to the executable directory for
 //   every object, so the requesting object value is propagated.
+#[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
+fn origin_directory<P: AsRef<Path>>(filename: &P, _melc: Option<&ElfInfo>) -> String {
+    let path = fs::canonicalize(filename).unwrap_or_else(|_| filename.as_ref().to_path_buf());
+    path.parent()
+        .and_then(Path::to_str)
+        .unwrap_or("")
+        .to_string()
+}
 #[cfg(target_os = "netbsd")]
 fn origin_directory<P: AsRef<Path>>(filename: &P, melc: Option<&ElfInfo>) -> String {
     match melc {
@@ -504,7 +515,10 @@ fn origin_directory<P: AsRef<Path>>(filename: &P, melc: Option<&ElfInfo>) -> Str
             .to_string(),
     }
 }
-#[cfg(all(target_family = "unix", not(target_os = "netbsd")))]
+#[cfg(all(
+    target_family = "unix",
+    not(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))
+))]
 fn origin_directory<P: AsRef<Path>>(filename: &P, _melc: Option<&ElfInfo>) -> String {
     filename
         .as_ref()

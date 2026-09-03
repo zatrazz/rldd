@@ -18,7 +18,7 @@ The ‘-l’ option mimics the ldd output, listing unique libraries on separate 
 
 On the ELF platforms, the dependencies are tracked from the DT_NEEDED entries (as ldd does), and resolved following the loader documented search order: the object DT_RPATH (ignored when the object also defines DT_RUNPATH), the ‘–library-path’ directories, the object DT_RUNPATH, the loader cache or hints file, and at last the default system directories (the NetBSD order differs, see below).  The $ORIGIN, $LIB, and $PLATFORM tokens are expanded on the rpath and runpath entries, and DF_1_NODEFLIB suppresses the cache and the default directories.
 
-The $ORIGIN token follows each loader: glibc expands it to the directory of the path the object was loaded through, and the NetBSD loader expands it to the executable directory for every object.
+The $ORIGIN token follows each loader: glibc expands it to the directory of the path the object was loaded through, the FreeBSD and OpenBSD loaders canonicalize the object path first (so a symlink or a ‘..’ component on a search path is not kept), and the NetBSD loader expands it to the executable directory for every object.
 
 The DT_RPATH scope used for the indirect dependencies follows each loader semantics:
 

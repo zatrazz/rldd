@@ -57,6 +57,8 @@ All notable changes to this project will be documented in this file.
   `DT_RUNPATH`, handled the same way, and then the default directories),
   and the `$ORIGIN` token expands to the executable directory for every
   object.
+- ELF (FreeBSD, OpenBSD): the `$ORIGIN` token is expanded from the
+  canonical object path.
 - Mach-O: a FAT file without a host architecture slice is still inspected
   when `--arch` is not given. The slice the system run through translation
   (x86_64 under Rosetta) is preferred, with the first slice as fallback
