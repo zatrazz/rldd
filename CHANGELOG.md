@@ -67,6 +67,9 @@ All notable changes to this project will be documented in this file.
   the loader handles `LD_PRELOAD` (a bare name was searched).
 - ELF (glibc, FreeBSD): a dependency or preload entry naming the input
   object own `DT_SONAME` is taken as already loaded, like the loaders do.
+- ELF (musl): the reserved names (`lib{c,pthread,rt,m,dl,util,xnet}.*`)
+  resolve to the loader itself without any search, reported once per
+  prefix as the musl ldd does.
 - Mach-O: a FAT file without a host architecture slice is still inspected
   when `--arch` is not given. The slice the system run through translation
   (x86_64 under Rosetta) is preferred, with the first slice as fallback

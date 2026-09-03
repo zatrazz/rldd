@@ -131,9 +131,34 @@ pub fn is_musl(interp: &Option<String>) -> bool {
     false
 }
 
+// The library names the musl loader provides itself.
+const MUSL_RESERVED: &[&str] = &["c.", "pthread.", "rt.", "m.", "dl.", "util.", "xnet."];
+pub const MUSL_RESERVED_COUNT: usize = 7;
+
+pub fn musl_reserved_name(name: &str) -> Option<usize> {
+    let rest = name.strip_prefix("lib")?;
+    MUSL_RESERVED
+        .iter()
+        .position(|prefix| rest.starts_with(prefix))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_musl_reserved_name() {
+        assert_eq!(musl_reserved_name("libc.so"), Some(0));
+        assert_eq!(musl_reserved_name("libc.musl-x86_64.so.1"), Some(0));
+        assert_eq!(musl_reserved_name("libpthread.so.0"), Some(1));
+        assert_eq!(musl_reserved_name("libm.so.6"), Some(3));
+        assert_eq!(musl_reserved_name("libutil.c32"), Some(5));
+        assert_eq!(musl_reserved_name("libxnet.so"), Some(6));
+        assert_eq!(musl_reserved_name("libmenu.c32"), None);
+        assert_eq!(musl_reserved_name("libcom32.c32"), None);
+        assert_eq!(musl_reserved_name("libz.so.1"), None);
+        assert_eq!(musl_reserved_name("ld-musl-x86_64.so.1"), None);
+    }
 
     #[test]
     fn check_is_musl() {

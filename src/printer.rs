@@ -113,7 +113,7 @@ impl Printer {
         }
 
         // The recorded name, when the resolved file differs from it.
-        if let Some(alias) = alias {
+        if let Some(alias) = alias.filter(|alias| *alias != dtneeded) {
             self.write_colorized(&mut buffer, &color, format!("{alias} -> "));
         }
 
@@ -219,8 +219,8 @@ impl Printer {
         }
         // The recorded name, when the resolved module differs from it.
         let dtneeded = match alias {
-            Some(alias) => format!("{alias} -> {dtneeded}"),
-            None => dtneeded.clone(),
+            Some(alias) if alias != dtneeded => format!("{alias} -> {dtneeded}"),
+            _ => dtneeded.clone(),
         };
         self.print_preamble(deptrace);
         let writer = BufferWriter::stdout(self.color);

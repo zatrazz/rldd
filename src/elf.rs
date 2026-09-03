@@ -1175,6 +1175,16 @@ fn resolve_dependencies(
             preload: false,
         });
     }
+
+    #[cfg(target_os = "linux")]
+    let musl_loader = if root_elc.is_musl {
+        musl_loader_path(&root_elc)
+    } else {
+        None
+    };
+    #[cfg(target_os = "linux")]
+    let mut musl_reported = [false; interp::MUSL_RESERVED_COUNT];
+
     parents.push((root_elc, root_refpath, Default::default()));
 
     while let Some(item) = queue.pop_front() {
@@ -1184,8 +1194,50 @@ fn resolve_dependencies(
         // referencing object path.
         let dependency = &libmap_dependency(config, refpath, &item.dependency);
 
-        if elc.is_musl && dependency == "libc.so" {
-            continue;
+        #[cfg(target_os = "linux")]
+        if let Some(loader) = &musl_loader {
+            let loader_path = Path::new(loader);
+            let is_self = pathutils::get_name(&loader_path) == *dependency;
+            match interp::musl_reserved_name(dependency) {
+                Some(slot) if !musl_reported[slot] => {
+                    musl_reported[slot] = true;
+                    deptree.addnode(
+                        DepNode {
+                            path: pathutils::get_path(&loader_path),
+                            name: pathutils::get_name(&loader_path),
+                            mode: DepMode::SystemDirs,
+                            found: false,
+                            alias: Some(dependency.clone()),
+                            attrs: Vec::new(),
+                            version: None,
+                            searched: Vec::new(),
+                        },
+                        item.depp,
+                    );
+                    continue;
+                }
+                Some(_) => continue,
+                None if is_self => {
+                    // The loader own name is also blocked from reloading,
+                    // without any report.  Record it as an already resolved
+                    // entry so the symbol scope knows the libc is linked.
+                    deptree.addnode(
+                        DepNode {
+                            path: pathutils::get_path(&loader_path),
+                            name: pathutils::get_name(&loader_path),
+                            mode: DepMode::SystemDirs,
+                            found: true,
+                            alias: Some(dependency.clone()),
+                            attrs: Vec::new(),
+                            version: None,
+                            searched: Vec::new(),
+                        },
+                        item.depp,
+                    );
+                    continue;
+                }
+                None => {}
+            }
         }
 
         // The glibc and FreeBSD loaders also match a name against the main
@@ -1786,7 +1838,13 @@ pub fn check_musl_relocations(deptree: &DepTree) -> Option<Vec<UndefinedSymbol>>
     }
 
     let mut scope = build_symbol_scope(deptree);
-    append_interp_to_scope(&mut scope, &root_elc);
+
+    let libc_linked = deptree.arena.iter().any(|n| n.val.alias.is_some());
+    if libc_linked {
+        append_interp_to_scope(&mut scope, &root_elc);
+    } else if let Some(loader) = musl_loader_path(&root_elc) {
+        scope.retain(|(path, _)| *path != loader);
+    }
 
     let mut undefined = Vec::new();
     for (idx, (path, obj)) in scope.iter().enumerate().rev() {
@@ -1808,6 +1866,14 @@ pub fn check_musl_relocations(deptree: &DepTree) -> Option<Vec<UndefinedSymbol>>
         }
     }
     Some(undefined)
+}
+
+#[cfg(target_os = "linux")]
+fn musl_loader_path(elc: &ElfInfo) -> Option<String> {
+    match &elc.interp {
+        Some(interp) => Some(interp.clone()),
+        None => find_musl_loader(),
+    }
 }
 
 // Mimic the loader relocation processing and version checking, used to
