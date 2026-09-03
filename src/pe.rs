@@ -783,14 +783,19 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
     Ok(pei)
 }
 
-// ARM64X object records plain uMAGE_FILE_MACHINE_ARM64 on the file header, and
-// the x86_64 view it also only shows on the CHPE metadata.  Windows on ARM
-// builds System32 as ARM64X, which is what lets an emulated x86_64 image
-// resolves, so telling the hybrid objects from the plain ARM64 ones is what
-// makes the machine check select the right modules.
+// An ARM64X object holds an ARM64 and an x86_64 view at once, and the file
+// header only records the primary one. Most of System32 records ARM64, while
+// a handful of modules (the .NET shim and the x64 redistributables among
+// them) record AMD64.  On both cases the second view only shows on the CHPE
+// metadata, so reading it is what lets the machine check take the module from
+// both sides.
 fn image_machine<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> pe::Machine {
     let machine = file.nt_headers().file_header().machine.get(LE);
-    if machine == pe::IMAGE_FILE_MACHINE_ARM64 && has_chpe_metadata(file) {
+    let hybrid = matches!(
+        machine,
+        pe::IMAGE_FILE_MACHINE_ARM64 | pe::IMAGE_FILE_MACHINE_AMD64
+    );
+    if hybrid && has_chpe_metadata(file) {
         return pe::IMAGE_FILE_MACHINE_ARM64X;
     }
     machine
@@ -799,7 +804,9 @@ fn image_machine<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> pe::Machine {
 // Whether the load configuration directory points at the CHPE metadata.  The
 // directory grew over the Windows releases and its first field records how
 // much of it the object holds, so the pointer is only read when it covers it.
-// Only the 64 bit layout is read, which is the only one an ARM64 object has.
+// Only the 64 bit layout is read, which is the one both the ARM64 and the
+// x86_64 objects have; a 32 bit directory never reaches the offset below, so
+// it reports no metadata.
 fn has_chpe_metadata<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> bool {
     const OFFSET: usize =
         std::mem::offset_of!(pe::ImageLoadConfigDirectory64, chpe_metadata_pointer);
@@ -1037,6 +1044,16 @@ mod tests {
             pe::IMAGE_FILE_MACHINE_AMD64,
             pei.machine
         ));
+
+        // A few hybrid modules record AMD64 on the file header instead of
+        // ARM64, and an ARM64 image loads them all the same.
+        if let Ok(pei) = open_pe_file(&Path::new(&system).join("mscoree.dll")) {
+            assert_eq!(pei.machine, pe::IMAGE_FILE_MACHINE_ARM64X);
+            assert!(machine::compatible(
+                pe::IMAGE_FILE_MACHINE_ARM64,
+                pei.machine
+            ));
+        }
 
         // No hybrid view on rldd itself.
         let pei = open_pe_file(&std::env::current_exe().unwrap()).unwrap();
