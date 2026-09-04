@@ -1,0 +1,2 @@
+# The text shell scripts are run by the device shell and by bash.
+*.sh text eol=lf

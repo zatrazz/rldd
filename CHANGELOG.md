@@ -32,6 +32,9 @@ All notable changes to this project will be documented in this file.
 - ELF (Android): support for the HWASan instrumented objects, which use the
   `linker_hwasan64` loader, the `namespace.<ns>.hwasan.search.paths`
   properties, and the `$(PARTITION)/lib64/hwasan` default directories.
+- A device test suite for the Android backend under `tests/android`, which
+  builds rldd for the ABI of each attached device and resolves every object
+  of the system image with it.
 - The CI workflow also builds on Windows, and checks the Android targets
   (which are only cross compiled).
 
