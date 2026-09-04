@@ -35,6 +35,9 @@ All notable changes to this project will be documented in this file.
 - A device test suite for the Android backend under `tests/android`, which
   builds rldd for the ABI of each attached device and resolves every object
   of the system image with it.
+- A test suite for the PE backend under `tests/windows`, which runs rldd over
+  the binaries of a system directory and compares the dependency names with
+  `dumpbin /dependents`.
 - The CI workflow also builds on Windows, and checks the Android targets
   (which are only cross compiled).
 
