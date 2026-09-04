@@ -190,3 +190,10 @@ The Mach-O backend takes the recorded load paths to the dyld shared cache, the f
 ```
 tests/macos/run.py
 ```
+
+The Linux ELF tests runs rldd over the objects of the system directories and compares the dependency lists, and where each one resolved to, with ‘ldd’.  The machine under test is the local one or any host reached through ssh, for which rldd is cross built and copied over:
+
+```
+tests/linux/run.sh
+tests/linux/run.sh -H debian-aarch64 -H debian-ppc64le
+```

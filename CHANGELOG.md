@@ -41,6 +41,10 @@ All notable changes to this project will be documented in this file.
 - A test suite for the Mach-O backend under `tests/macos`, which runs rldd
   over the objects of the system directories and the dyld cache images and
   compares the dependency lists with `dyld_info -dependents`.
+- A test suite for the Linux ELF backend under `tests/linux`, which runs rldd
+  over the objects of the system directories of a machine, either the local
+  one or a host reached through ssh, and compares the dependency lists with
+  `ldd`.
 - The CI workflow also builds on Windows, and checks the Android targets
   (which are only cross compiled).
 
