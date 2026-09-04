@@ -1,2 +1,4 @@
 /target
 .vscode
+# The sweep of the macOS test suite is a python script.
+__pycache__/

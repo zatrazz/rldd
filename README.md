@@ -184,3 +184,10 @@ The PE backend reads the dependency names out of the import and the delay load i
 ```
 tests\windows\run.ps1
 ```
+
+The Mach-O backend takes the recorded load paths to the dyld shared cache, the filesystem or the OS cryptex of the running system, which the unit tests cannot check either, so it has a suite of its own under
+[tests/macos](tests/macos).  It runs rldd over the objects of the system directories and the dyld cache images and compares the dependency lists, and where each one resolved to, with ‘dyld_info -dependents’:
+
+```
+tests/macos/run.py
+```

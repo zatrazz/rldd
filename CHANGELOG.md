@@ -38,6 +38,9 @@ All notable changes to this project will be documented in this file.
 - A test suite for the PE backend under `tests/windows`, which runs rldd over
   the binaries of a system directory and compares the dependency names with
   `dumpbin /dependents`.
+- A test suite for the Mach-O backend under `tests/macos`, which runs rldd
+  over the objects of the system directories and the dyld cache images and
+  compares the dependency lists with `dyld_info -dependents`.
 - The CI workflow also builds on Windows, and checks the Android targets
   (which are only cross compiled).
 
