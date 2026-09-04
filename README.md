@@ -177,3 +177,10 @@ tests\android\run.ps1
 ```
 
 On Windows it needs the Git Bash shell or similar (the `bash` on the Windows `PATH` is the WSL one, which does not reach the emulators).
+
+The PE backend reads the dependency names out of the import and the delay load import directories, which the unit tests cannot check against a real installation, so it has a suite of its own under
+[tests/windows](tests/windows).  It runs rldd over the binaries of a system directory and compares the dependency names with ‘dumpbin /dependents’:
+
+```
+tests\windows\run.ps1
+```
