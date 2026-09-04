@@ -1,0 +1,4 @@
+# The shell scripts are run by the device shell and by bash, neither of which
+# accepts the CR of a CRLF line ending, so they are checked out with LF even
+# where core.autocrlf would convert them.
+*.sh text eol=lf

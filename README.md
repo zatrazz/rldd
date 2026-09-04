@@ -158,3 +158,22 @@ git clone git@github.com:zatrazz/rldd.git
 cd rlld
 cargo build --release
 ```
+
+## Testing
+
+`cargo test` runs the unit tests for the backend of the host system.
+
+The Android backend is only compiled when cross building and needs a real system image to be exercised, so it has a device test suite of its own under [tests/android](tests/android), which builds rldd for the ABI of each attached
+device, pushes it, and resolves every object of the system image with it. Run with:
+
+```
+tests/android/run.sh
+```
+
+Or on Windows
+
+```
+tests\android\run.ps1
+```
+
+On Windows it needs the Git Bash shell or similar (the `bash` on the Windows `PATH` is the WSL one, which does not reach the emulators).

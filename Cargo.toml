@@ -15,6 +15,7 @@ categories = ["command-line-utilities"]
 exclude = [
     "TODO.md",
     "doc/screenshot.png",
+    "tests",
 ]
 
 [dependencies]
