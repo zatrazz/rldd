@@ -54,6 +54,13 @@ impl PartialEq<&str> for SearchPath {
 
 #[cfg(unix)]
 fn get_search_path(entry: &str) -> Option<SearchPath> {
+    // The loaders add the separator between the directory and the name only
+    // when the entry does not end with one, so a trailing slash is dropped
+    // here.
+    let entry = match entry.trim_end_matches('/') {
+        "" if entry.starts_with('/') => "/",
+        trimmed => trimmed,
+    };
     let path = Path::new(entry);
     let meta = fs::metadata(path).ok()?;
     Some(SearchPath {
@@ -127,6 +134,14 @@ mod tests {
             vec!["libz.so.1", "/lib/libm.so.6", "libc.so.6"]
         );
         assert_eq!(from_preload("::a: "), vec!["a"]);
+    }
+
+    #[test]
+    fn trailing_slash() {
+        let paths = from_string("/usr/lib/:/usr/lib:/:/does/not/exist/", &[':']);
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], "/usr/lib");
+        assert_eq!(paths[1], "/");
     }
 }
 
