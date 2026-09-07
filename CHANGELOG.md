@@ -134,9 +134,12 @@ All notable changes to this project will be documented in this file.
   `/usr/lib` on Debian), instead of `/lib64` and `/usr/lib64` whatever the
   distribution.
 - ELF (Linux): the `DT_SONAME` of a file is no longer checked against the name
-  requested, like the loader, so a symlink named otherwise than the library
-  soname resolves. Also, a name matching the `DT_SONAME` of an object already
-  loaded, or a file already loaded under another name, is not loaded again.
+  requestedu (so a symlink named otherwise than the library soname matches), and
+  a name matching the `DT_SONAME` of an object already loaded is not loaded again.
+- ELF (Linux): a dependency name containing a slash is opened as a file path,
+  relative to the current directory when it is not absolute, instead of being
+  searched through the directories, and a missing one is reported with its
+  recorded name (`tmpdir/libfoo.so`) instead of its base name.
 - ELF (Android): any object without a `PT_INTERP` segment (including the
   loader itself) no longer panics, and its dependencies are resolved with
   the default system directories.

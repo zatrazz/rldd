@@ -1457,12 +1457,11 @@ fn resolve_dependencies(
             }
             parents.push((dep.elc, depref, dep.namespace));
         } else {
-            let path = Path::new(dependency);
             let searched = searched_locations(config, elc, dependency);
             deptree.addnode(
                 DepNode {
-                    path: pathutils::get_path(&path),
-                    name: pathutils::get_name(&path),
+                    path: None,
+                    name: dependency.clone(),
                     mode: DepMode::NotFound,
                     found: false,
                     alias: None,
@@ -1620,13 +1619,14 @@ fn resolve_dependency_1<'a>(
 ) -> Option<ResolvedDependency<'a>> {
     let path = Path::new(&dtneeded);
 
-    // If the path is absolute skip the other modes.  glibc also treats a
-    // preload entry containing a slash as a file path (relative to the
-    // current directory), only the bare names are searched.  The NetBSD
-    // loader opens every preload entry as a file path.
-    let preload_is_path =
-        preload && (dtneeded.contains(std::path::MAIN_SEPARATOR) || cfg!(target_os = "netbsd"));
-    if path.is_absolute() || preload_is_path {
+    // A name containing a slash is a file path, relative to the current
+    // directory when it is not absolute, and is not searched. The glibc
+    // loaderonly search the bare names, for the dependencies as for the
+    // preload entries.
+    // The NetBSD loader opens every preload entry as a file path.
+    let is_path =
+        dtneeded.contains(std::path::MAIN_SEPARATOR) || (preload && cfg!(target_os = "netbsd"));
+    if is_path {
         if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, preload) {
             return Some(ResolvedDependency {
                 elc,
