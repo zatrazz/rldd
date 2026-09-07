@@ -339,12 +339,13 @@ fn find_dependency(
         }
     }
 
-    // The dependency was not found: record the load path itself so the
-    // report shows the name the binary links against.
+    // The dependency was not found: record the load path as the binary
+    // links against it, before the @executable_path and @loader_path
+    // expansion, like the ELF and PE names.
     deptree.addnode(
         DepNode {
             path: None,
-            name: dependency.to_string(),
+            name: dep.name.clone(),
             mode: DepMode::NotFound,
             found: false,
             alias: None,

@@ -55,6 +55,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Mach-O: a dependency not found is reported with its recorded load path
+  (`@executable_path/...`, `@loader_path/...`) instead of the expanded one,
+  like the `@rpath` ones and the ELF and PE names.
 - Mach-O: an absolute dependency path not found on the root filesystem is
   retried below the OS cryptex mount, like dyld does for the images that
   are not on the root filesystem.
