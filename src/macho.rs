@@ -926,6 +926,9 @@ fn parse_load_command<Mach: MachHeader>(
 ) -> Option<LoadCommand> {
     match command.variant().ok()? {
         LoadCommandVariant::Dylib(x) => {
+            if command.cmd() == LC_LAZY_LOAD_DYLIB {
+                return None;
+            }
             let name = parse_string(command.string(endian, x.dylib.name).ok())?;
             Some(LoadCommand::Dylib(MachODep {
                 name,

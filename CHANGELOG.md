@@ -55,6 +55,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Mach-O: the `LC_LAZY_LOAD_DYLIB` load commands are ignored, like dyld
+  does (the linker no longer emits them).
 - Mach-O: a dependency not found is reported with its recorded load path
   (`@executable_path/...`, `@loader_path/...`) instead of the expanded one,
   like the `@rpath` ones and the ELF and PE names.
