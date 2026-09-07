@@ -257,7 +257,18 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
     origin: &str,
     platform: Option<&String>,
 ) -> Result<ElfInfo, &'static str> {
-    if let Ok(Some(dynamic)) = segment.dynamic(endian, data) {
+    let dynamic = match segment.dynamic(endian, data) {
+        Ok(Some(dynamic)) => Some(dynamic),
+        // A PT_DYNAMIC whose size is not a multiple of the entry size, the
+        // the loader reads up to DT_NULL regardless.
+        _ => segment.data(endian, data).ok().and_then(|bytes| {
+            let count = bytes.len() / std::mem::size_of::<Elf::Dyn>();
+            object::slice_from_bytes::<Elf::Dyn>(bytes, count)
+                .ok()
+                .map(|(dynamic, _)| dynamic)
+        }),
+    };
+    if let Some(dynamic) = dynamic {
         // The loader rejects an object whose dynamic section has no entries (for instance the
         // separated debug info files).
         if !dynamic.iter().any(|d| {

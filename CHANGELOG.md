@@ -124,6 +124,8 @@ All notable changes to this project will be documented in this file.
   longer makes rldd panic on the `$LIB` expansion of its search path.
 - ELF (Linux): a search path entry ending with a slash no longer doubles it
   on the resolved path.
+- ELF (Linux): a `PT_DYNAMIC` segment whose size is not a multiple of the entry
+  size is read up to what fits (instead of the object being refused).
 - ELF (Android): any object without a `PT_INTERP` segment (including the
   loader itself) no longer panics, and its dependencies are resolved with
   the default system directories.
