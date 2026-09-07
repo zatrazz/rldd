@@ -370,7 +370,13 @@ fn parse_ld_so_cache_new<R: Read + Seek>(
                 }
             }
         } else {
-            if let Some(idx) = check_hwcap_index(&off.2, &hwcap_idxs, &hwcap_supported) {
+            let idx = check_hwcap_index(&off.2, &hwcap_idxs, &hwcap_supported);
+            // The loader takes the first of the entries with the same name and
+            // flags.
+            if idx.is_none() && ldsocache.contains_key(&key) {
+                continue;
+            }
+            if let Some(idx) = idx {
                 hwcapseen.insert(key.to_string(), idx);
             }
             ldsocache.insert(
@@ -484,5 +490,70 @@ pub fn parse_ld_so_cache<P: AsRef<Path>>(
         parse_ld_so_cache_old(&mut reader, size, ei_class, e_machine, e_flags)
     } else {
         parse_ld_so_cache_new(&mut reader, 0, ei_class, e_machine, e_flags)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    // A new format cache holding the given (flags, name, path) entries in
+    // that order, without any extension.
+    fn build_cache(entries: &[(i32, &str, &str)]) -> Vec<u8> {
+        let mut strings = Vec::<u8>::new();
+        let mut offsets = Vec::new();
+        let base = CACHE_FILE_NEW_LEN + entries.len() * FILE_ENTRY_NEW_LEN;
+        for (_, name, path) in entries {
+            let key = base + strings.len();
+            strings.extend_from_slice(name.as_bytes());
+            strings.push(0);
+            let value = base + strings.len();
+            strings.extend_from_slice(path.as_bytes());
+            strings.push(0);
+            offsets.push((key as u32, value as u32));
+        }
+
+        let mut cache = Vec::<u8>::new();
+        cache.extend_from_slice(CACHEMAGIC_NEW.as_bytes());
+        cache.extend_from_slice(CACHE_VERSION.as_bytes());
+        cache.extend_from_slice(&(entries.len() as u32).to_ne_bytes());
+        cache.extend_from_slice(&(strings.len() as u32).to_ne_bytes());
+        // No endianness, no extension.
+        cache.extend_from_slice(&[0u8; 4]);
+        cache.extend_from_slice(&[0u8; 16]);
+        assert_eq!(cache.len(), CACHE_FILE_NEW_LEN);
+        for ((flags, _, _), (key, value)) in entries.iter().zip(offsets) {
+            cache.extend_from_slice(&flags.to_ne_bytes());
+            cache.extend_from_slice(&key.to_ne_bytes());
+            cache.extend_from_slice(&value.to_ne_bytes());
+            cache.extend_from_slice(&0u32.to_ne_bytes());
+            cache.extend_from_slice(&0u64.to_ne_bytes());
+        }
+        cache.extend_from_slice(&strings);
+        cache
+    }
+
+    fn parse(cache: Vec<u8>) -> LdCache {
+        let mut reader = BufReader::new(Cursor::new(cache));
+        parse_ld_so_cache_new(&mut reader, 0, ELFCLASS64, EM_X86_64, FileFlags(0)).unwrap()
+    }
+
+    #[test]
+    fn first_of_the_duplicate_entries_wins() {
+        let x86_64 = FLAG_ELF_LIBC6 | FLAG_X8664_LIB64;
+        let cache = parse(build_cache(&[
+            (
+                FLAG_ELF_LIBC6,
+                "libc.so.6",
+                "/usr/lib/i386-linux-gnu/libc.so.6",
+            ),
+            (x86_64, "libc.so.6", "/usr/lib/x86_64-linux-gnu/libc.so.6"),
+            (x86_64, "libc.so.6", "/usr/lib64/libc.so.6"),
+            (x86_64, "libm.so.6", "/usr/lib/x86_64-linux-gnu/libm.so.6"),
+        ]));
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache["libc.so.6"], "/usr/lib/x86_64-linux-gnu");
+        assert_eq!(cache["libm.so.6"], "/usr/lib/x86_64-linux-gnu");
     }
 }

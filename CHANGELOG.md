@@ -115,6 +115,11 @@ All notable changes to this project will be documented in this file.
   search paths, so a `DT_RUNPATH` could redirect it).
 - ELF (Linux): the `-u`/`--unused` check also reports an unused preloaded
   object, which the loader counts as a direct dependency.
+- ELF (Linux): the first of the `ld.so.cache` entries with the same name and
+  flags is taken.  It select the right option for the case where the system
+  has multiple options for system libraries (a system with both
+  the multiarch `libc6:i386` and the legacy `libc6-i386` lists two
+  `libc.so.6` for the 32 bit objects).
 - ELF (Android): any object without a `PT_INTERP` segment (including the
   loader itself) no longer panics, and its dependencies are resolved with
   the default system directories.
