@@ -124,6 +124,9 @@ All notable changes to this project will be documented in this file.
   longer makes rldd panic on the `$LIB` expansion of its search path.
 - ELF (Linux): a search path entry ending with a slash no longer doubles it
   on the resolved path.
+- ELF (Linux): a shared library naming the loader in `DT_NEEDED` resolves it
+  through the loader cache and the system directories, instead of through the
+  library search paths.
 - ELF (Linux): a `PT_DYNAMIC` segment whose size is not a multiple of the entry
   size is read up to what fits (instead of the object being refused).
 - ELF (Android): any object without a `PT_INTERP` segment (including the

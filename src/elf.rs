@@ -1331,9 +1331,20 @@ fn resolve_dependencies(
             }
         }
 
-        if let Some(mut dep) =
-            resolve_dependency_1(dependency, config, elc, namespace, item.preload)
+        // A shared library naming the loader resolves through the cache and the
+        // system directories.
+        #[cfg(target_os = "linux")]
+        let resolved = if !item.preload
+            && interp::is_glibc_name(dependency)
+            && parents[0].0.interp.is_none()
         {
+            resolve_loader(config, elc, dependency)
+        } else {
+            resolve_dependency_1(dependency, config, elc, namespace, item.preload)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let resolved = resolve_dependency_1(dependency, config, elc, namespace, item.preload);
+        if let Some(mut dep) = resolved {
             // The preload entries are always shown with the preload mode,
             // wherever the search resolved them.
             if item.preload {
@@ -1420,6 +1431,40 @@ fn resolve_dependencies(
     add_loader_dependency(config, &parents[0].0, deptree, root_depp);
 }
 
+// The loader is not subject to the dependency search, and only the soname
+// matching the object architecture resolves.
+#[cfg(target_os = "linux")]
+fn resolve_loader<'a>(
+    config: &'a Config,
+    elc: &'a ElfInfo,
+    dtneeded: &'a String,
+) -> Option<ResolvedDependency<'a>> {
+    if let Some(ld_cache) = config.ld_cache {
+        if let Some(dep) = resolve_dependency_ld_cache(
+            dtneeded,
+            ld_cache,
+            config.platform,
+            elc,
+            &Default::default(),
+        ) {
+            return Some(dep);
+        }
+    }
+    for searchpath in &config.system_dirs {
+        let path = dependency_path(&searchpath.path, dtneeded);
+        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false) {
+            return Some(ResolvedDependency {
+                elc,
+                path: &searchpath.path,
+                filename: pathutils::get_name(&path),
+                mode: DepMode::SystemDirs,
+                namespace: Default::default(),
+            });
+        }
+    }
+    None
+}
+
 // The dynamic loader is always loaded, and ldd always shows it.  The libc.so is
 // explicitly lists it as a dependency, but an object might not depend on libc at
 // all.  Objects without any dependency are skipped, since the loader is not
@@ -1464,34 +1509,7 @@ fn add_loader_dependency(config: &Config, elc: &ElfInfo, deptree: &mut DepTree, 
     // not subject to the dependency search.
     for name in interp::glibc_names() {
         let dtneeded = name.to_string();
-        let mut dep = None;
-        if let Some(ld_cache) = config.ld_cache {
-            dep = resolve_dependency_ld_cache(
-                &dtneeded,
-                ld_cache,
-                config.platform,
-                elc,
-                &Default::default(),
-            );
-        }
-        if dep.is_none() {
-            for searchpath in &config.system_dirs {
-                let path = dependency_path(&searchpath.path, &dtneeded);
-                if let Ok(elc) =
-                    open_elf_file(&path, Some(elc), Some(&dtneeded), config.platform, false)
-                {
-                    dep = Some(ResolvedDependency {
-                        elc,
-                        path: &searchpath.path,
-                        filename: pathutils::get_name(&path),
-                        mode: DepMode::SystemDirs,
-                        namespace: Default::default(),
-                    });
-                    break;
-                }
-            }
-        }
-        if let Some(dep) = dep {
+        if let Some(dep) = resolve_loader(config, elc, &dtneeded) {
             deptree.addnode(
                 DepNode {
                     path: Some(dep.path.to_string()),
