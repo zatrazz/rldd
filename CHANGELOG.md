@@ -133,6 +133,10 @@ All notable changes to this project will be documented in this file.
   object, read from its file (the multiarch directories and `/lib` and
   `/usr/lib` on Debian), instead of `/lib64` and `/usr/lib64` whatever the
   distribution.
+- ELF (Linux): the `DT_SONAME` of a file is no longer checked against the name
+  requested, like the loader, so a symlink named otherwise than the library
+  soname resolves. Also, a name matching the `DT_SONAME` of an object already
+  loaded, or a file already loaded under another name, is not loaded again.
 - ELF (Android): any object without a `PT_INTERP` segment (including the
   loader itself) no longer panics, and its dependencies are resolved with
   the default system directories.

@@ -470,7 +470,7 @@ fn parse_elf_dyn_flags<Elf: FileHeader>(
 fn open_elf_file<P: AsRef<Path>>(
     filename: &P,
     melc: Option<&ElfInfo>,
-    dtneeded: Option<&String>,
+    _dtneeded: Option<&String>,
     platform: Option<&String>,
     preload: bool,
 ) -> Result<ElfInfo, std::io::Error> {
@@ -490,7 +490,7 @@ fn open_elf_file<P: AsRef<Path>>(
         Ok(elc) => {
             if let Some(melc) = melc {
                 // Skip DT_NEEDED and SONAME checks for preload objects.
-                if !preload && !match_elf_name(melc, dtneeded, &elc) {
+                if !preload && !match_elf_name(melc, &elc) {
                     return Err(Error::other("Error parsing ELF object"));
                 }
             }
@@ -541,17 +541,10 @@ fn origin_directory<P: AsRef<Path>>(filename: &P, _melc: Option<&ElfInfo>) -> St
         .to_string()
 }
 
-fn match_elf_name(melc: &ElfInfo, dtneeded: Option<&String>, elc: &ElfInfo) -> bool {
-    if !check_elf_header(elc) || !match_elf_header(melc, elc) {
-        return false;
-    }
-
-    // If DT_SONAME is defined compare against it.
-    if let Some(dtneeded) = dtneeded {
-        return match_elf_soname(dtneeded, elc);
-    };
-
-    true
+// The loaders do not check the DT_SONAME of the file they open against the
+// name requested, only the ELF header against the loading object.
+fn match_elf_name(melc: &ElfInfo, elc: &ElfInfo) -> bool {
+    check_elf_header(elc) && match_elf_header(melc, elc)
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -600,24 +593,16 @@ fn check_elf_header(elc: &ElfInfo) -> bool {
     elc.ei_osabi == ELFOSABI_SYSV || elc.ei_osabi == ELFOSABI_SOLARIS
 }
 
-fn match_elf_header(a1: &ElfInfo, a2: &ElfInfo) -> bool {
-    a1.ei_class == a2.ei_class && a1.ei_data == a2.ei_data && a1.e_machine == a2.e_machine
+fn same_file(a: &str, b: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
 }
 
-#[cfg(not(target_os = "openbsd"))]
-fn match_elf_soname(dtneeded: &String, elc: &ElfInfo) -> bool {
-    let soname = &elc.soname;
-    if let Some(soname) = soname {
-        return dtneeded == soname;
-    }
-    true
-}
-// The OpenBSD loader does not take DT_SONAME in consideration, the resolution
-// is done by file name with major/minor version matching (so a DT_NEEDED with
-// an older minor is satisfied by a newer minor with a different DT_SONAME).
-#[cfg(target_os = "openbsd")]
-fn match_elf_soname(_dtneeded: &String, _elc: &ElfInfo) -> bool {
-    true
+fn match_elf_header(a1: &ElfInfo, a2: &ElfInfo) -> bool {
+    a1.ei_class == a2.ei_class && a1.ei_data == a2.ei_data && a1.e_machine == a2.e_machine
 }
 
 // Global configuration used on program dynamic resolution:
@@ -1304,7 +1289,23 @@ fn resolve_dependencies(
         // If DF_1_NODEFLIB is set ignore the search cache in the case a
         // dependency could resolve the library.
         if !elc.nodeflibs {
-            if let Some(entry) = deptree.get(dependency) {
+            // The glibc loader also matches a name against the DT_SONAME of
+            // the objects already loaded, so a library loaded through a
+            // symlink named otherwise is not loaded again under its soname.
+            #[cfg(target_os = "linux")]
+            let loaded = deptree.get(dependency).or_else(|| {
+                if elc.is_musl {
+                    return None;
+                }
+                parents
+                    .iter()
+                    .skip(1)
+                    .find(|(pelc, _, _)| pelc.soname.as_deref() == Some(dependency.as_str()))
+                    .and_then(|(_, refpath, _)| deptree.get(refpath))
+            });
+            #[cfg(not(target_os = "linux"))]
+            let loaded = deptree.get(dependency);
+            if let Some(entry) = loaded {
                 if config.all {
                     deptree.addnode(
                         DepNode {
@@ -1389,6 +1390,32 @@ fn resolve_dependencies(
                 Some(path) => format!("{}{}{}", path, std::path::MAIN_SEPARATOR, r.1),
                 None => r.1.clone(),
             };
+            // The loaders recognize a file already loaded under another name
+            // (through a symlink) by its device and inode, and record the new
+            // name on the loaded object instead of loading it again.
+            if let Some(entry) = parents
+                .iter()
+                .skip(1)
+                .find(|(_, refpath, _)| same_file(refpath, &depref))
+                .and_then(|(_, refpath, _)| deptree.get(refpath))
+            {
+                if config.all {
+                    deptree.addnode(
+                        DepNode {
+                            path: entry.path,
+                            name: pathutils::get_name(&Path::new(dependency)),
+                            mode: entry.mode,
+                            found: true,
+                            alias: None,
+                            attrs: Vec::new(),
+                            version: None,
+                            searched: Vec::new(),
+                        },
+                        item.depp,
+                    );
+                }
+                continue;
+            }
             let c = deptree.addnode(
                 DepNode {
                     path: r.0,
