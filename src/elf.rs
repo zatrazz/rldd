@@ -899,14 +899,34 @@ pub fn resolve_binary(
         true
     }
 
+    #[cfg(target_os = "linux")]
+    let loader = elc.interp.clone().or_else(|| {
+        ld_cache.as_ref().and_then(|cache| {
+            interp::glibc_names()
+                .iter()
+                .find_map(|name| cache.get(*name).map(|dir| format!("{dir}/{name}")))
+        })
+    });
+
     let system_dirs = if load_system_dirs(&*ld_cache) {
-        system_dirs::get_system_dirs(
+        #[cfg(target_os = "linux")]
+        let dirs = system_dirs::get_system_dirs(
+            loader.as_deref(),
             &elc.interp,
             elc.is_musl,
             elc.e_machine,
             elc.ei_class,
             elc.e_flags,
-        )?
+        )?;
+        #[cfg(not(target_os = "linux"))]
+        let dirs = system_dirs::get_system_dirs(
+            &elc.interp,
+            elc.is_musl,
+            elc.e_machine,
+            elc.ei_class,
+            elc.e_flags,
+        )?;
+        dirs
     } else {
         search_path::SearchPathVec::new()
     };

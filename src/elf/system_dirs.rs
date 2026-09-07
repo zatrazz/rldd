@@ -130,8 +130,76 @@ fn get_musl_system_dirs(interp: &Option<String>) -> search_path::SearchPathVec {
         .collect()
 }
 
+// The loader keep the configured system directories in a static array of NUL
+// separated absolute directories each ending with a slash.  The result is kep
+// for the next object using the same loader.
+#[cfg(target_os = "linux")]
+fn loader_system_dirs(loader: &str) -> Option<Vec<String>> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    static CACHE: Mutex<Option<HashMap<String, Option<Vec<String>>>>> = Mutex::new(None);
+    let mut cache = CACHE.lock().ok()?;
+    let cache = cache.get_or_insert_with(HashMap::new);
+    if let Some(dirs) = cache.get(loader) {
+        return dirs.clone();
+    }
+    let dirs = read_loader_system_dirs(loader);
+    cache.insert(loader.to_string(), dirs.clone());
+    dirs
+}
+
+#[cfg(target_os = "linux")]
+fn read_loader_system_dirs(loader: &str) -> Option<Vec<String>> {
+    use object::{Object, ObjectSection};
+
+    let file = std::fs::File::open(loader).ok()?;
+    let mmap = unsafe { memmap2::Mmap::map(&file) }.ok()?;
+    let object = object::File::parse(&*mmap).ok()?;
+    let section = object.section_by_name(".rodata")?;
+    system_dirs_in(section.data().ok()?)
+}
+
+// Extract the longest run of consecutive NUL terminated strings which
+// are absolute directories ending with a slash, at least two of them
+// (the upstream default has two), with the trailing slash dropped.
+#[cfg(target_os = "linux")]
+fn system_dirs_in(data: &[u8]) -> Option<Vec<String>> {
+    fn is_directory(s: &[u8]) -> bool {
+        s.len() >= 2
+            && s[0] == b'/'
+            && s[s.len() - 1] == b'/'
+            && s.iter().all(|b| (0x20..=0x7e).contains(b))
+    }
+    let mut best: Vec<String> = Vec::new();
+    let mut run: Vec<String> = Vec::new();
+    for s in data.split(|&b| b == 0) {
+        if is_directory(s) {
+            let s = std::str::from_utf8(s).unwrap();
+            run.push(match s.trim_end_matches('/') {
+                "" => "/".to_string(),
+                dir => dir.to_string(),
+            });
+            continue;
+        }
+        if run.len() > best.len() {
+            best = std::mem::take(&mut run);
+        }
+        run.clear();
+    }
+    if run.len() > best.len() {
+        best = run;
+    }
+    if best.len() >= 2 {
+        Some(best)
+    } else {
+        None
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub fn get_system_dirs(
+    loader: Option<&str>,
     interp: &Option<String>,
     is_musl: bool,
     e_machine: Machine,
@@ -141,6 +209,16 @@ pub fn get_system_dirs(
     if is_musl {
         return Ok(get_musl_system_dirs(interp));
     }
+    if let Some(dirs) = loader.and_then(loader_system_dirs) {
+        use crate::search_path::SearchPathVecExt;
+        let mut r = search_path::SearchPathVec::new();
+        for dir in dirs {
+            r.add_path(&dir);
+        }
+        return Ok(r);
+    }
+    // Without a loader to read, the upstream default of the slibdir and its
+    // /usr counterpart.
     let path = get_slibdir(e_machine, ei_class, e_flags)?;
     Ok(vec![
         search_path::SearchPath {
@@ -369,5 +447,40 @@ pub fn get_system_dirs(
             },
         ]),
         _ => return_error(),
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod system_dirs_tests {
+    use super::system_dirs_in;
+
+    #[test]
+    fn run_of_directories() {
+        let data = b"foo\0/etc/ld.so.cache\0/lib/x86_64-linux-gnu/\0/usr/lib/x86_64-linux-gnu/\0\
+            /lib/\0/usr/lib/\0\0\0/tmp/\0lib/x86_64-linux-gnu\0";
+        assert_eq!(
+            system_dirs_in(data),
+            Some(vec![
+                "/lib/x86_64-linux-gnu".to_string(),
+                "/usr/lib/x86_64-linux-gnu".to_string(),
+                "/lib".to_string(),
+                "/usr/lib".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn longest_run_wins() {
+        let data = b"/lib64/\0/usr/lib64/\0x\0/a/\0/b/\0/c/\0";
+        assert_eq!(
+            system_dirs_in(data),
+            Some(vec!["/a".to_string(), "/b".to_string(), "/c".to_string()])
+        );
+    }
+
+    #[test]
+    fn single_directory_is_not_the_list() {
+        assert_eq!(system_dirs_in(b"/dev/\0\0/proc/\0/\xff/\0"), None);
+        assert_eq!(system_dirs_in(b"/\0/\0"), None);
     }
 }

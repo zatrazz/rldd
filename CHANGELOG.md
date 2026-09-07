@@ -129,6 +129,10 @@ All notable changes to this project will be documented in this file.
   library search paths.
 - ELF (Linux): a `PT_DYNAMIC` segment whose size is not a multiple of the entry
   size is read up to what fits (instead of the object being refused).
+- ELF (Linux): the system directories are the ones built into the loader of the
+  object, read from its file (the multiarch directories and `/lib` and
+  `/usr/lib` on Debian), instead of `/lib64` and `/usr/lib64` whatever the
+  distribution.
 - ELF (Android): any object without a `PT_INTERP` segment (including the
   loader itself) no longer panics, and its dependencies are resolved with
   the default system directories.
