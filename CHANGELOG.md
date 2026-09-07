@@ -120,6 +120,8 @@ All notable changes to this project will be documented in this file.
   has multiple options for system libraries (a system with both
   the multiarch `libc6:i386` and the legacy `libc6-i386` lists two
   `libc.so.6` for the 32 bit objects).
+- ELF (Linux): an object of a machine without a known library directory no
+  longer makes rldd panic on the `$LIB` expansion of its search path.
 - ELF (Android): any object without a `PT_INTERP` segment (including the
   loader itself) no longer panics, and its dependencies are resolved with
   the default system directories.
