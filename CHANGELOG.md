@@ -147,6 +147,8 @@ All notable changes to this project will be documented in this file.
 - ELF: handle `DT_AUXILIARY` and `DT_FILTER` entries of a dependency. The entries
   from the root object are not listed, and an object without any `DT_NEEDED
   entry is reported statically linked whatever its filters.
+- ELF: a dependency name holding a dynamic string token (`$ORIGIN`, `$LIB`,
+  `$PLATFORM`) is expanded.
 - ELF (Android): any object without a `PT_INTERP` segment (including the
   loader itself) no longer panics, and its dependencies are resolved with
   the default system directories.

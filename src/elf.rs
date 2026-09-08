@@ -315,7 +315,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
         let dt_flags_1 = DynamicFlags1(parse_elf_dyn_flags::<Elf>(endian, DT_FLAGS_1, dynamic));
         let nodeflibs = dt_flags_1.contains(DF_1_NODEFLIB);
 
-        return match parse_elf_dtneeded::<Elf>(endian, dynamic, dynstr) {
+        return match parse_elf_dtneeded::<Elf>(endian, elf, dynamic, dynstr, origin, platform) {
             Ok((dtneeded, filters, has_needed)) => Ok(ElfInfo {
                 ei_class: elf.e_ident().class,
                 ei_data: elf.e_ident().data,
@@ -424,26 +424,40 @@ fn parse_elf_dyn_searchpath<Elf: FileHeader>(
     platform: Option<&String>,
 ) -> search_path::SearchPathVec {
     if let Some(dynstr) = parse_elf_dyn_str::<Elf>(endian, tag, dynamic, dynstr) {
-        // Expand $ORIGIN, $LIB, and $PLATFORM.
-        let mut newdynstr = replace_dyn_str(&dynstr, "ORIGIN", origin);
-
-        parse_elf_dyn_searchpath_lib(endian, elf, &mut newdynstr);
-
-        let platform = match platform {
-            Some(platform) => platform.to_string(),
-            None => platform::get(elf.e_machine(endian), elf.e_ident().data),
-        };
-        let newdynstr = replace_dyn_str(&newdynstr, "PLATFORM", platform.as_str());
-
-        return search_path::from_string(newdynstr, &[':']);
+        return search_path::from_string(
+            expand_dst::<Elf>(endian, elf, &dynstr, origin, platform),
+            &[':'],
+        );
     }
     search_path::SearchPathVec::new()
 }
 
+// Expand the $ORIGIN, $LIB, and $PLATFORM dynamic string tokens.
+fn expand_dst<Elf: FileHeader>(
+    endian: Elf::Endian,
+    elf: &Elf,
+    dynstr: &str,
+    origin: &str,
+    platform: Option<&String>,
+) -> String {
+    let mut newdynstr = replace_dyn_str(dynstr, "ORIGIN", origin);
+
+    parse_elf_dyn_searchpath_lib(endian, elf, &mut newdynstr);
+
+    let platform = match platform {
+        Some(platform) => platform.to_string(),
+        None => platform::get(elf.e_machine(endian), elf.e_ident().data),
+    };
+    replace_dyn_str(&newdynstr, "PLATFORM", platform.as_str())
+}
+
 fn parse_elf_dtneeded<Elf: FileHeader>(
     endian: Elf::Endian,
+    elf: &Elf,
     dynamic: &[Elf::Dyn],
     dynstr: StringTable,
+    origin: &str,
+    platform: Option<&String>,
 ) -> Result<(DepsVec, DepsVec, bool), &'static str> {
     let mut dtneeded = DepsVec::new();
     let mut filters = DepsVec::new();
@@ -465,10 +479,15 @@ fn parse_elf_dtneeded<Elf: FileHeader>(
             Err(_) => continue,
             Ok(s) => {
                 if let Ok(s) = str::from_utf8(s) {
+                    let name = if s.contains('$') {
+                        expand_dst::<Elf>(endian, elf, s, origin, platform)
+                    } else {
+                        s.to_string()
+                    };
                     if tag != DT_NEEDED {
-                        filters.push(s.to_string());
+                        filters.push(name.clone());
                     }
-                    dtneeded.push(s.to_string());
+                    dtneeded.push(name);
                 }
             }
         }
