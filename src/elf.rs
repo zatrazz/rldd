@@ -1339,8 +1339,16 @@ fn resolve_dependencies(
             continue;
         }
 
-        #[cfg(target_os = "android")]
-        if matches!(dependency.as_str(), "linux-vdso.so.1" | "linux-gate.so.1") {
+        // The vDSO the kernel maps is on the loaded list of the bionic and
+        // the glibc loaders under its soname, so a DT_NEEDED naming it is
+        // already loaded (musl does not match it).
+        #[cfg(any(target_os = "android", target_os = "linux"))]
+        if !elc.is_musl
+            && matches!(
+                dependency.as_str(),
+                "linux-vdso.so.1" | "linux-gate.so.1" | "linux-vdso32.so.1" | "linux-vdso64.so.1"
+            )
+        {
             continue;
         }
 

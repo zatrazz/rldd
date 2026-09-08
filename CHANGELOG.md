@@ -151,6 +151,8 @@ All notable changes to this project will be documented in this file.
   `$PLATFORM`) is expanded.
 - ELF: a dependency referring back to the root object by its path is listed,
   once, the way the loader trace lists it.
+- ELF (Linux): a `DT_NEEDED` entry naming the vDSO (`linux-vdso.so.1` and
+  the like) is taken as already loaded.
 - ELF (Android): any object without a `PT_INTERP` segment (including the
   loader itself) no longer panics, and its dependencies are resolved with
   the default system directories.
