@@ -1354,7 +1354,11 @@ fn resolve_dependencies(
             // it, with the search paths of that object.  The loader skips the
             // faked entries of its trace when matching the names, so a name a
             // module fails on resolves for a library with the run path.
-            let found = |entry: &DepNode| entry.mode != DepMode::NotFound;
+            // A dependency referring back to the root object by its path is
+            // resolved too, since the loader records the name on it and the
+            // trace lists it once.
+            let found =
+                |entry: &DepNode| !matches!(entry.mode, DepMode::NotFound | DepMode::Executable);
             #[cfg(target_os = "linux")]
             let loaded = deptree.get(dependency).filter(found).or_else(|| {
                 if elc.is_musl {

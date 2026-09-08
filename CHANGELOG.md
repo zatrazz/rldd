@@ -149,6 +149,8 @@ All notable changes to this project will be documented in this file.
   entry is reported statically linked whatever its filters.
 - ELF: a dependency name holding a dynamic string token (`$ORIGIN`, `$LIB`,
   `$PLATFORM`) is expanded.
+- ELF: a dependency referring back to the root object by its path is listed,
+  once, the way the loader trace lists it.
 - ELF (Android): any object without a `PT_INTERP` segment (including the
   loader itself) no longer panics, and its dependencies are resolved with
   the default system directories.
