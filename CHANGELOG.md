@@ -96,6 +96,8 @@ All notable changes to this project will be documented in this file.
   prefix as the musl ldd does.
 - ELF (musl): the preloaded objects are always loaded, even for an object
   without any `DT_NEEDED` entry.
+- ELF (musl): `DT_RUNPATH` is searched the way the loader searches it (like
+  `DT_RPATH` along the chain of the objects that needed a library).
 - ELF (OpenBSD): the first `libc.so.*` dependency found is used for every
   further libc load, like the loader does.
 - Mach-O: a FAT file without a host architecture slice is still inspected

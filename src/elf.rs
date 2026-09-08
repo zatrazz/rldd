@@ -192,7 +192,20 @@ fn handle_search_paths(elc: &mut ElfInfo) {
         elc.has_runpath = false;
     }
 }
-#[cfg(all(target_family = "unix", not(target_os = "netbsd")))]
+// The musl loader takes DT_RUNPATH over DT_RPATH, but searches it the way
+// it searches DT_RPATH.  For the object own dependencies and, walking the
+// chain of the objects that needed a library, for the indirect ones.
+#[cfg(target_os = "linux")]
+fn handle_search_paths(elc: &mut ElfInfo) {
+    if elc.is_musl && elc.has_runpath {
+        elc.rpath = std::mem::take(&mut elc.runpath);
+        elc.has_runpath = false;
+    }
+}
+#[cfg(all(
+    target_family = "unix",
+    not(any(target_os = "netbsd", target_os = "linux"))
+))]
 fn handle_search_paths(_elc: &mut ElfInfo) {}
 
 fn parse_elf_program_headers<Elf: FileHeader>(
