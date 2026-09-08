@@ -76,6 +76,10 @@ struct ElfInfo {
     // since non existent directories are filtered out while the loader semantics
     // (ignoring DT_RPATH) only depend on the tag presence.
     has_runpath: bool,
+    // Whether the object has any DT_NEEDED entry.
+    has_needed: bool,
+    // DT_AUXILIARY and DT_FILTER entries.
+    filters: DepsVec,
     nodeflibs: bool,
     is_musl: bool,
     // NetBSD loader expands the token to the executable directory for every object.
@@ -312,7 +316,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
         let nodeflibs = dt_flags_1.contains(DF_1_NODEFLIB);
 
         return match parse_elf_dtneeded::<Elf>(endian, dynamic, dynstr) {
-            Ok(dtneeded) => Ok(ElfInfo {
+            Ok((dtneeded, filters, has_needed)) => Ok(ElfInfo {
                 ei_class: elf.e_ident().class,
                 ei_data: elf.e_ident().data,
                 ei_osabi: elf.e_ident().os_abi,
@@ -331,6 +335,8 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
                     .is_some(),
                 nodeflibs,
                 deps: dtneeded,
+                has_needed,
+                filters,
                 is_musl: false,
                 origin: origin.to_string(),
             }),
@@ -438,27 +444,36 @@ fn parse_elf_dtneeded<Elf: FileHeader>(
     endian: Elf::Endian,
     dynamic: &[Elf::Dyn],
     dynstr: StringTable,
-) -> Result<DepsVec, &'static str> {
+) -> Result<(DepsVec, DepsVec, bool), &'static str> {
     let mut dtneeded = DepsVec::new();
+    let mut filters = DepsVec::new();
+    let mut has_needed = false;
     for d in dynamic {
-        if d.d_tag(endian) == DT_NULL {
+        let tag = d.d_tag(endian);
+        if tag == DT_NULL {
             break;
         }
 
-        if d.tag32(endian).is_none() || !d.is_string(endian) || d.d_tag(endian) != DT_NEEDED {
+        // Only the glibc loader loads a filtee.
+        let filter = cfg!(target_os = "linux") && (tag == DT_AUXILIARY || tag == DT_FILTER);
+        if d.tag32(endian).is_none() || !(tag == DT_NEEDED || filter) {
             continue;
         }
+        has_needed |= tag == DT_NEEDED;
 
         match d.string(endian, dynstr) {
             Err(_) => continue,
             Ok(s) => {
                 if let Ok(s) = str::from_utf8(s) {
+                    if tag != DT_NEEDED {
+                        filters.push(s.to_string());
+                    }
                     dtneeded.push(s.to_string());
                 }
             }
         }
     }
-    Ok(dtneeded)
+    Ok((dtneeded, filters, has_needed))
 }
 
 fn parse_elf_dyn_flags<Elf: FileHeader>(
@@ -868,6 +883,17 @@ pub fn resolve_binary(
     let (filename, elc) = redirect_to_best_minor(filename, elc, platform.as_ref());
 
     let mut elc = elc;
+
+    // The trace reports an object without any DT_NEEDED entry as statically
+    // linked, and does not list the filtees of the root object (it lists the ones of
+    // a dependency).
+    if !elc.has_needed {
+        elc.deps.clear();
+    } else if !elc.filters.is_empty() {
+        // By name: the trace drops a filtee of the root object even when a
+        // DT_NEEDED entry names it too.
+        elc.deps.retain(|dep| !elc.filters.contains(dep));
+    }
 
     // DT_RPATH is ignored if the object also defines DT_RUNPATH (the latter only
     // applies to the object own dependencies, so it is not propagated).
