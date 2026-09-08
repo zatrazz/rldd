@@ -1292,8 +1292,13 @@ fn resolve_dependencies(
             // The glibc loader also matches a name against the DT_SONAME of
             // the objects already loaded, so a library loaded through a
             // symlink named otherwise is not loaded again under its soname.
+            // A name not found is searched again for each object requesting
+            // it, with the search paths of that object.  The loader skips the
+            // faked entries of its trace when matching the names, so a name a
+            // module fails on resolves for a library with the run path.
+            let found = |entry: &DepNode| entry.mode != DepMode::NotFound;
             #[cfg(target_os = "linux")]
-            let loaded = deptree.get(dependency).or_else(|| {
+            let loaded = deptree.get(dependency).filter(found).or_else(|| {
                 if elc.is_musl {
                     return None;
                 }
@@ -1304,7 +1309,7 @@ fn resolve_dependencies(
                     .and_then(|(_, refpath, _)| deptree.get(refpath))
             });
             #[cfg(not(target_os = "linux"))]
-            let loaded = deptree.get(dependency);
+            let loaded = deptree.get(dependency).filter(found);
             if let Some(entry) = loaded {
                 if config.all {
                     deptree.addnode(

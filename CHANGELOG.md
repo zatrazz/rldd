@@ -140,6 +140,8 @@ All notable changes to this project will be documented in this file.
   relative to the current directory when it is not absolute, instead of being
   searched through the directories, and a missing one is reported with its
   recorded name (`tmpdir/libfoo.so`) instead of its base name.
+- ELF (Linux): a dependency name not found is searched again for each object
+  requesting it, with the search paths of that object.
 - ELF (Android): any object without a `PT_INTERP` segment (including the
   loader itself) no longer panics, and its dependencies are resolved with
   the default system directories.
