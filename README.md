@@ -197,3 +197,9 @@ The Linux ELF tests runs rldd over the objects of the system directories and com
 tests/linux/run.sh
 tests/linux/run.sh -H debian-aarch64 -H debian-ppc64le
 ```
+
+The FreeBSD, OpenBSD and NetBSD loaders each search differently (the hints file and `libmap.conf`, the minor version matching, the `ld.so.conf` and the compat directories), so the BSDs have a suite of their own under [tests/bsd](tests/bsd).  It runs rldd over the objects of the system directories and compares the dependency lists with the ‘ldd’ of each system.  The machine under test is the local one or a host reached through ssh, where the working tree is copied and rldd built:
+
+```
+tests/bsd/run.sh -H freebsd -H openbsd -H netbsd
+```

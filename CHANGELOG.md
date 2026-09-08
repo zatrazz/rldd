@@ -45,6 +45,10 @@ All notable changes to this project will be documented in this file.
   over the objects of the system directories of a machine, either the local
   one or a host reached through ssh, and compares the dependency lists with
   `ldd`.
+- A test suite for the BSD ELF backends under `tests/bsd`, which runs rldd
+  over the objects of the system directories of a FreeBSD, OpenBSD or NetBSD
+  machine, either the local one or a host reached through ssh where rldd is
+  built, and compares the dependency lists with the `ldd` of each system.
 - The CI workflow also builds on Windows, and checks the Android targets
   (which are only cross compiled).
 
