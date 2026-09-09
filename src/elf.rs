@@ -67,8 +67,8 @@ struct ElfInfo {
     e_flags: FileFlags,
 
     interp: Option<String>,
-    // Not used on OpenBSD, where the loader ignores DT_SONAME.
-    #[cfg_attr(target_os = "openbsd", allow(dead_code))]
+    // Read by the glibc and the FreeBSD rules only.
+    #[cfg_attr(not(any(target_os = "linux", target_os = "freebsd")), allow(dead_code))]
     soname: Option<String>,
     rpath: search_path::SearchPathVec,
     runpath: search_path::SearchPathVec,
