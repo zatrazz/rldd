@@ -102,6 +102,9 @@ All notable changes to this project will be documented in this file.
   without any `DT_NEEDED` entry.
 - ELF (musl): `DT_RUNPATH` is searched the way the loader searches it (like
   `DT_RPATH` along the chain of the objects that needed a library).
+- ELF (FreeBSD, OpenBSD): the `DT_RPATH` of a shared library given as input
+  no longer applies to its indirect dependencies.On FreeBSD the main object
+  is left out for an object with a `DT_RUNPATH`.
 - ELF (OpenBSD): the first `libc.so.*` dependency found is used for every
   further libc load, like the loader does.
 - Mach-O: a FAT file without a host architecture slice is still inspected

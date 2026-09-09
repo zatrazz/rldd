@@ -1512,14 +1512,20 @@ fn resolve_dependencies(
             // own DT_RPATH and then the main object one, while the NetBSD
             // loader only searches the requesting object DT_RPATH.  In all
             // cases an object DT_RPATH is ignored if the object also defines
-            // DT_RUNPATH, without affecting the inherited part.
+            // DT_RUNPATH, without affecting the inherited part
             if dep.elc.has_runpath {
                 dep.elc.rpath.clear();
             }
             #[cfg(target_os = "linux")]
             dep.elc.rpath.extend(elc.rpath.clone());
-            #[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
-            dep.elc.rpath.extend(parents[0].0.rpath.clone());
+            #[cfg(target_os = "freebsd")]
+            if !dep.elc.has_runpath && parents[0].0.interp.is_some() {
+                dep.elc.rpath.extend(parents[0].0.rpath.clone());
+            }
+            #[cfg(target_os = "openbsd")]
+            if parents[0].0.interp.is_some() {
+                dep.elc.rpath.extend(parents[0].0.rpath.clone());
+            }
 
             let parent = parents.len();
             for sdep in &dep.elc.deps {
