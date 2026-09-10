@@ -9,7 +9,7 @@ loader cache or extra configuration files).
 Currently, it supports Linux (glibc, musl, and Android), FreeBSD, OpenBSD,
 NetBSD, Illumos, macOS, and Windows.
 
-![screenshot](doc/screenshot.png)
+![screenshot](https://raw.githubusercontent.com/zatrazz/rldd/main/doc/screenshot.png)
 
 ## Output
 
