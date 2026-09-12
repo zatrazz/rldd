@@ -806,21 +806,30 @@ fn resolve_binary_arch(
     Ok(())
 }
 
-// The loader search cache is lazy loaded if the binary has a loader that actually
-// supports it.
-pub fn create_context() -> Option<LoaderCache> {
-    None
-}
-
-pub fn resolve_binary(
-    ld_cache: &mut Option<LoaderCache>,
-    ld_preload: &[String],
-    ld_library_path: &search_path::SearchPathVec,
-    platform: &Option<String>,
+// The resolution context: the loader search cache along with the command line
+// settings.
+pub struct ElfContext {
+    // Lazy loaded if the binary has a loader that actually supports it.
+    ld_cache: Option<LoaderCache>,
+    ld_preload: Vec<String>,
+    ld_library_path: search_path::SearchPathVec,
+    platform: Option<String>,
     all: bool,
     verbose: bool,
-    arg: &str,
-) -> Result<DepTree, std::io::Error> {
+}
+
+pub fn create_context(opts: &crate::Options) -> Result<ElfContext, String> {
+    Ok(ElfContext {
+        ld_cache: None,
+        ld_preload: search_path::from_preload(&opts.preload),
+        ld_library_path: search_path::from_string(&opts.library_path, &[':']),
+        platform: opts.platform.clone(),
+        all: opts.all,
+        verbose: opts.verbose,
+    })
+}
+
+pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::io::Error> {
     // On glibc/Linux the RTLD_DI_ORIGIN for the executable itself (used for $ORIGIN
     // expansion) is obtained by first following the '/proc/self/exe' symlink and if
     // it is not available the loader also checks the 'LD_ORIGIN_PATH' environment
@@ -831,13 +840,13 @@ pub fn resolve_binary(
     // the binary can not dereference the procfs entry.
     let filename = Path::new(arg).canonicalize()?;
 
-    let elc = open_elf_file(&filename, None, platform.as_ref(), false)?;
+    let elc = open_elf_file(&filename, None, ctx.platform.as_ref(), false)?;
 
     // The OpenBSD loader matches a library by name and major version, picking the best
     // minor available on the directory (even for the dlopen argument). Mimic it for
     // shared library inputs (executables are executed directly, with no redirection).
     #[cfg(target_os = "openbsd")]
-    let (filename, elc) = redirect_to_best_minor(filename, elc, platform.as_ref());
+    let (filename, elc) = redirect_to_best_minor(filename, elc, ctx.platform.as_ref());
 
     let mut elc = elc;
 
@@ -860,10 +869,10 @@ pub fn resolve_binary(
 
     // The cache/hints/config file is usually an optional file and failing to open it
     // does not incur on a resolution failure.
-    load_so_cache(ld_cache, &filename, &elc);
+    load_so_cache(&mut ctx.ld_cache, &filename, &elc);
 
     // Same for glibc ld.so.preload file.
-    let mut preload = ld_preload.to_vec();
+    let mut preload = ctx.ld_preload.to_vec();
     // glibc first parses LD_PRELOAD and then ld.so.preload.
     // We need a new vector for the case of binaries with different interpreters.
     preload.extend(load_ld_so_preload(&elc.interp));
@@ -882,14 +891,14 @@ pub fn resolve_binary(
 
     #[cfg(target_os = "linux")]
     let loader = elc.interp.clone().or_else(|| {
-        ld_cache.as_ref().and_then(|cache| {
+        ctx.ld_cache.as_ref().and_then(|cache| {
             interp::glibc_names()
                 .iter()
                 .find_map(|name| cache.get(*name).map(|dir| format!("{dir}/{name}")))
         })
     });
 
-    let system_dirs = if load_system_dirs(&*ld_cache) {
+    let system_dirs = if load_system_dirs(&ctx.ld_cache) {
         #[cfg(target_os = "linux")]
         let dirs = system_dirs::get_system_dirs(loader.as_deref(), &elc)?;
         #[cfg(not(target_os = "linux"))]
@@ -901,16 +910,16 @@ pub fn resolve_binary(
 
     let config = Config {
         ld_preload: &preload,
-        ld_library_path,
-        ld_cache,
+        ld_library_path: &ctx.ld_library_path,
+        ld_cache: &ctx.ld_cache,
         system_dirs,
-        platform: platform.as_ref(),
-        all,
+        platform: ctx.platform.as_ref(),
+        all: ctx.all,
         #[cfg(target_os = "freebsd")]
         libmap: ld_libmap_freebsd::parse_libmap(&Path::new("/etc/libmap.conf")),
     };
 
-    if verbose {
+    if ctx.verbose {
         print_search_path_information(&filename, &config, &elc);
     }
 
