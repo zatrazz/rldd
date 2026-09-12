@@ -229,3 +229,59 @@ impl fmt::Display for DepMode {
         }
     }
 }
+
+// A symbol reference that no loaded object provides, reported by the
+// relocation (ELF) or the import (PE) checks.
+#[cfg(any(target_os = "linux", windows))]
+pub struct UndefinedSymbol {
+    pub name: String,
+    // The object holding the reference: its full path on ELF, and the module
+    // name on PE.
+    pub object: String,
+    // The required symbol version (ELF only).
+    pub version: Option<String>,
+    // The module the symbol is imported from (PE only).
+    pub from: Option<String>,
+}
+
+#[cfg(any(target_os = "linux", windows))]
+impl fmt::Display for UndefinedSymbol {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.name)?;
+        if let Some(version) = &self.version {
+            write!(f, ", version {version}")?;
+        }
+        if let Some(from) = &self.from {
+            write!(f, ", from {from}")?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", windows)))]
+mod tests {
+    use super::*;
+
+    fn undefined(version: Option<&str>, from: Option<&str>) -> String {
+        UndefinedSymbol {
+            name: "sym".to_string(),
+            object: "obj".to_string(),
+            version: version.map(str::to_string),
+            from: from.map(str::to_string),
+        }
+        .to_string()
+    }
+
+    #[test]
+    fn undefined_symbol_display() {
+        assert_eq!(undefined(None, None), "sym");
+        assert_eq!(
+            undefined(Some("GLIBC_2.34"), None),
+            "sym, version GLIBC_2.34"
+        );
+        assert_eq!(
+            undefined(None, Some("kernel32.dll")),
+            "sym, from kernel32.dll"
+        );
+    }
+}

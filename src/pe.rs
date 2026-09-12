@@ -497,15 +497,6 @@ fn forwarded_modules(imports: &[ImportName], info: &PeInfo) -> Vec<String> {
     modules
 }
 
-// An imported symbol that no loaded module exports.
-pub struct UndefinedSymbol {
-    pub name: String,
-    // The module holding the import.
-    pub object: String,
-    // The module it is imported from.
-    pub from: String,
-}
-
 // Check that every imported symbol is exported by the module it is imported
 // from, the PE equivalent of processing the ELF relocations.  DELAY_LOAD also
 // checks the delay load imports, which the loader only binds on the first
@@ -582,7 +573,8 @@ pub fn check_imports(ctx: &PeContext, deptree: &DepTree, delay_load: bool) -> Ve
                     undefined.push(UndefinedSymbol {
                         name: import.to_string(),
                         object: node.val.name.clone(),
-                        from: target.name.clone(),
+                        version: None,
+                        from: Some(target.name.clone()),
                     });
                 }
             }
@@ -974,7 +966,7 @@ mod tests {
 
         let undefined: Vec<String> = check_imports(&ctx, &deptree, true)
             .iter()
-            .map(|undef| format!("{} from {} ({})", undef.name, undef.from, undef.object))
+            .map(|undef| format!("{undef} ({})", undef.object))
             .collect();
         assert!(undefined.is_empty(), "{undefined:?}");
     }
