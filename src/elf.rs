@@ -1719,16 +1719,6 @@ fn resolve_dependency_ld_cache<'a>(
 // and are only enabled on Linux; on Android the linker provides the loader
 // symbols with mangled names, while the BSD run-time linkers were not verified.
 
-// An unresolved symbol reference found while processing the dynamic relocations.
-#[cfg(target_os = "linux")]
-pub struct UndefinedSymbol {
-    pub name: String,
-    // The required symbol version, if any.
-    pub version: Option<String>,
-    // Full path of the object with the undefined reference.
-    pub object: String,
-}
-
 // A version definition required by some object that the dependency providing
 // it does not define (the loader version check).
 #[cfg(target_os = "linux")]
@@ -1854,8 +1844,9 @@ pub fn check_musl_relocations(deptree: &DepTree) -> Option<Vec<UndefinedSymbol>>
             {
                 undefined.push(UndefinedSymbol {
                     name: sref.name.clone(),
-                    version: None,
                     object: path.clone(),
+                    version: None,
+                    from: None,
                 });
             }
         }
@@ -1952,8 +1943,9 @@ pub fn check_relocations(
             {
                 r.undefined.push(UndefinedSymbol {
                     name: sref.name.clone(),
-                    version: sref.version.clone(),
                     object: path.clone(),
+                    version: sref.version.clone(),
+                    from: None,
                 });
             }
         }

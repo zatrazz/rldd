@@ -285,35 +285,21 @@ fn main() {
                     continue;
                 }
 
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", windows))]
                 if opts.data_relocs || opts.function_relocs {
-                    let relocs = check_relocations(&deptree, opts.function_relocs, false);
-                    // The loader prints the version check errors before the
-                    // dependency listing.
-                    print_version_errors(&arg, &relocs.version_errors);
-                    print_deps(&printer, &deptree);
-                    for undef in relocs.undefined {
-                        let version = match undef.version {
-                            Some(version) => format!(", version {version}"),
-                            None => String::new(),
-                        };
-                        println!(
-                            "undefined symbol: {}{version}\t({})",
-                            undef.name, undef.object
-                        );
-                    }
-                    continue;
-                }
-
-                #[cfg(windows)]
-                if opts.data_relocs || opts.function_relocs {
+                    #[cfg(target_os = "linux")]
+                    let undefined = {
+                        let relocs = check_relocations(&deptree, opts.function_relocs, false);
+                        // The loader prints the version check errors before the
+                        // dependency listing.
+                        print_version_errors(&arg, &relocs.version_errors);
+                        relocs.undefined
+                    };
+                    #[cfg(windows)]
                     let undefined = check_imports(&ctx, &deptree, opts.function_relocs);
                     print_deps(&printer, &deptree);
                     for undef in undefined {
-                        println!(
-                            "undefined symbol: {}, from {}\t({})",
-                            undef.name, undef.from, undef.object
-                        );
+                        println!("undefined symbol: {undef}\t({})", undef.object);
                     }
                     continue;
                 }
