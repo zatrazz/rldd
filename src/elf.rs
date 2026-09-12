@@ -831,19 +831,7 @@ fn resolve_binary_arch(
     };
     if let Some(interp) = interp {
         let path = Path::new(&interp);
-        deptree.addnode(
-            DepNode {
-                path: pathutils::get_path(&path),
-                name: pathutils::get_name(&path),
-                mode: DepMode::SystemDirs,
-                found: false,
-                alias: None,
-                attrs: Vec::new(),
-                version: None,
-                searched: Vec::new(),
-            },
-            depp,
-        );
+        deptree.addnode(DepNode::from_path(&path, DepMode::SystemDirs), depp);
     }
     Ok(())
 }
@@ -991,16 +979,7 @@ pub fn resolve_binary(
 
     let mut deptree = DepTree::new();
 
-    let depp = deptree.addroot(DepNode {
-        path: pathutils::get_path(&filename),
-        name: pathutils::get_name(&filename),
-        mode: DepMode::Executable,
-        found: false,
-        alias: None,
-        attrs: Vec::new(),
-        version: None,
-        searched: Vec::new(),
-    });
+    let depp = deptree.addroot(DepNode::from_path(&filename, DepMode::Executable));
 
     resolve_binary_arch(&elc, &mut deptree, depp)?;
 
@@ -1294,16 +1273,8 @@ fn resolve_dependencies(
                 Some(slot) if !musl_reported[slot] => {
                     musl_reported[slot] = true;
                     deptree.addnode(
-                        DepNode {
-                            path: pathutils::get_path(&loader_path),
-                            name: pathutils::get_name(&loader_path),
-                            mode: DepMode::SystemDirs,
-                            found: false,
-                            alias: Some(dependency.clone()),
-                            attrs: Vec::new(),
-                            version: None,
-                            searched: Vec::new(),
-                        },
+                        DepNode::from_path(&loader_path, DepMode::SystemDirs)
+                            .with_alias(Some(dependency.clone())),
                         item.depp,
                     );
                     continue;
@@ -1314,16 +1285,9 @@ fn resolve_dependencies(
                     // without any report.  Record it as an already resolved
                     // entry so the symbol scope knows the libc is linked.
                     deptree.addnode(
-                        DepNode {
-                            path: pathutils::get_path(&loader_path),
-                            name: pathutils::get_name(&loader_path),
-                            mode: DepMode::SystemDirs,
-                            found: true,
-                            alias: Some(dependency.clone()),
-                            attrs: Vec::new(),
-                            version: None,
-                            searched: Vec::new(),
-                        },
+                        DepNode::from_path(&loader_path, DepMode::SystemDirs)
+                            .already_found()
+                            .with_alias(Some(dependency.clone())),
                         item.depp,
                     );
                     continue;
@@ -1383,16 +1347,12 @@ fn resolve_dependencies(
             if let Some(entry) = loaded {
                 if config.all {
                     deptree.addnode(
-                        DepNode {
-                            path: entry.path,
-                            name: pathutils::get_name(&Path::new(dependency)),
-                            mode: entry.mode,
-                            found: true,
-                            alias: None,
-                            attrs: Vec::new(),
-                            version: None,
-                            searched: Vec::new(),
-                        },
+                        DepNode::new(
+                            entry.path,
+                            pathutils::get_name(&Path::new(dependency)),
+                            entry.mode,
+                        )
+                        .already_found(),
                         item.depp,
                     );
                 }
@@ -1409,19 +1369,7 @@ fn resolve_dependencies(
             if let Some(interp) = &parents[0].0.interp {
                 let path = Path::new(interp);
                 if pathutils::get_name(&path) == *dependency && path.exists() {
-                    deptree.addnode(
-                        DepNode {
-                            path: pathutils::get_path(&path),
-                            name: pathutils::get_name(&path),
-                            mode: DepMode::Direct,
-                            found: false,
-                            alias: None,
-                            attrs: Vec::new(),
-                            version: None,
-                            searched: Vec::new(),
-                        },
-                        item.depp,
-                    );
+                    deptree.addnode(DepNode::from_path(&path, DepMode::Direct), item.depp);
                     continue;
                 }
             }
@@ -1476,34 +1424,18 @@ fn resolve_dependencies(
             {
                 if config.all {
                     deptree.addnode(
-                        DepNode {
-                            path: entry.path,
-                            name: pathutils::get_name(&Path::new(dependency)),
-                            mode: entry.mode,
-                            found: true,
-                            alias: None,
-                            attrs: Vec::new(),
-                            version: None,
-                            searched: Vec::new(),
-                        },
+                        DepNode::new(
+                            entry.path,
+                            pathutils::get_name(&Path::new(dependency)),
+                            entry.mode,
+                        )
+                        .already_found(),
                         item.depp,
                     );
                 }
                 continue;
             }
-            let c = deptree.addnode(
-                DepNode {
-                    path: r.0,
-                    name: r.1,
-                    mode: dep.mode,
-                    found: false,
-                    alias: None,
-                    attrs: Vec::new(),
-                    version: None,
-                    searched: Vec::new(),
-                },
-                item.depp,
-            );
+            let c = deptree.addnode(DepNode::new(r.0, r.1, dep.mode), item.depp);
 
             // The DT_RPATH scope used for the indirect dependencies is system
             // specific: the glibc loader searches the object own DT_RPATH and
@@ -1539,19 +1471,7 @@ fn resolve_dependencies(
             parents.push((dep.elc, depref, dep.namespace));
         } else {
             let searched = searched_locations(config, elc, dependency);
-            deptree.addnode(
-                DepNode {
-                    path: None,
-                    name: dependency.clone(),
-                    mode: DepMode::NotFound,
-                    found: false,
-                    alias: None,
-                    attrs: Vec::new(),
-                    version: None,
-                    searched,
-                },
-                item.depp,
-            );
+            deptree.addnode(DepNode::not_found(dependency.clone(), searched), item.depp);
         }
     }
 
@@ -1613,19 +1533,7 @@ fn add_loader_dependency(config: &Config, elc: &ElfInfo, deptree: &mut DepTree, 
     if let Some(interp) = &elc.interp {
         let path = Path::new(interp);
         if path.exists() {
-            deptree.addnode(
-                DepNode {
-                    path: pathutils::get_path(&path),
-                    name: pathutils::get_name(&path),
-                    mode: DepMode::Direct,
-                    found: false,
-                    alias: None,
-                    attrs: Vec::new(),
-                    version: None,
-                    searched: Vec::new(),
-                },
-                root_depp,
-            );
+            deptree.addnode(DepNode::from_path(&path, DepMode::Direct), root_depp);
             return;
         }
     }
@@ -1638,16 +1546,7 @@ fn add_loader_dependency(config: &Config, elc: &ElfInfo, deptree: &mut DepTree, 
         let dtneeded = name.to_string();
         if let Some(dep) = resolve_loader(config, elc, &dtneeded) {
             deptree.addnode(
-                DepNode {
-                    path: Some(dep.path.to_string()),
-                    name: dep.filename.clone(),
-                    mode: dep.mode,
-                    found: false,
-                    alias: None,
-                    attrs: Vec::new(),
-                    version: None,
-                    searched: Vec::new(),
-                },
+                DepNode::new(Some(dep.path.to_string()), dep.filename.clone(), dep.mode),
                 root_depp,
             );
             return;
@@ -1661,19 +1560,7 @@ fn add_loader_dependency(_config: &Config, elc: &ElfInfo, deptree: &mut DepTree,
     if let Some(interp) = &elc.interp {
         let path = Path::new(interp);
         if path.exists() {
-            deptree.addnode(
-                DepNode {
-                    path: pathutils::get_path(&path),
-                    name: pathutils::get_name(&path),
-                    mode: DepMode::Direct,
-                    found: false,
-                    alias: None,
-                    attrs: Vec::new(),
-                    version: None,
-                    searched: Vec::new(),
-                },
-                root_depp,
-            );
+            deptree.addnode(DepNode::from_path(&path, DepMode::Direct), root_depp);
         }
     }
 }

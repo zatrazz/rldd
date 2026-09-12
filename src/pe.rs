@@ -164,16 +164,11 @@ pub fn resolve_binary(
     let redirect = dot_local_dirs(filename, application.as_deref());
 
     let mut deptree = DepTree::new();
-    let depp = deptree.addroot(DepNode {
-        path: application,
-        name: pathutils::get_name(&filename),
-        mode: DepMode::Executable,
-        found: false,
-        alias: None,
-        attrs: Vec::new(),
-        version: None,
-        searched: Vec::new(),
-    });
+    let depp = deptree.addroot(DepNode::new(
+        application,
+        pathutils::get_name(&filename),
+        DepMode::Executable,
+    ));
 
     let config = Config {
         ctx,
@@ -357,18 +352,12 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
             let entry = deptree.arena[index].val.clone();
             if config.all {
                 deptree.addnode(
-                    DepNode {
-                        path: entry.path.clone(),
-                        // The name this entry records, which only matches the
-                        // one already on the tree without regard to case.
-                        name: name.clone(),
-                        mode: entry.mode,
-                        found: true,
-                        alias,
-                        attrs: item.dep.attrs.clone(),
-                        version: None,
-                        searched: Vec::new(),
-                    },
+                    // The name this entry records, which only matches the one
+                    // already on the tree without regard to case.
+                    DepNode::new(entry.path.clone(), name.clone(), entry.mode)
+                        .already_found()
+                        .with_alias(alias)
+                        .with_attrs(item.dep.attrs.clone()),
                     item.depp,
                 );
             }
@@ -419,16 +408,9 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
         }
 
         let depd = deptree.addnode(
-            DepNode {
-                path: Some(dir),
-                name: name.clone(),
-                mode,
-                found: false,
-                alias,
-                attrs: item.dep.attrs.clone(),
-                version: None,
-                searched: Vec::new(),
-            },
+            DepNode::new(Some(dir), name.clone(), mode)
+                .with_alias(alias)
+                .with_attrs(item.dep.attrs.clone()),
             item.depp,
         );
 
@@ -608,16 +590,7 @@ fn add_not_found(config: &Config, item: &WorkItem, deptree: &mut DepTree, search
         return;
     }
     deptree.addnode(
-        DepNode {
-            path: None,
-            name: item.dep.name.clone(),
-            mode: DepMode::NotFound,
-            found: false,
-            alias: None,
-            attrs: item.dep.attrs.clone(),
-            version: None,
-            searched,
-        },
+        DepNode::not_found(item.dep.name.clone(), searched).with_attrs(item.dep.attrs.clone()),
         item.depp,
     );
 }

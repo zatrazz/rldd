@@ -25,6 +25,60 @@ pub struct DepNode {
     pub searched: Vec<String>,
 }
 
+impl DepNode {
+    // An object located at the PATH directory with the NAME file name.
+    pub fn new(path: Option<String>, name: String, mode: DepMode) -> Self {
+        Self {
+            path,
+            name,
+            mode,
+            ..Default::default()
+        }
+    }
+
+    // An object from its full path.  Only the ELF backend records the
+    // dependencies from the path they were opened with.
+    #[cfg_attr(any(target_os = "macos", windows), allow(dead_code))]
+    pub fn from_path<P: AsRef<Path>>(path: &P, mode: DepMode) -> Self {
+        Self::new(pathutils::get_path(path), pathutils::get_name(path), mode)
+    }
+
+    // A dependency that could not be resolved, along with the locations
+    // searched for it.
+    pub fn not_found(name: String, searched: Vec<String>) -> Self {
+        Self {
+            name,
+            mode: DepMode::NotFound,
+            searched,
+            ..Default::default()
+        }
+    }
+
+    // Mark a dependency already resolved elsewhere on the tree.
+    pub fn already_found(mut self) -> Self {
+        self.found = true;
+        self
+    }
+
+    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
+    pub fn with_alias(mut self, alias: Option<String>) -> Self {
+        self.alias = alias;
+        self
+    }
+
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+    pub fn with_attrs(mut self, attrs: Vec<&'static str>) -> Self {
+        self.attrs = attrs;
+        self
+    }
+
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn with_version(mut self, version: Option<String>) -> Self {
+        self.version = version;
+        self
+    }
+}
+
 impl arenatree::EqualString for DepNode {
     #[cfg(unix)]
     fn eqstr(&self, other: &str) -> bool {
