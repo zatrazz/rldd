@@ -288,15 +288,13 @@ fn check_already_resolved(
     depp: usize,
 ) -> bool {
     if let Some(entry) = deptree.get(dependency) {
-        if config.all {
-            deptree.addnode(
-                DepNode::new(entry.path, entry.name, entry.mode)
-                    .already_found()
-                    .with_attrs(dep.attrs.clone())
-                    .with_version(dep.version.clone()),
-                depp,
-            );
-        }
+        deptree.add_repeated(
+            config.all,
+            DepNode::repeat_of(&entry, entry.name.clone())
+                .with_attrs(dep.attrs.clone())
+                .with_version(dep.version.clone()),
+            depp,
+        );
         return true;
     }
     false
