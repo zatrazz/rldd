@@ -654,12 +654,7 @@ fn try_open(config: &Config, path: &Path) -> Option<PeInfo> {
 }
 
 fn open_pe_file<P: AsRef<Path>>(filename: &P) -> Result<PeInfo, std::io::Error> {
-    let file = fs::File::open(filename)?;
-
-    let mmap = match unsafe { memmap2::Mmap::map(&file) } {
-        Ok(mmap) => mmap,
-        Err(_) => return Err(Error::other("Failed to map file")),
-    };
+    let mmap = pathutils::map_file(filename)?;
 
     let mut pei = parse_object(&mmap).map_err(Error::other)?;
 

@@ -1,6 +1,6 @@
 use std::io::Error;
 use std::path::{Path, PathBuf};
-use std::{fs, str};
+use std::str;
 
 use object::macho::*;
 use object::read::macho::*;
@@ -596,12 +596,7 @@ fn open_macho_file<P: AsRef<Path>>(
     arch: &Arch,
     executable_path: &str,
 ) -> Result<MachOInfo, std::io::Error> {
-    let file = fs::File::open(filename)?;
-
-    let mmap = match unsafe { memmap2::Mmap::map(&file) } {
-        Ok(mmap) => mmap,
-        Err(_) => return Err(Error::other("Failed to map file")),
-    };
+    let mmap = pathutils::map_file(filename)?;
 
     let loader_path = pathutils::get_path(filename).unwrap_or_default();
     parse_object(&mmap, 0, arch, executable_path, &loader_path).map_err(Error::other)

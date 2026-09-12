@@ -3,7 +3,6 @@
 // that really implements them.
 
 use std::collections::HashMap;
-use std::fs;
 use std::path::Path;
 
 use object::read::pe::{PeFile32, PeFile64};
@@ -157,8 +156,7 @@ pub fn parse(data: &[u8]) -> ApiSetMap {
 }
 
 fn read_section<P: AsRef<Path>>(filename: P) -> Option<Vec<u8>> {
-    let file = fs::File::open(filename).ok()?;
-    let mmap = unsafe { memmap2::Mmap::map(&file) }.ok()?;
+    let mmap = crate::pathutils::map_file(&filename).ok()?;
     let data: &[u8] = &mmap;
     match FileKind::parse(data).ok()? {
         FileKind::Pe32 => Some(

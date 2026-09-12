@@ -479,15 +479,8 @@ fn open_elf_file<P: AsRef<Path>>(
     platform: Option<&String>,
     preload: bool,
 ) -> Result<ElfInfo, std::io::Error> {
-    let file = match fs::File::open(filename) {
-        Ok(file) => file,
-        Err(_) => return Err(Error::other("Failed to open file")),
-    };
-
-    let mmap = match unsafe { memmap2::Mmap::map(&file) } {
-        Ok(mmap) => mmap,
-        Err(_) => return Err(Error::other("Failed to map file")),
-    };
+    let file = fs::File::open(filename).map_err(|_| Error::other("Failed to open file"))?;
+    let mmap = pathutils::map(&file)?;
 
     let origin = origin_directory(filename, melc);
 
