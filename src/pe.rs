@@ -584,11 +584,8 @@ pub fn check_imports(ctx: &PeContext, deptree: &DepTree, delay_load: bool) -> Ve
     undefined
 }
 
-// The paths are compared in case-insensite mode (as the filesystem).
 fn ignored(config: &Config, path: &str) -> bool {
-    config.ignore_prefix.iter().any(|prefix| {
-        path.len() >= prefix.len() && path[..prefix.len()].eq_ignore_ascii_case(prefix)
-    })
+    pathutils::has_prefix(path, config.ignore_prefix)
 }
 
 fn add_not_found(config: &Config, item: &WorkItem, deptree: &mut DepTree, searched: Vec<String>) {
