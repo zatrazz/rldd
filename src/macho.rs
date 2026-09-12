@@ -250,11 +250,7 @@ fn resolve_dependency(
         .replace("@executable_path", config.executable_path)
         .replace("@loader_path", loader_path);
 
-    if config
-        .ignore_prefix
-        .iter()
-        .any(|prefix| dependency.starts_with(prefix.as_str()))
-    {
+    if pathutils::has_prefix(&dependency, config.ignore_prefix) {
         return;
     }
 
