@@ -1,6 +1,6 @@
 use std::io::Error;
 use std::path::Path;
-use std::{fmt, fs, str};
+use std::{fs, str};
 
 use object::elf::*;
 use object::read::elf::*;
@@ -96,38 +96,19 @@ fn parse_object(
     origin: &str,
     platform: Option<&String>,
 ) -> Result<ElfInfo, &'static str> {
-    let kind = match object::FileKind::parse(data) {
-        Ok(file) => file,
-        Err(_err) => return Err("Failed to parse file"),
-    };
-
-    match kind {
-        object::FileKind::Elf32 => parse_elf32(data, origin, platform),
-        object::FileKind::Elf64 => parse_elf64(data, origin, platform),
+    match object::FileKind::parse(data).map_err(|_| "Failed to parse file")? {
+        object::FileKind::Elf32 => {
+            let elf =
+                FileHeader32::<Endianness>::parse(data).map_err(|_| "Invalid ELF32 object")?;
+            parse_elf(elf, data, origin, platform)
+        }
+        object::FileKind::Elf64 => {
+            let elf =
+                FileHeader64::<Endianness>::parse(data).map_err(|_| "Invalid ELF64 object")?;
+            parse_elf(elf, data, origin, platform)
+        }
         _ => Err("Invalid object"),
     }
-}
-
-fn parse_elf32(
-    data: &[u8],
-    origin: &str,
-    platform: Option<&String>,
-) -> Result<ElfInfo, &'static str> {
-    if let Some(elf) = FileHeader32::<Endianness>::parse(data).handle_err() {
-        return parse_elf(elf, data, origin, platform);
-    }
-    Err("Invalid ELF32 object")
-}
-
-fn parse_elf64(
-    data: &[u8],
-    origin: &str,
-    platform: Option<&String>,
-) -> Result<ElfInfo, &'static str> {
-    if let Some(elf) = FileHeader64::<Endianness>::parse(data).handle_err() {
-        return parse_elf(elf, data, origin, platform);
-    }
-    Err("Invalid ELF64 object")
 }
 
 fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
@@ -136,38 +117,15 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
     origin: &str,
     platform: Option<&String>,
 ) -> Result<ElfInfo, &'static str> {
-    let endian = match elf.endian() {
-        Ok(val) => val,
-        Err(_) => return Err("invalid endianess"),
-    };
-
+    let endian = elf.endian().map_err(|_| "invalid endianess")?;
     match elf.e_type(endian) {
-        ET_EXEC | ET_DYN => parse_header_elf(endian, elf, data, origin, platform),
-        _ => Err("Invalid ELF file"),
+        ET_EXEC | ET_DYN => {}
+        _ => return Err("Invalid ELF file"),
     }
-}
-
-trait HandleErr<T> {
-    fn handle_err(self) -> Option<T>;
-}
-
-impl<T, E: fmt::Display> HandleErr<T> for Result<T, E> {
-    fn handle_err(self) -> Option<T> {
-        self.ok()
-    }
-}
-
-fn parse_header_elf<Elf: FileHeader<Endian = Endianness>>(
-    endian: Elf::Endian,
-    elf: &Elf,
-    data: &[u8],
-    origin: &str,
-    platform: Option<&String>,
-) -> Result<ElfInfo, &'static str> {
-    match elf.program_headers(endian, data) {
-        Ok(segments) => parse_elf_program_headers(endian, data, elf, segments, origin, platform),
-        Err(_) => Err("invalid segment"),
-    }
+    let segments = elf
+        .program_headers(endian, data)
+        .map_err(|_| "invalid segment")?;
+    parse_elf_program_headers(endian, data, elf, segments, origin, platform)
 }
 
 #[cfg(target_os = "linux")]

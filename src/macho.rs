@@ -614,72 +614,31 @@ fn parse_object(
     executable_path: &str,
     loader_path: &str,
 ) -> Result<MachOInfo, String> {
-    let kind = match object::FileKind::parse_at(data, offset) {
-        Ok(file) => file,
-        Err(_err) => return Err("Failed to parse file".to_string()),
-    };
-
-    match kind {
+    match object::FileKind::parse_at(data, offset)
+        .map_err(|_| "Failed to parse file".to_string())?
+    {
         object::FileKind::MachO32 => {
-            parse_macho32(data, offset, arch, executable_path, loader_path)
+            let header = MachHeader32::parse(data, offset)
+                .map_err(|_| "Invalid Mach-O 32 object".to_string())?;
+            parse_macho(header, data, offset, arch, executable_path, loader_path)
         }
         object::FileKind::MachO64 => {
-            parse_macho64(data, offset, arch, executable_path, loader_path)
+            let header = MachHeader64::parse(data, offset)
+                .map_err(|_| "Invalid Mach-O 64 object".to_string())?;
+            parse_macho(header, data, offset, arch, executable_path, loader_path)
         }
-        object::FileKind::MachOFat32 => parse_macho_fat32(data, arch, executable_path, loader_path),
-        object::FileKind::MachOFat64 => parse_macho_fat64(data, arch, executable_path, loader_path),
+        object::FileKind::MachOFat32 => {
+            let fat = MachOFatFile32::parse(data)
+                .map_err(|_| "Invalid FAT Mach-O 32 object".to_string())?;
+            parse_macho_fat(data, fat.arches(), arch, executable_path, loader_path)
+        }
+        object::FileKind::MachOFat64 => {
+            let fat = MachOFatFile64::parse(data)
+                .map_err(|_| "Invalid FAT Mach-O 64 object".to_string())?;
+            parse_macho_fat(data, fat.arches(), arch, executable_path, loader_path)
+        }
         _ => Err("Invalid object".to_string()),
     }
-}
-
-fn parse_macho32(
-    data: &[u8],
-    offset: u64,
-    arch: &Arch,
-    executable_path: &str,
-    loader_path: &str,
-) -> Result<MachOInfo, String> {
-    if let Ok(macho) = MachHeader32::parse(data, offset) {
-        return parse_macho(macho, data, offset, arch, executable_path, loader_path);
-    }
-    Err("Invalid Mach-O 32 object".to_string())
-}
-
-fn parse_macho64(
-    data: &[u8],
-    offset: u64,
-    arch: &Arch,
-    executable_path: &str,
-    loader_path: &str,
-) -> Result<MachOInfo, String> {
-    if let Ok(macho) = MachHeader64::parse(data, offset) {
-        return parse_macho(macho, data, offset, arch, executable_path, loader_path);
-    }
-    Err("Invalid Mach-O 64 object".to_string())
-}
-
-fn parse_macho_fat32(
-    data: &[u8],
-    arch: &Arch,
-    executable_path: &str,
-    loader_path: &str,
-) -> Result<MachOInfo, String> {
-    if let Ok(fat) = MachOFatFile32::parse(data) {
-        return parse_macho_fat(data, fat.arches(), arch, executable_path, loader_path);
-    }
-    Err("Invalid FAT Mach-O 32 object".to_string())
-}
-
-fn parse_macho_fat64(
-    data: &[u8],
-    arch: &Arch,
-    executable_path: &str,
-    loader_path: &str,
-) -> Result<MachOInfo, String> {
-    if let Ok(fat) = MachOFatFile64::parse(data) {
-        return parse_macho_fat(data, fat.arches(), arch, executable_path, loader_path);
-    }
-    Err("Invalid FAT Mach-O 64 object".to_string())
 }
 
 fn parse_macho_fat<FatArch: object::read::macho::FatArch>(
