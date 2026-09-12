@@ -350,17 +350,15 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
 
         if let Some(index) = deptree.index(&lookup) {
             let entry = deptree.arena[index].val.clone();
-            if config.all {
-                deptree.addnode(
-                    // The name this entry records, which only matches the one
-                    // already on the tree without regard to case.
-                    DepNode::new(entry.path.clone(), name.clone(), entry.mode)
-                        .already_found()
-                        .with_alias(alias)
-                        .with_attrs(item.dep.attrs.clone()),
-                    item.depp,
-                );
-            }
+            deptree.add_repeated(
+                config.all,
+                // The name this entry records, which only matches the one
+                // already on the tree without regard to case.
+                DepNode::repeat_of(&entry, name.clone())
+                    .with_alias(alias)
+                    .with_attrs(item.dep.attrs.clone()),
+                item.depp,
+            );
 
             // The module was resolved through another object, so the
             // forwarders of the symbols only this one imports are still

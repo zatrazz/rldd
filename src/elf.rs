@@ -1345,17 +1345,11 @@ fn resolve_dependencies(
             #[cfg(not(target_os = "linux"))]
             let loaded = deptree.get(dependency).filter(found);
             if let Some(entry) = loaded {
-                if config.all {
-                    deptree.addnode(
-                        DepNode::new(
-                            entry.path,
-                            pathutils::get_name(&Path::new(dependency)),
-                            entry.mode,
-                        )
-                        .already_found(),
-                        item.depp,
-                    );
-                }
+                deptree.add_repeated(
+                    config.all,
+                    DepNode::repeat_of(&entry, pathutils::get_name(&Path::new(dependency))),
+                    item.depp,
+                );
                 continue;
             }
         }
@@ -1422,17 +1416,11 @@ fn resolve_dependencies(
                 .find(|(_, refpath, _)| same_file(refpath, &depref))
                 .and_then(|(_, refpath, _)| deptree.get(refpath))
             {
-                if config.all {
-                    deptree.addnode(
-                        DepNode::new(
-                            entry.path,
-                            pathutils::get_name(&Path::new(dependency)),
-                            entry.mode,
-                        )
-                        .already_found(),
-                        item.depp,
-                    );
-                }
+                deptree.add_repeated(
+                    config.all,
+                    DepNode::repeat_of(&entry, pathutils::get_name(&Path::new(dependency))),
+                    item.depp,
+                );
                 continue;
             }
             let c = deptree.addnode(DepNode::new(r.0, r.1, dep.mode), item.depp);

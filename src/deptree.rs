@@ -60,6 +60,12 @@ impl DepNode {
         self
     }
 
+    // A dependency that resolves to ENTRY, an object already on the tree,
+    // recorded under the NAME it was requested with.
+    pub fn repeat_of(entry: &DepNode, name: String) -> Self {
+        Self::new(entry.path.clone(), name, entry.mode).already_found()
+    }
+
     #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
     pub fn with_alias(mut self, alias: Option<String>) -> Self {
         self.alias = alias;
@@ -124,6 +130,16 @@ impl arenatree::EqualString for DepNode {
 
 // The resolved binary dependency tree.
 pub type DepTree = arenatree::ArenaTree<DepNode>;
+
+impl DepTree {
+    // Add a dependency already resolved elsewhere on the tree, which is only
+    // listed when ALL (the -a option) is set.
+    pub fn add_repeated(&mut self, all: bool, node: DepNode, parent: usize) {
+        if all {
+            self.addnode(node, parent);
+        }
+    }
+}
 
 // The resolution mode for a dependency, used mostly for printing.
 #[derive(PartialEq, Eq, Clone, Copy, Debug, Default)]
