@@ -22,18 +22,19 @@ exclude = [
 # There is no need for compression.
 object = { version = "0.40.0", default-features = false, features = [ "read" ] }
 memmap2 = "0.9.11"
-termcolor = "1.4.1"
 argh = "0.1.19"
 
 [target.'cfg(any(target_os = "macos", target_os = "android"))'.dependencies]
 libc = "0.2.138"
 
-# The KnownDLLs registry key and the Windows directory.
+# The KnownDLLs registry key, the Windows directory, and the console virtual
+# terminal mode.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
+    "Win32_System_Console",
 ] }
 
 [target.'cfg(any(target_os = "android", target_os = "freebsd", windows))'.dev-dependencies]

@@ -1,16 +1,100 @@
 // Configurable printer module.
 
 use std::io::{IsTerminal, Write};
-use termcolor::{BufferWriter, ColorChoice, WriteColor};
 
-// Ignore output error for now.
-macro_rules! ok {
-    ($expr:expr) => {
-        match $expr {
-            Ok(val) => val,
-            Err(_) => {}
+// The SGR sequences for the normal (not intense) foreground colors, matching
+// what a terminal renders for the 30-37 range.
+const RESET: &str = "\x1b[0m";
+const BOLD: &str = "\x1b[1m";
+
+#[derive(Clone, Copy)]
+enum Color {
+    Cyan,
+    Magenta,
+    Yellow,
+    Red,
+}
+
+impl Color {
+    fn sgr(self) -> &'static str {
+        match self {
+            Color::Cyan => "\x1b[36m",
+            Color::Magenta => "\x1b[35m",
+            Color::Yellow => "\x1b[33m",
+            Color::Red => "\x1b[31m",
         }
+    }
+}
+
+// A foreground color along with the bold attribute, the only styling used.
+#[derive(Clone, Copy, Default)]
+struct Style {
+    color: Option<Color>,
+    bold: bool,
+}
+
+impl Style {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn fg(mut self, color: Color) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    fn bold(mut self, bold: bool) -> Self {
+        self.bold = bold;
+        self
+    }
+}
+
+// Whether the terminal on stdout renders the SGR sequences.  On Windows this
+// also switches the console to the virtual terminal mode, which is not the
+// default for a console attached process.
+fn color_supported() -> bool {
+    if !std::io::stdout().is_terminal() {
+        return false;
+    }
+    match std::env::var_os("TERM") {
+        Some(term) if term == "dumb" => return false,
+        // Unlike on Windows, an unset TERM on unix means a terminal that most
+        // likely does not handle the escape sequences.
+        None if !cfg!(windows) => return false,
+        _ => {}
+    }
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    enable_virtual_terminal()
+}
+
+#[cfg(windows)]
+fn enable_virtual_terminal() -> bool {
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+        STD_OUTPUT_HANDLE,
     };
+
+    unsafe {
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        if handle.is_null() {
+            return false;
+        }
+        let mut mode = 0;
+        if GetConsoleMode(handle, &mut mode) == 0 {
+            return false;
+        }
+        if mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0 {
+            return true;
+        }
+        SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0
+    }
+}
+
+#[cfg(not(windows))]
+fn enable_virtual_terminal() -> bool {
+    true
 }
 
 pub struct Printer {
@@ -18,16 +102,12 @@ pub struct Printer {
     ldd: bool,
     one: bool,
     verbose: bool,
-    color: ColorChoice,
+    color: bool,
 }
 
 impl Printer {
     pub fn new(pp: bool, ldd: bool, one: bool, verbose: bool) -> Self {
-        let color = if !ldd && std::io::stdout().is_terminal() {
-            ColorChoice::Auto
-        } else {
-            ColorChoice::Never
-        };
+        let color = !ldd && color_supported();
         Self {
             pp,
             ldd,
@@ -41,57 +121,62 @@ impl Printer {
         self.verbose
     }
 
-    fn write_colorized<S: Into<String>>(
-        &self,
-        buffer: &mut termcolor::Buffer,
-        color: &termcolor::ColorSpec,
-        content: S,
-    ) {
-        ok!(buffer.set_color(color));
-        ok!(buffer.write_all(content.into().as_bytes()));
-        ok!(buffer.reset());
+    // Write the assembled line out, ignoring the output error the way the
+    // tree listing has no way to report it.
+    fn flush(&self, out: &str) {
+        let mut stdout = std::io::stdout().lock();
+        let _ = stdout.write_all(out.as_bytes());
     }
 
-    fn writeln_colorized<S: Into<String>>(
-        &self,
-        buffer: &mut termcolor::Buffer,
-        color: &termcolor::ColorSpec,
-        content: S,
-    ) {
-        self.write_colorized(buffer, color, format!("{}\n", content.into()));
+    fn write_colorized(&self, out: &mut String, style: &Style, content: &str) {
+        if self.color {
+            out.push_str(RESET);
+            if style.bold {
+                out.push_str(BOLD);
+            }
+            if let Some(color) = style.color {
+                out.push_str(color.sgr());
+            }
+        }
+        out.push_str(content);
+        if self.color {
+            out.push_str(RESET);
+        }
+    }
+
+    fn writeln_colorized(&self, out: &mut String, style: &Style, content: &str) {
+        self.write_colorized(out, style, content);
+        out.push('\n');
     }
 
     pub fn print_executable(&self, path: &Option<String>, name: &String) {
-        let writer = BufferWriter::stdout(self.color);
-        let mut buffer = writer.buffer();
+        let mut out = String::new();
 
-        let mut color_path = termcolor::ColorSpec::new();
-        let mut color_name = termcolor::ColorSpec::new();
+        let mut style_path = Style::new();
+        let mut style_name = Style::new();
         if self.ldd {
             if self.one {
                 return;
             }
         } else {
-            color_path.set_fg(Some(termcolor::Color::Cyan));
-            color_name
-                .set_fg(Some(termcolor::Color::Cyan))
-                .set_bold(true);
+            style_path = style_path.fg(Color::Cyan);
+            style_name = style_name.fg(Color::Cyan).bold(true);
         }
 
         if self.pp {
             if let Some(path) = path {
-                let delim = std::path::MAIN_SEPARATOR.to_string();
-                self.write_colorized(&mut buffer, &color_path, format!("{path}{delim}"));
+                let delim = std::path::MAIN_SEPARATOR;
+                self.write_colorized(&mut out, &style_path, &format!("{path}{delim}"));
             }
         }
 
         if self.ldd {
-            self.writeln_colorized(&mut buffer, &color_name, format!("{name}:"));
+            self.writeln_colorized(&mut out, &style_name, &format!("{name}:"));
         } else {
-            self.writeln_colorized(&mut buffer, &color_name, name);
+            self.writeln_colorized(&mut out, &style_name, name);
         }
 
-        ok!(writer.print(&buffer));
+        self.flush(&out);
     }
 
     fn print_entry(
@@ -102,38 +187,34 @@ impl Printer {
         mode: &str,
         found: bool,
     ) {
-        let writer = BufferWriter::stdout(self.color);
-        let mut buffer = writer.buffer();
+        let mut out = String::new();
 
-        let mut color = termcolor::ColorSpec::new();
-        if !found {
-            color.set_fg(Some(termcolor::Color::Cyan));
+        let style = if !found {
+            Style::new().fg(Color::Cyan)
         } else {
-            color.set_fg(Some(termcolor::Color::Magenta));
-        }
+            Style::new().fg(Color::Magenta)
+        };
 
         // The recorded name, when the resolved file differs from it.
         if let Some(alias) = alias.filter(|alias| *alias != dtneeded) {
-            self.write_colorized(&mut buffer, &color, format!("{alias} -> "));
+            self.write_colorized(&mut out, &style, &format!("{alias} -> "));
         }
 
         if self.pp {
-            let delim = std::path::MAIN_SEPARATOR.to_string();
-            self.write_colorized(&mut buffer, &color, format!("{path}{delim}"));
+            let delim = std::path::MAIN_SEPARATOR;
+            self.write_colorized(&mut out, &style, &format!("{path}{delim}"));
         }
 
-        if !found {
-            color.set_bold(true);
-        }
-        self.write_colorized(&mut buffer, &color, dtneeded);
+        self.write_colorized(&mut out, &style.bold(!found), dtneeded);
 
-        color.set_bold(false);
-        if !found {
-            color.set_fg(Some(termcolor::Color::Yellow));
-        }
-        self.writeln_colorized(&mut buffer, &color, format!(" {mode}"));
+        let style = if !found {
+            style.fg(Color::Yellow)
+        } else {
+            style
+        };
+        self.writeln_colorized(&mut out, &style, &format!(" {mode}"));
 
-        ok!(writer.print(&buffer));
+        self.flush(&out);
     }
 
     fn print_preamble(&self, deptrace: &[bool]) {
@@ -144,21 +225,13 @@ impl Printer {
     }
 
     fn print_ldd(&self, dtneeded: &String, alias: Option<&str>, path: &String) {
-        let writer = BufferWriter::stdout(self.color);
-        let mut buffer = writer.buffer();
-
-        ok!(buffer.write_all(
-            format!(
-                "        {} => {}{}{}\n",
-                alias.unwrap_or(dtneeded),
-                path,
-                std::path::MAIN_SEPARATOR,
-                dtneeded
-            )
-            .as_bytes()
+        self.flush(&format!(
+            "        {} => {}{}{}\n",
+            alias.unwrap_or(dtneeded),
+            path,
+            std::path::MAIN_SEPARATOR,
+            dtneeded
         ));
-
-        ok!(writer.print(&buffer));
     }
 
     pub fn print_dependency(
@@ -223,16 +296,13 @@ impl Printer {
             _ => dtneeded.clone(),
         };
         self.print_preamble(deptrace);
-        let writer = BufferWriter::stdout(self.color);
-        let mut buffer = writer.buffer();
+        let mut out = String::new();
         self.writeln_colorized(
-            &mut buffer,
-            termcolor::ColorSpec::new()
-                .set_fg(Some(termcolor::Color::Red))
-                .set_bold(true),
-            format!("{dtneeded} not found{attrs}"),
+            &mut out,
+            &Style::new().fg(Color::Red).bold(true),
+            &format!("{dtneeded} not found{attrs}"),
         );
-        ok!(writer.print(&buffer));
+        self.flush(&out);
 
         if self.verbose {
             for location in searched {
@@ -247,4 +317,74 @@ impl Printer {
 
 pub fn create(pp: bool, ldd: bool, one: bool, verbose: bool) -> Printer {
     Printer::new(pp, ldd, one, verbose)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn printer(color: bool) -> Printer {
+        Printer {
+            pp: false,
+            ldd: false,
+            one: false,
+            verbose: false,
+            color,
+        }
+    }
+
+    fn styled(style: &Style, content: &str) -> String {
+        let mut out = String::new();
+        printer(true).write_colorized(&mut out, style, content);
+        out
+    }
+
+    // The sequences a terminal expects, which are the ones the previous
+    // termcolor based printer emitted: a reset, then the attributes, then the
+    // content, then a final reset.
+    #[test]
+    fn escape_sequences() {
+        assert_eq!(styled(&Style::new(), "x"), "\x1b[0mx\x1b[0m");
+        assert_eq!(
+            styled(&Style::new().fg(Color::Cyan), "x"),
+            "\x1b[0m\x1b[36mx\x1b[0m"
+        );
+        assert_eq!(
+            styled(&Style::new().fg(Color::Cyan).bold(true), "x"),
+            "\x1b[0m\x1b[1m\x1b[36mx\x1b[0m"
+        );
+        assert_eq!(
+            styled(&Style::new().fg(Color::Magenta), "x"),
+            "\x1b[0m\x1b[35mx\x1b[0m"
+        );
+        assert_eq!(
+            styled(&Style::new().fg(Color::Yellow), "x"),
+            "\x1b[0m\x1b[33mx\x1b[0m"
+        );
+        assert_eq!(
+            styled(&Style::new().fg(Color::Red).bold(true), "x"),
+            "\x1b[0m\x1b[1m\x1b[31mx\x1b[0m"
+        );
+        // Clearing the attribute drops it again.
+        assert_eq!(
+            styled(&Style::new().fg(Color::Magenta).bold(true).bold(false), "x"),
+            "\x1b[0m\x1b[35mx\x1b[0m"
+        );
+    }
+
+    // Nothing is emitted when the output is not a terminal, which is what the
+    // ldd mode and a redirected stdout rely on.
+    #[test]
+    fn plain_output_has_no_escapes() {
+        let mut out = String::new();
+        printer(false).write_colorized(&mut out, &Style::new().fg(Color::Red).bold(true), "x");
+        assert_eq!(out, "x");
+    }
+
+    #[test]
+    fn writeln_appends_the_newline_after_the_reset() {
+        let mut out = String::new();
+        printer(true).writeln_colorized(&mut out, &Style::new().fg(Color::Cyan), "x");
+        assert_eq!(out, "\x1b[0m\x1b[36mx\x1b[0m\n");
+    }
 }
