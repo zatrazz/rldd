@@ -1082,7 +1082,7 @@ mod tests {
     // at the application directory when it is a plain file.
     #[test]
     fn dot_local_redirection() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::tempdir::TempDir::new().unwrap();
         let exe = dir.path().join("app.exe");
         fs::write(&exe, b"").unwrap();
         let application = dir.path().to_string_lossy().into_owned();
