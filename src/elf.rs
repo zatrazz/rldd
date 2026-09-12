@@ -475,7 +475,6 @@ fn parse_elf_dyn_flags<Elf: FileHeader>(
 fn open_elf_file<P: AsRef<Path>>(
     filename: &P,
     melc: Option<&ElfInfo>,
-    _dtneeded: Option<&String>,
     platform: Option<&String>,
     preload: bool,
 ) -> Result<ElfInfo, std::io::Error> {
@@ -832,7 +831,7 @@ pub fn resolve_binary(
     // the binary can not dereference the procfs entry.
     let filename = Path::new(arg).canonicalize()?;
 
-    let elc = open_elf_file(&filename, None, None, platform.as_ref(), false)?;
+    let elc = open_elf_file(&filename, None, platform.as_ref(), false)?;
 
     // The OpenBSD loader matches a library by name and major version, picking the best
     // minor available on the directory (even for the dlopen argument). Mimic it for
@@ -892,22 +891,9 @@ pub fn resolve_binary(
 
     let system_dirs = if load_system_dirs(&*ld_cache) {
         #[cfg(target_os = "linux")]
-        let dirs = system_dirs::get_system_dirs(
-            loader.as_deref(),
-            &elc.interp,
-            elc.is_musl,
-            elc.e_machine,
-            elc.ei_class,
-            elc.e_flags,
-        )?;
+        let dirs = system_dirs::get_system_dirs(loader.as_deref(), &elc)?;
         #[cfg(not(target_os = "linux"))]
-        let dirs = system_dirs::get_system_dirs(
-            &elc.interp,
-            elc.is_musl,
-            elc.e_machine,
-            elc.ei_class,
-            elc.e_flags,
-        )?;
+        let dirs = system_dirs::get_system_dirs(&elc)?;
         dirs
     } else {
         search_path::SearchPathVec::new()
@@ -957,7 +943,7 @@ fn redirect_to_best_minor(
     };
     let candidate = dependency_path(dir, name);
     if candidate != filename {
-        if let Ok(nelc) = open_elf_file(&candidate, None, None, platform, false) {
+        if let Ok(nelc) = open_elf_file(&candidate, None, platform, false) {
             return (candidate, nelc);
         }
     }
@@ -1438,7 +1424,7 @@ fn resolve_loader<'a>(
     }
     for searchpath in &config.system_dirs {
         let path = dependency_path(&searchpath.path, dtneeded);
-        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false) {
+        if let Ok(elc) = open_elf_file(&path, Some(elc), config.platform, false) {
             return Some(ResolvedDependency {
                 elc,
                 path: &searchpath.path,
@@ -1534,7 +1520,7 @@ fn resolve_dependency_1<'a>(
     let is_path =
         dtneeded.contains(std::path::MAIN_SEPARATOR) || (preload && cfg!(target_os = "netbsd"));
     if is_path {
-        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, preload) {
+        if let Ok(elc) = open_elf_file(&path, Some(elc), config.platform, preload) {
             return Some(ResolvedDependency {
                 elc,
                 path: dtneeded,
@@ -1555,8 +1541,7 @@ fn resolve_dependency_1<'a>(
     let search = |searchpaths: &'a search_path::SearchPathVec, mode: DepMode| {
         for searchpath in searchpaths {
             let path = dependency_path(&searchpath.path, dtneeded);
-            if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), config.platform, false)
-            {
+            if let Ok(elc) = open_elf_file(&path, Some(elc), config.platform, false) {
                 return Some(ResolvedDependency {
                     elc,
                     path: &searchpath.path,
@@ -1609,7 +1594,7 @@ fn resolve_dependency_ld_cache<'a>(
         let mut pathbuf = PathBuf::new();
         pathbuf.push(path);
         pathbuf.push(dtneeded);
-        if let Ok(elc) = open_elf_file(&pathbuf, Some(elc), Some(dtneeded), platform, false) {
+        if let Ok(elc) = open_elf_file(&pathbuf, Some(elc), platform, false) {
             return Some(ResolvedDependency {
                 elc,
                 path,
@@ -1644,7 +1629,7 @@ fn resolve_dependency_ld_cache<'a>(
     let search_namespace = constraint(|namespace: &ld_config_txt::NamespaceConfig| {
         for searchpath in &namespace.search_paths {
             let path = Path::new(&searchpath.path).join(dtneeded);
-            if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), platform, false) {
+            if let Ok(elc) = open_elf_file(&path, Some(elc), platform, false) {
                 return Some(ResolvedDependency {
                     elc,
                     path: &searchpath.path,
@@ -1707,7 +1692,7 @@ fn resolve_dependency_ld_cache<'a>(
 ) -> Option<ResolvedDependency<'a>> {
     for searchpath in ld_cache {
         let path = dependency_path(&searchpath.path, dtneeded);
-        if let Ok(elc) = open_elf_file(&path, Some(elc), Some(dtneeded), platform, false) {
+        if let Ok(elc) = open_elf_file(&path, Some(elc), platform, false) {
             return Some(ResolvedDependency {
                 elc,
                 path: &searchpath.path,
@@ -1803,7 +1788,7 @@ fn build_symbol_scope(deptree: &DepTree) -> Vec<(String, symbols::ObjectSymbols)
 fn open_root_elf(deptree: &DepTree) -> Option<ElfInfo> {
     let root = deptree.arena.first()?;
     let path = deptree_node_path(&root.val)?;
-    open_elf_file(&path, None, None, None, false).ok()
+    open_elf_file(&path, None, None, false).ok()
 }
 
 // The dynamic loader is part of the global scope (libc binds to symbols the
