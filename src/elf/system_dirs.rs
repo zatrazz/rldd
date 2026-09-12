@@ -1,11 +1,7 @@
-#[cfg(any(
-    target_os = "linux",
-    target_os = "illumos",
-    target_os = "solaris",
-    target_os = "android"
-))]
+#[cfg(any(target_os = "linux", target_os = "illumos", target_os = "solaris"))]
 use object::elf::*;
 
+use super::ElfInfo;
 use crate::search_path;
 
 #[allow(dead_code)]
@@ -199,14 +195,10 @@ fn system_dirs_in(data: &[u8]) -> Option<Vec<String>> {
 #[cfg(target_os = "linux")]
 pub fn get_system_dirs(
     loader: Option<&str>,
-    interp: &Option<String>,
-    is_musl: bool,
-    e_machine: Machine,
-    ei_class: FileClass,
-    e_flags: FileFlags,
+    elc: &ElfInfo,
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
-    if is_musl {
-        return Ok(get_musl_system_dirs(interp));
+    if elc.is_musl {
+        return Ok(get_musl_system_dirs(&elc.interp));
     }
     if let Some(dirs) = loader.and_then(loader_system_dirs) {
         use crate::search_path::SearchPathVecExt;
@@ -218,7 +210,7 @@ pub fn get_system_dirs(
     }
     // Without a loader to read, the upstream default of the slibdir and its
     // /usr counterpart.
-    let path = get_slibdir(e_machine, ei_class, e_flags)?;
+    let path = get_slibdir(elc.e_machine, elc.ei_class, elc.e_flags)?;
     Ok(vec![
         search_path::SearchPath {
             path: path.to_string(),
@@ -241,21 +233,15 @@ pub fn get_system_dirs(
 // sanitizer specific variant for an instrumented binary.  The /odm partition
 // was only added on Android 9.
 #[cfg(target_os = "android")]
-pub fn get_system_dirs(
-    interp: &Option<String>,
-    _is_musl: bool,
-    _e_machine: Machine,
-    ei_class: FileClass,
-    _e_flags: FileFlags,
-) -> Result<search_path::SearchPathVec, std::io::Error> {
+pub fn get_system_dirs(elc: &ElfInfo) -> Result<search_path::SearchPathVec, std::io::Error> {
     use crate::elf::android;
 
     let release = android::get_release()?;
-    let interp = interp.as_deref();
+    let interp = elc.interp.as_deref();
     let is_asan = android::is_asan(interp);
     let is_hwasan = android::is_hwasan(interp);
 
-    let lib = android::libpath(ei_class);
+    let lib = android::libpath(elc.ei_class);
 
     // Android 8 moved the asan directories below /data/asan, the older
     // releases use /data/$(LIB) for the system one and /data/vendor/$(LIB)
@@ -296,21 +282,15 @@ pub fn get_system_dirs(
 }
 
 #[cfg(target_os = "freebsd")]
-pub fn get_system_dirs(
-    _interp: &Option<String>,
-    _is_musl: bool,
-    _e_machine: object::elf::Machine,
-    ei_class: object::elf::FileClass,
-    _e_flags: object::elf::FileFlags,
-) -> Result<search_path::SearchPathVec, std::io::Error> {
+pub fn get_system_dirs(elc: &ElfInfo) -> Result<search_path::SearchPathVec, std::io::Error> {
     // The rtld STANDARD_LIBRARY_PATH, with the COMPAT_libcompat suffix for
     // the 32-bit compat objects.
-    let dirs: &[&str] = if cfg!(target_pointer_width = "64") && ei_class == object::elf::ELFCLASS32
-    {
-        &["/lib/casper", "/lib32", "/usr/lib32"]
-    } else {
-        &["/lib/casper", "/lib", "/usr/lib"]
-    };
+    let dirs: &[&str] =
+        if cfg!(target_pointer_width = "64") && elc.ei_class == object::elf::ELFCLASS32 {
+            &["/lib/casper", "/lib32", "/usr/lib32"]
+        } else {
+            &["/lib/casper", "/lib", "/usr/lib"]
+        };
     Ok(dirs
         .iter()
         .map(|path| search_path::SearchPath {
@@ -322,13 +302,7 @@ pub fn get_system_dirs(
 }
 
 #[cfg(target_os = "openbsd")]
-pub fn get_system_dirs(
-    _interp: &Option<String>,
-    _is_musl: bool,
-    _e_machine: object::elf::Machine,
-    _ei_class: object::elf::FileClass,
-    _e_flags: object::elf::FileFlags,
-) -> Result<search_path::SearchPathVec, std::io::Error> {
+pub fn get_system_dirs(_elc: &ElfInfo) -> Result<search_path::SearchPathVec, std::io::Error> {
     Ok(vec![search_path::SearchPath {
         path: "/usr/lib".to_string(),
         dev: 0,
@@ -373,15 +347,9 @@ pub fn netbsd_compat_subdir(
 }
 
 #[cfg(target_os = "netbsd")]
-pub fn get_system_dirs(
-    _interp: &Option<String>,
-    _is_musl: bool,
-    e_machine: object::elf::Machine,
-    ei_class: object::elf::FileClass,
-    e_flags: object::elf::FileFlags,
-) -> Result<search_path::SearchPathVec, std::io::Error> {
+pub fn get_system_dirs(elc: &ElfInfo) -> Result<search_path::SearchPathVec, std::io::Error> {
     let mut dirs = vec!["/usr/lib".to_string()];
-    if let Some(subdir) = netbsd_compat_subdir(e_machine, ei_class, e_flags) {
+    if let Some(subdir) = netbsd_compat_subdir(elc.e_machine, elc.ei_class, elc.e_flags) {
         dirs.push(format!("/usr/lib/{subdir}"));
     }
     Ok(dirs
@@ -413,14 +381,8 @@ mod tests {
 }
 
 #[cfg(any(target_os = "illumos", target_os = "solaris"))]
-pub fn get_system_dirs(
-    _interp: &Option<String>,
-    _is_musl: bool,
-    e_machine: Machine,
-    _ei_class: FileClass,
-    _e_flags: FileFlags,
-) -> Result<search_path::SearchPathVec, std::io::Error> {
-    match e_machine {
+pub fn get_system_dirs(elc: &ElfInfo) -> Result<search_path::SearchPathVec, std::io::Error> {
+    match elc.e_machine {
         EM_386 => Ok(vec![
             search_path::SearchPath {
                 path: "/lib".to_string(),
