@@ -88,6 +88,7 @@ fn print_deps_children(p: &Printer, deps: &DepTree, children: &[usize], deptrace
 
 #[derive(FromArgs)]
 /// Print shared objects dependencies
+#[argh(help_triggers("-h", "--help", "help"))]
 struct Options {
     /// assume the LD_LIBRARY_PATH is set.
     #[cfg(all(target_family = "unix", not(target_os = "macos")))]
