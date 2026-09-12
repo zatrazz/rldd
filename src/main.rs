@@ -1,5 +1,8 @@
 use argh::FromArgs;
 
+#[cfg(all(test, any(target_os = "android", target_os = "freebsd", windows)))]
+mod tempdir;
+
 mod printer;
 use printer::*;
 mod deptree;

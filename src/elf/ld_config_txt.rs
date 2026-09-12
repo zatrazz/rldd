@@ -569,12 +569,12 @@ fn parse_append(line: &str) -> Result<(&str, &str), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tempdir::TempDir;
     use object::elf::*;
     use std::fs;
     use std::fs::File;
     use std::io::{Error, Write};
     use std::iter::zip;
-    use tempfile::TempDir;
 
     fn create_cfg(tmp_path: &str) -> String {
         format!(
