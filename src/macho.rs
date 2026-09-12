@@ -116,16 +116,11 @@ pub fn resolve_binary(
     }
 
     let mut deptree = DepTree::new();
-    let depp = deptree.addroot(DepNode {
-        path: Some(executable_path.clone()),
-        name: pathutils::get_name(&filename),
-        mode: DepMode::Executable,
-        found: false,
-        alias: None,
-        attrs: Vec::new(),
-        version: None,
-        searched: Vec::new(),
-    });
+    let depp = deptree.addroot(DepNode::new(
+        Some(executable_path.clone()),
+        pathutils::get_name(&filename),
+        DepMode::Executable,
+    ));
 
     let config = Config {
         ctx,
@@ -295,16 +290,10 @@ fn check_already_resolved(
     if let Some(entry) = deptree.get(dependency) {
         if config.all {
             deptree.addnode(
-                DepNode {
-                    path: entry.path,
-                    name: entry.name,
-                    mode: entry.mode,
-                    found: true,
-                    alias: None,
-                    attrs: dep.attrs.clone(),
-                    version: dep.version.clone(),
-                    searched: Vec::new(),
-                },
+                DepNode::new(entry.path, entry.name, entry.mode)
+                    .already_found()
+                    .with_attrs(dep.attrs.clone())
+                    .with_version(dep.version.clone()),
                 depp,
             );
         }
@@ -343,16 +332,12 @@ fn find_dependency(
     // links against it, before the @executable_path and @loader_path
     // expansion, like the ELF and PE names.
     deptree.addnode(
-        DepNode {
-            path: None,
-            name: dep.name.clone(),
-            mode: DepMode::NotFound,
-            found: false,
-            alias: None,
-            attrs: dep.attrs.clone(),
-            version: dep.version.clone(),
-            searched: searched_locations(config, rpaths, dependency, preload),
-        },
+        DepNode::not_found(
+            dep.name.clone(),
+            searched_locations(config, rpaths, dependency, preload),
+        )
+        .with_attrs(dep.attrs.clone())
+        .with_version(dep.version.clone()),
         depp,
     );
     None
@@ -572,16 +557,9 @@ fn resolve_cache(
     let path = Path::new(name);
     let dir = pathutils::get_path(&path);
     let depd = deptree.addnode(
-        DepNode {
-            path: dir.clone(),
-            name: pathutils::get_name(&path),
-            mode: DepMode::LdCache,
-            found: false,
-            alias: None,
-            attrs: dep.attrs.clone(),
-            version: dep.version.clone(),
-            searched: Vec::new(),
-        },
+        DepNode::new(dir.clone(), pathutils::get_name(&path), DepMode::LdCache)
+            .with_attrs(dep.attrs.clone())
+            .with_version(dep.version.clone()),
         depp,
     );
     ResolveResult::Found((elc, depd, dir.unwrap_or_default()))
@@ -607,16 +585,9 @@ fn resolve_file(
     };
     let dir = pathutils::get_path(&path);
     let depd = deptree.addnode(
-        DepNode {
-            path: dir.clone(),
-            name: pathutils::get_name(&path),
-            mode,
-            found: false,
-            alias: None,
-            attrs: dep.attrs.clone(),
-            version: dep.version.clone(),
-            searched: Vec::new(),
-        },
+        DepNode::new(dir.clone(), pathutils::get_name(&path), mode)
+            .with_attrs(dep.attrs.clone())
+            .with_version(dep.version.clone()),
         depp,
     );
     ResolveResult::Found((elc, depd, dir.unwrap_or_default()))
