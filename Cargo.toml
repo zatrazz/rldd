@@ -22,7 +22,6 @@ exclude = [
 # There is no need for compression.
 object = { version = "0.40.0", default-features = false, features = [ "read" ] }
 memmap2 = "0.9.11"
-glob = "0.3.4"
 termcolor = "1.4.1"
 argh = "0.1.19"
 
