@@ -60,8 +60,7 @@ pub struct ObjectSymbols {
 }
 
 pub fn parse<P: AsRef<Path>>(filename: &P) -> Option<ObjectSymbols> {
-    let file = std::fs::File::open(filename).ok()?;
-    let mmap = unsafe { memmap2::Mmap::map(&file) }.ok()?;
+    let mmap = crate::pathutils::map_file(filename).ok()?;
     let data: &[u8] = &mmap;
 
     match object::FileKind::parse(data).ok()? {

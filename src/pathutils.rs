@@ -1,4 +1,8 @@
+use std::fs;
+use std::io::{Error, Result};
 use std::path::Path;
+
+use memmap2::Mmap;
 
 pub fn get_path<P: AsRef<Path>>(path: &P) -> Option<String> {
     path.as_ref()
@@ -12,6 +16,19 @@ pub fn get_name<P: AsRef<Path>>(path: &P) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_string()
+}
+
+// Map the whole FILE in memory for reading.
+pub fn map(file: &fs::File) -> Result<Mmap> {
+    unsafe { Mmap::map(file) }.map_err(|_| Error::other("Failed to map file"))
+}
+
+#[cfg_attr(
+    all(unix, not(any(target_os = "linux", target_os = "macos"))),
+    allow(dead_code)
+)]
+pub fn map_file<P: AsRef<Path>>(filename: &P) -> Result<Mmap> {
+    map(&fs::File::open(filename)?)
 }
 
 // Strip the verbatim prefix added by fs::canonicalize (for instance,

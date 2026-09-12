@@ -153,8 +153,7 @@ fn loader_system_dirs(loader: &str) -> Option<Vec<String>> {
 fn read_loader_system_dirs(loader: &str) -> Option<Vec<String>> {
     use object::{Object, ObjectSection};
 
-    let file = std::fs::File::open(loader).ok()?;
-    let mmap = unsafe { memmap2::Mmap::map(&file) }.ok()?;
+    let mmap = crate::pathutils::map_file(&loader).ok()?;
     let object = object::File::parse(&*mmap).ok()?;
     let section = object.section_by_name(".rodata")?;
     system_dirs_in(section.data().ok()?)

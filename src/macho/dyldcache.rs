@@ -1,8 +1,9 @@
 use memmap2::Mmap;
 use object::Endianness;
 use std::collections::HashMap;
-use std::fs;
 use std::path::Path;
+
+use crate::pathutils;
 
 // Known locations of the dyld shared cache.  The filesystem probing is more
 // robust than checking the system release version, since it might keep
@@ -71,9 +72,9 @@ fn try_load(names: &[&str]) -> Option<DyldCache> {
     type ObjDyldCache<'data> = object::read::macho::DyldCache<'data, Endianness>;
 
     let path = path(names)?;
-    let mut files = vec![mmap_file(&path)?];
+    let mut files = vec![pathutils::map_file(&path).ok()?];
     for suffix in ObjDyldCache::subcache_suffixes(&files[0][..]).ok()? {
-        files.push(mmap_file(&format!("{path}{suffix}"))?);
+        files.push(pathutils::map_file(&format!("{path}{suffix}")).ok()?);
     }
 
     let datas: Vec<&[u8]> = files.iter().map(|mmap| &mmap[..]).collect();
@@ -225,9 +226,4 @@ fn unversioned_framework_alias(name: &str) -> Option<String> {
     } else {
         None
     }
-}
-
-fn mmap_file(path: &str) -> Option<Mmap> {
-    let file = fs::File::open(path).ok()?;
-    unsafe { Mmap::map(&file) }.ok()
 }
