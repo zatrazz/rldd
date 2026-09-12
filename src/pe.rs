@@ -90,28 +90,51 @@ struct PeInfo {
     manifest: bool,
 }
 
-// The resolution context: the system state the loader consults before the search order.
+// The resolution context: the system state the loader consults before the search order,
+// along with the command line settings.
 pub struct PeContext {
     apiset: apiset::ApiSetMap,
     knowndlls: knowndlls::KnownDlls,
     winsxs: sxs::WinSxs,
     windows_dir: String,
     safe_search: bool,
+    dll_directory: search_path::SearchPathVec,
+    all: bool,
+    verbose: bool,
+    depth: usize,
+    ignore_prefix: Vec<String>,
 }
 
-pub fn create_context(safe_search: bool) -> PeContext {
-    let windows_dir = search_dirs::windows_dir();
-    let apiset = apiset::load(&search_dirs::system_dir(&windows_dir, false));
-    PeContext {
-        apiset,
-        knowndlls: knowndlls::load(),
-        winsxs: sxs::WinSxs::new(&windows_dir),
-        windows_dir,
-        safe_search,
-    }
+pub fn create_context(opts: &crate::Options) -> Result<PeContext, String> {
+    Ok(PeContext {
+        dll_directory: search_path::from_string(&opts.library_path, &[search_path::LIST_SEPARATOR]),
+        all: opts.all,
+        verbose: opts.verbose,
+        depth: opts.depth,
+        ignore_prefix: opts.ignore_prefix.clone(),
+        ..PeContext::new(!opts.no_safe_search)
+    })
 }
 
 impl PeContext {
+    // The system state, with the default settings.
+    fn new(safe_search: bool) -> Self {
+        let windows_dir = search_dirs::windows_dir();
+        let apiset = apiset::load(&search_dirs::system_dir(&windows_dir, false));
+        Self {
+            apiset,
+            knowndlls: knowndlls::load(),
+            winsxs: sxs::WinSxs::new(&windows_dir),
+            windows_dir,
+            safe_search,
+            dll_directory: search_path::SearchPathVec::new(),
+            all: false,
+            verbose: false,
+            depth: 1,
+            ignore_prefix: Vec::new(),
+        }
+    }
+
     // The directories the known DLLs are resolved from.  The registry values
     // are gone on the recent Windows versions, where the loader creates the
     // known DLLs from the system directories.
@@ -134,15 +157,8 @@ struct Config<'a> {
     ignore_prefix: &'a [String],
 }
 
-pub fn resolve_binary(
-    ctx: &mut PeContext,
-    dll_directory: &search_path::SearchPathVec,
-    all: bool,
-    verbose: bool,
-    depth: usize,
-    ignore_prefix: &[String],
-    arg: &str,
-) -> Result<DepTree, std::io::Error> {
+pub fn resolve_binary(ctx: &mut PeContext, arg: &str) -> Result<DepTree, std::io::Error> {
+    let ctx: &PeContext = ctx;
     let canonical = Path::new(arg).canonicalize()?;
     let filename = pathutils::strip_verbatim(&canonical.to_string_lossy());
     let filename = Path::new(&filename);
@@ -151,13 +167,13 @@ pub fn resolve_binary(
     let application = pathutils::get_path(&filename);
     let dirs = search_dirs::build(
         application.as_deref(),
-        dll_directory,
+        &ctx.dll_directory,
         &ctx.windows_dir,
         machine::is_32bit(pei.machine),
         ctx.safe_search,
     );
 
-    if verbose {
+    if ctx.verbose {
         print_object_information(ctx, filename, &pei, &dirs);
     }
 
@@ -175,9 +191,9 @@ pub fn resolve_binary(
         dirs,
         redirect,
         machine: pei.machine,
-        all,
-        depth,
-        ignore_prefix,
+        all: ctx.all,
+        depth: ctx.depth,
+        ignore_prefix: &ctx.ignore_prefix,
     };
     resolve_dependencies(&config, &pei, &mut deptree, depp);
 
@@ -902,17 +918,12 @@ mod tests {
 
     fn resolve(depth: usize, ignore_prefix: &[String]) -> DepTree {
         let exe = std::env::current_exe().unwrap();
-        let mut ctx = create_context(true);
-        resolve_binary(
-            &mut ctx,
-            &search_path::SearchPathVec::new(),
-            false,
-            false,
+        let mut ctx = PeContext {
             depth,
-            ignore_prefix,
-            exe.to_str().unwrap(),
-        )
-        .unwrap()
+            ignore_prefix: ignore_prefix.to_vec(),
+            ..PeContext::new(true)
+        };
+        resolve_binary(&mut ctx, exe.to_str().unwrap()).unwrap()
     }
 
     // Resolving the test binary exercises the whole pipeline: the import
@@ -958,17 +969,8 @@ mod tests {
     #[test]
     fn imports_are_resolved() {
         let exe = std::env::current_exe().unwrap();
-        let mut ctx = create_context(true);
-        let deptree = resolve_binary(
-            &mut ctx,
-            &search_path::SearchPathVec::new(),
-            false,
-            false,
-            1,
-            &[],
-            exe.to_str().unwrap(),
-        )
-        .unwrap();
+        let mut ctx = PeContext::new(true);
+        let deptree = resolve_binary(&mut ctx, exe.to_str().unwrap()).unwrap();
 
         let undefined: Vec<String> = check_imports(&ctx, &deptree, true)
             .iter()

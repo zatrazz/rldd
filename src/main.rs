@@ -247,35 +247,13 @@ fn main() {
         opts.verbose,
     );
 
-    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
-    let ld_library_path = search_path::from_string(&opts.library_path, &[':']);
-    #[cfg(unix)]
-    let ld_preload = search_path::from_preload(&opts.preload);
-    #[cfg(windows)]
-    let dll_directory =
-        search_path::from_string(&opts.library_path, &[search_path::LIST_SEPARATOR]);
-
-    #[cfg(target_os = "macos")]
-    let dyld_env = macho::DyldEnv {
-        library_path: search_path::from_string(&opts.library_path, &[':']),
-        framework_path: search_path::from_string(&opts.framework_path, &[':']),
-        fallback_library_path: search_path::from_string(&opts.fallback_library_path, &[':']),
-        fallback_framework_path: search_path::from_string(&opts.fallback_framework_path, &[':']),
-        image_suffix: opts.image_suffix.clone(),
-    };
-
-    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
-    let mut ctx = create_context();
-    #[cfg(target_os = "macos")]
-    let mut ctx = match create_context(opts.arch.as_deref()) {
+    let mut ctx = match create_context(&opts) {
         Ok(ctx) => ctx,
         Err(err) => {
             eprintln!("{}: {err}", env!("CARGO_PKG_NAME"));
             std::process::exit(1);
         }
     };
-    #[cfg(windows)]
-    let mut ctx = create_context(!opts.no_safe_search);
 
     if opts.args.is_empty() {
         eprintln!(
@@ -289,38 +267,7 @@ fn main() {
     let mut exitcode = 0;
 
     for arg in opts.args {
-        #[cfg(all(target_family = "unix", not(target_os = "macos")))]
-        let resolved = resolve_binary(
-            &mut ctx,
-            &ld_preload,
-            &ld_library_path,
-            &opts.platform,
-            opts.all,
-            opts.verbose,
-            arg.as_str(),
-        );
-        #[cfg(target_os = "macos")]
-        let resolved = resolve_binary(
-            &mut ctx,
-            &ld_preload,
-            &dyld_env,
-            opts.all,
-            opts.verbose,
-            opts.depth,
-            &opts.ignore_prefix,
-            arg.as_str(),
-        );
-        #[cfg(windows)]
-        let resolved = resolve_binary(
-            &mut ctx,
-            &dll_directory,
-            opts.all,
-            opts.verbose,
-            opts.depth,
-            &opts.ignore_prefix,
-            arg.as_str(),
-        );
-        match resolved {
+        match resolve_binary(&mut ctx, &arg) {
             Ok(deptree) => {
                 // Mimic ldd, where --unused suppress both the dependency listing
                 // and the undefined symbols report.

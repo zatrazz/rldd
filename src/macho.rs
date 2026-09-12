@@ -42,19 +42,26 @@ struct MachOInfo {
 
 // The DYLD_* environment search paths and image suffix, mimicked with
 // command line options like the ELF backend does for LD_LIBRARY_PATH.
-pub struct DyldEnv {
-    pub library_path: search_path::SearchPathVec,
-    pub framework_path: search_path::SearchPathVec,
-    pub fallback_library_path: search_path::SearchPathVec,
-    pub fallback_framework_path: search_path::SearchPathVec,
-    pub image_suffix: Option<String>,
+struct DyldEnv {
+    library_path: search_path::SearchPathVec,
+    framework_path: search_path::SearchPathVec,
+    fallback_library_path: search_path::SearchPathVec,
+    fallback_framework_path: search_path::SearchPathVec,
+    image_suffix: Option<String>,
 }
 
 // The resolution context: the dyld shared cache along with the architecture
-// used to select Mach-O slices and the cache flavor.
+// used to select Mach-O slices and the cache flavor, and the command line
+// settings.
 pub struct MachOContext {
     cache: DyldCache,
     arch: Arch,
+    preload: Vec<String>,
+    env: DyldEnv,
+    all: bool,
+    verbose: bool,
+    depth: usize,
+    ignore_prefix: Vec<String>,
 }
 
 impl MachOContext {
@@ -70,23 +77,33 @@ impl MachOContext {
     }
 }
 
-pub fn create_context(arch: Option<&str>) -> Result<MachOContext, String> {
-    let arch = Arch::new(arch)?;
+pub fn create_context(opts: &crate::Options) -> Result<MachOContext, String> {
+    let arch = Arch::new(opts.arch.as_deref())?;
     let cache = dyldcache::load(arch.cache_names());
-    Ok(MachOContext { cache, arch })
+    Ok(MachOContext {
+        cache,
+        arch,
+        preload: search_path::from_preload(&opts.preload),
+        env: DyldEnv {
+            library_path: search_path::from_string(&opts.library_path, &[':']),
+            framework_path: search_path::from_string(&opts.framework_path, &[':']),
+            fallback_library_path: search_path::from_string(&opts.fallback_library_path, &[':']),
+            fallback_framework_path: search_path::from_string(
+                &opts.fallback_framework_path,
+                &[':'],
+            ),
+            image_suffix: opts.image_suffix.clone(),
+        },
+        all: opts.all,
+        verbose: opts.verbose,
+        depth: opts.depth,
+        ignore_prefix: opts.ignore_prefix.clone(),
+    })
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn resolve_binary(
-    ctx: &mut MachOContext,
-    preload: &[String],
-    env: &DyldEnv,
-    all: bool,
-    verbose: bool,
-    depth: usize,
-    ignore_prefix: &[String],
-    arg: &str,
-) -> Result<DepTree, std::io::Error> {
+pub fn resolve_binary(ctx: &mut MachOContext, arg: &str) -> Result<DepTree, std::io::Error> {
+    let ctx: &MachOContext = ctx;
+
     // Mach-O images may exist only inside the dyld shared cache (macOS 11+),
     // so fall back to a cache lookup by the install name when the file is not
     // present.
@@ -111,8 +128,8 @@ pub fn resolve_binary(
         "failed to get path of input file {arg}"
     )))?;
 
-    if verbose {
-        print_object_information(ctx, env, &filename, &omf);
+    if ctx.verbose {
+        print_object_information(ctx, &ctx.env, &filename, &omf);
     }
 
     let mut deptree = DepTree::new();
@@ -125,13 +142,13 @@ pub fn resolve_binary(
     let config = Config {
         ctx,
         executable_path: &executable_path,
-        env,
-        all,
-        depth,
-        ignore_prefix,
+        env: &ctx.env,
+        all: ctx.all,
+        depth: ctx.depth,
+        ignore_prefix: &ctx.ignore_prefix,
     };
 
-    for pload in preload {
+    for pload in &ctx.preload {
         let dep = MachODep {
             name: pload.clone(),
             attrs: Vec::new(),
