@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use object::read::pe::{PeFile32, PeFile64};
 use object::{FileKind, Object, ObjectSection};
 
 // The Windows 10 and later namespace layout.
@@ -158,25 +157,11 @@ pub fn parse(data: &[u8]) -> ApiSetMap {
 fn read_section<P: AsRef<Path>>(filename: P) -> Option<Vec<u8>> {
     let mmap = crate::pathutils::map_file(&filename).ok()?;
     let data: &[u8] = &mmap;
-    match FileKind::parse(data).ok()? {
-        FileKind::Pe32 => Some(
-            PeFile32::parse(data)
-                .ok()?
-                .section_by_name(".apiset")?
-                .data()
-                .ok()?
-                .to_vec(),
-        ),
-        FileKind::Pe64 => Some(
-            PeFile64::parse(data)
-                .ok()?
-                .section_by_name(".apiset")?
-                .data()
-                .ok()?
-                .to_vec(),
-        ),
-        _ => None,
+    if !matches!(FileKind::parse(data).ok()?, FileKind::Pe32 | FileKind::Pe64) {
+        return None;
     }
+    let file = object::File::parse(data).ok()?;
+    Some(file.section_by_name(".apiset")?.data().ok()?.to_vec())
 }
 
 pub fn load(system_dir: &str) -> ApiSetMap {
