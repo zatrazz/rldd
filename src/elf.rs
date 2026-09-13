@@ -637,35 +637,19 @@ fn libmap_dependency(_config: &Config, _refpath: &str, dependency: &String) -> S
 }
 
 #[cfg(target_os = "linux")]
-fn format_ld_cache(ld_cache: &Option<LoaderCache>) -> String {
-    match ld_cache {
-        Some(ld_cache) => format!("{} entries", ld_cache.len()),
-        None => "(none)".to_string(),
-    }
+fn format_ld_cache(ld_cache: &LoaderCache) -> String {
+    format!("{} entries", ld_cache.len())
 }
 #[cfg(target_os = "android")]
-fn format_ld_cache(ld_cache: &Option<LoaderCache>) -> String {
-    match ld_cache {
-        Some(ld_cache) => format!("{} namespaces", ld_cache.namespaces_count()),
-        None => "(none)".to_string(),
-    }
+fn format_ld_cache(ld_cache: &LoaderCache) -> String {
+    format!("{} namespaces", ld_cache.namespaces_count())
 }
 #[cfg(all(
     target_family = "unix",
     not(any(target_os = "linux", target_os = "android"))
 ))]
-fn format_ld_cache(ld_cache: &Option<LoaderCache>) -> String {
-    match ld_cache {
-        Some(ld_cache) => search_path::format_list(ld_cache),
-        None => "(none)".to_string(),
-    }
-}
-
-fn format_preload_list(names: &[String]) -> String {
-    if names.is_empty() {
-        return "(none)".to_string();
-    }
-    names.join(&search_path::LIST_SEPARATOR.to_string())
+fn format_ld_cache(ld_cache: &LoaderCache) -> String {
+    search_path::format_list(ld_cache)
 }
 
 fn push_searched(r: &mut Vec<String>, name: &str, searchpaths: &search_path::SearchPathVec) {
@@ -752,11 +736,14 @@ fn print_search_path_information<P: AsRef<Path>>(filename: &P, config: &Config, 
         \x20 default paths: {}",
         filename.as_ref().display(),
         search_path::format_list(&elc.rpath),
-        format_preload_list(config.ld_preload),
+        search_path::format_entries(config.ld_preload.iter().map(String::as_str)),
         search_path::format_list(config.ld_library_path),
         search_path::format_list(&elc.runpath),
         DepMode::LdCache,
-        format_ld_cache(config.ld_cache),
+        config
+            .ld_cache
+            .as_ref()
+            .map_or(search_path::EMPTY_LIST.to_string(), format_ld_cache),
         search_path::format_list(&config.system_dirs),
     );
 }
