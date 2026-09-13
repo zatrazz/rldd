@@ -513,21 +513,23 @@ mod tests {
             offsets.push((key as u32, value as u32));
         }
 
-        let mut cache = Vec::<u8>::new();
-        cache.extend_from_slice(CACHEMAGIC_NEW.as_bytes());
-        cache.extend_from_slice(CACHE_VERSION.as_bytes());
-        cache.extend_from_slice(&(entries.len() as u32).to_ne_bytes());
-        cache.extend_from_slice(&(strings.len() as u32).to_ne_bytes());
         // No endianness, no extension.
-        cache.extend_from_slice(&[0u8; 4]);
-        cache.extend_from_slice(&[0u8; 16]);
-        assert_eq!(cache.len(), CACHE_FILE_NEW_LEN);
+        let header = cache_file_new {
+            magic: CACHEMAGIC_NEW.as_bytes().try_into().unwrap(),
+            version: CACHE_VERSION.as_bytes().try_into().unwrap(),
+            nlibs: entries.len() as u32,
+            len_strings: strings.len() as u32,
+            ..Default::default()
+        };
+        let mut cache = object::pod::bytes_of(&header).to_vec();
         for ((flags, _, _), (key, value)) in entries.iter().zip(offsets) {
-            cache.extend_from_slice(&flags.to_ne_bytes());
-            cache.extend_from_slice(&key.to_ne_bytes());
-            cache.extend_from_slice(&value.to_ne_bytes());
-            cache.extend_from_slice(&0u32.to_ne_bytes());
-            cache.extend_from_slice(&0u64.to_ne_bytes());
+            let entry = file_entry_new {
+                flags: *flags,
+                key,
+                value,
+                ..Default::default()
+            };
+            cache.extend_from_slice(object::pod::bytes_of(&entry));
         }
         cache.extend_from_slice(&strings);
         cache
