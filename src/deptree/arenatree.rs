@@ -59,29 +59,12 @@ where
         idx
     }
 
-    pub fn get(&self, val: &str) -> Option<T> {
-        for node in &self.arena {
-            if node.val.eqstr(val) {
-                return Some(node.val.clone());
-            }
-        }
-        None
-    }
-
-    // Only used by the PE backend, to attach the forwarded dependencies of a
-    // module already on the tree.
-    #[allow(dead_code)]
+    // The first node matching VAL.
     pub fn index(&self, val: &str) -> Option<usize> {
         self.arena.iter().position(|node| node.val.eqstr(val))
     }
 
-    #[allow(dead_code)]
-    pub fn contains(&self, val: &str) -> bool {
-        for node in &self.arena {
-            if node.val.eqstr(val) {
-                return true;
-            }
-        }
-        false
+    pub fn get(&self, val: &str) -> Option<T> {
+        self.index(val).map(|idx| self.arena[idx].val.clone())
     }
 }
