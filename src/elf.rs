@@ -1431,19 +1431,14 @@ fn resolve_loader<'a>(
             return Some(dep);
         }
     }
-    for searchpath in &config.system_dirs {
-        let path = dependency_path(&searchpath.path, dtneeded);
-        if let Ok(elc) = open_elf_file(&path, Some(elc), config.platform, false) {
-            return Some(ResolvedDependency {
-                elc,
-                path: &searchpath.path,
-                filename: pathutils::get_name(&path),
-                mode: DepMode::SystemDirs,
-                namespace: Default::default(),
-            });
-        }
-    }
-    None
+    search_dirs(
+        &config.system_dirs,
+        dtneeded,
+        elc,
+        config.platform,
+        DepMode::SystemDirs,
+        &Default::default(),
+    )
 }
 
 // The dynamic loader is always loaded, and ldd always shows it.  The libc.so is
@@ -1511,6 +1506,42 @@ fn add_loader_dependency(
 ) {
 }
 
+// Try DTNEEDED on the DIR directory, returning it when the object there
+// matches the requesting ELC one.
+fn search_dir<'a>(
+    dir: &'a String,
+    dtneeded: &str,
+    elc: &ElfInfo,
+    platform: Option<&String>,
+    mode: DepMode,
+    namespace: &ObjectNamespace,
+) -> Option<ResolvedDependency<'a>> {
+    let path = dependency_path(dir, dtneeded);
+    let elc = open_elf_file(&path, Some(elc), platform, false).ok()?;
+    Some(ResolvedDependency {
+        elc,
+        path: dir,
+        filename: pathutils::get_name(&path),
+        mode,
+        namespace: namespace.clone(),
+    })
+}
+
+// Search DTNEEDED on each of the SEARCHPATHS in order, returning the first
+// directory with a matching object.
+fn search_dirs<'a>(
+    searchpaths: &'a search_path::SearchPathVec,
+    dtneeded: &str,
+    elc: &ElfInfo,
+    platform: Option<&String>,
+    mode: DepMode,
+    namespace: &ObjectNamespace,
+) -> Option<ResolvedDependency<'a>> {
+    searchpaths.iter().find_map(|searchpath| {
+        search_dir(&searchpath.path, dtneeded, elc, platform, mode, namespace)
+    })
+}
+
 fn resolve_dependency_1<'a>(
     dtneeded: &'a String,
     config: &'a Config,
@@ -1545,22 +1576,8 @@ fn resolve_dependency_1<'a>(
         return None;
     }
 
-    // Search a directory list, returning the first directory with a matching
-    // object.
     let search = |searchpaths: &'a search_path::SearchPathVec, mode: DepMode| {
-        for searchpath in searchpaths {
-            let path = dependency_path(&searchpath.path, dtneeded);
-            if let Ok(elc) = open_elf_file(&path, Some(elc), config.platform, false) {
-                return Some(ResolvedDependency {
-                    elc,
-                    path: &searchpath.path,
-                    filename: pathutils::get_name(&path),
-                    mode,
-                    namespace: namespace.clone(),
-                });
-            }
-        }
-        None
+        search_dirs(searchpaths, dtneeded, elc, config.platform, mode, namespace)
     };
 
     for step in SEARCH_ORDER {
@@ -1598,22 +1615,15 @@ fn resolve_dependency_ld_cache<'a>(
     elc: &'a ElfInfo,
     _namespace: &ObjectNamespace,
 ) -> Option<ResolvedDependency<'a>> {
-    use std::path::PathBuf;
-    if let Some(path) = ld_cache.get(dtneeded) {
-        let mut pathbuf = PathBuf::new();
-        pathbuf.push(path);
-        pathbuf.push(dtneeded);
-        if let Ok(elc) = open_elf_file(&pathbuf, Some(elc), platform, false) {
-            return Some(ResolvedDependency {
-                elc,
-                path,
-                filename: pathutils::get_name(&pathbuf),
-                mode: DepMode::LdCache,
-                namespace: Default::default(),
-            });
-        }
-    }
-    None
+    let dir = ld_cache.get(dtneeded)?;
+    search_dir(
+        dir,
+        dtneeded,
+        elc,
+        platform,
+        DepMode::LdCache,
+        &Default::default(),
+    )
 }
 
 #[cfg(target_os = "android")]
@@ -1624,33 +1634,6 @@ fn resolve_dependency_ld_cache<'a>(
     elc: &'a ElfInfo,
     namespace: &ObjectNamespace,
 ) -> Option<ResolvedDependency<'a>> {
-    // The constraint function is used to instruct the compiler with a higher-ranked trait
-    // bounds (for <...>) that the closure must return a reference of the same lifetime as
-    // the argument.  Otherwise it complains that the closure arguments has a different
-    // lifetime than result.
-    fn constraint<F>(f: F) -> F
-    where
-        F: for<'a> Fn(&'a ld_config_txt::NamespaceConfig) -> Option<ResolvedDependency<'a>>,
-    {
-        f
-    }
-
-    let search_namespace = constraint(|namespace: &ld_config_txt::NamespaceConfig| {
-        for searchpath in &namespace.search_paths {
-            let path = Path::new(&searchpath.path).join(dtneeded);
-            if let Ok(elc) = open_elf_file(&path, Some(elc), platform, false) {
-                return Some(ResolvedDependency {
-                    elc,
-                    path: &searchpath.path,
-                    filename: pathutils::get_name(&path),
-                    mode: DepMode::LdCache,
-                    namespace: Default::default(),
-                });
-            }
-        }
-        None
-    });
-
     // The search starts on the namespace the requesting object was loaded in
     // (the default one for the executable itself) and follows the namespaces
     // it links against, without following further links.  An object resolved
@@ -1661,8 +1644,14 @@ fn resolve_dependency_ld_cache<'a>(
         None => ld_cache.get_default_namespace()?,
     };
 
-    if let Some(mut resolved) = search_namespace(current_ns) {
-        resolved.namespace = namespace.clone();
+    if let Some(resolved) = search_dirs(
+        &current_ns.search_paths,
+        dtneeded,
+        elc,
+        platform,
+        DepMode::LdCache,
+        namespace,
+    ) {
         return Some(resolved);
     }
 
@@ -1678,8 +1667,14 @@ fn resolve_dependency_ld_cache<'a>(
                 continue;
             }
 
-            if let Some(mut resolved) = search_namespace(linked_ns) {
-                resolved.namespace = Some(link.namespace.clone());
+            if let Some(resolved) = search_dirs(
+                &linked_ns.search_paths,
+                dtneeded,
+                elc,
+                platform,
+                DepMode::LdCache,
+                &Some(link.namespace.clone()),
+            ) {
                 return Some(resolved);
             }
         }
@@ -1699,19 +1694,14 @@ fn resolve_dependency_ld_cache<'a>(
     elc: &'a ElfInfo,
     _namespace: &ObjectNamespace,
 ) -> Option<ResolvedDependency<'a>> {
-    for searchpath in ld_cache {
-        let path = dependency_path(&searchpath.path, dtneeded);
-        if let Ok(elc) = open_elf_file(&path, Some(elc), platform, false) {
-            return Some(ResolvedDependency {
-                elc,
-                path: &searchpath.path,
-                filename: pathutils::get_name(&path),
-                mode: DepMode::LdCache,
-                namespace: Default::default(),
-            });
-        }
-    }
-    None
+    search_dirs(
+        ld_cache,
+        dtneeded,
+        elc,
+        platform,
+        DepMode::LdCache,
+        &Default::default(),
+    )
 }
 
 // Symbol resolution mimicking, used to implement the ldd like --data-relocs,
