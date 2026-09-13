@@ -20,6 +20,8 @@ mod android;
 mod interp;
 #[cfg(target_os = "android")]
 mod ld_config_txt;
+#[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
+mod ld_hints;
 #[cfg(target_os = "freebsd")]
 mod ld_hints_freebsd;
 #[cfg(target_os = "openbsd")]

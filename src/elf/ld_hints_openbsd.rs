@@ -1,13 +1,12 @@
 // Run-time link-editor configuration file parsing function.  OpenBSD version.
 
-use std::fs::File;
-use std::io::{BufRead, BufReader, Error, ErrorKind, Result, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Error, Result, Seek, SeekFrom};
 use std::path::Path;
-use std::str;
 
 use object::Pod;
 
-use crate::{pathutils, search_path};
+use super::ld_hints;
+use crate::search_path;
 
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
@@ -28,26 +27,16 @@ const _: () = assert!(std::mem::size_of::<hints_header>() == 8 * 8);
 
 const HH_MAGIC: i64 = 0o11421044151;
 const LD_HINTS_VERSION_2: i64 = 2;
-const HINTS_MAXFILESIZE: i64 = i32::MAX as i64;
+const HINTS_MAXFILESIZE: u64 = i32::MAX as u64;
 
 pub fn parse_ld_so_hints<P: AsRef<Path>>(filename: &P) -> Result<search_path::SearchPathVec> {
-    let mut file = File::open(filename)?;
+    let (mut file, hsize, hdr) = ld_hints::open::<_, hints_header>(filename, HINTS_MAXFILESIZE)?;
 
-    let hsize = file.metadata()?.len() as i64;
-    if hsize > HINTS_MAXFILESIZE {
-        return Err(Error::new(
-            ErrorKind::Other,
-            format!("File larger than {}", HINTS_MAXFILESIZE),
-        ));
-    }
-
-    let hdr: hints_header = pathutils::read_struct(&mut file)?;
-
-    if hdr.hh_magic != HH_MAGIC || hdr.hh_ehints > hsize {
-        return Err(Error::new(ErrorKind::Other, "Invalid ELFHINTS_MAGIC"));
+    if hdr.hh_magic != HH_MAGIC || hdr.hh_ehints > hsize as i64 {
+        return Err(Error::other("Invalid ELFHINTS_MAGIC"));
     }
     if hdr.hh_version != LD_HINTS_VERSION_2 {
-        return Err(Error::new(ErrorKind::Other, "Invalid elfhints_hdr version"));
+        return Err(Error::other("Invalid elfhints_hdr version"));
     }
 
     let dirlistoff: u64 = (hdr.hh_strtab + hdr.hh_dirlist) as u64;
@@ -59,15 +48,5 @@ pub fn parse_ld_so_hints<P: AsRef<Path>>(filename: &P) -> Result<search_path::Se
     let mut dirlist: Vec<u8> = Vec::<u8>::new();
     reader.read_until(b'\0', &mut dirlist)?;
 
-    if let Some(dirlist) = str::from_utf8(&dirlist)
-        .ok()
-        .map(|s| s.trim_matches(char::from(0)).to_string())
-    {
-        return Ok(search_path::from_string(&dirlist, &[':', ';']));
-    }
-
-    Err(Error::new(
-        ErrorKind::Other,
-        "Invalid directory list in hint file",
-    ))
+    ld_hints::parse_dirlist(&dirlist, &[':', ';'])
 }

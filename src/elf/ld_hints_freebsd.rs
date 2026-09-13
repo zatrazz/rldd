@@ -3,14 +3,13 @@
 // withn hard-coded paths from /etc/default/rc.conf.  It is then simpler to parse the
 // binary hint file (/var/run/ld-elf.so.hints).
 
-use std::fs::File;
-use std::io::{Error, ErrorKind, Read, Result, Seek, SeekFrom};
+use std::io::{Error, Read, Result, Seek, SeekFrom};
 use std::path::Path;
-use std::str;
 
 use object::Pod;
 
-use crate::{pathutils, search_path};
+use super::ld_hints;
+use crate::search_path;
 
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
@@ -33,22 +32,13 @@ const ELFHINTS_VERSION: u32 = 0x1;
 const ELFHINTS_MAXFILESIZE: u64 = 16 * 1024;
 
 pub fn parse_ld_so_hints<P: AsRef<Path>>(filename: &P) -> Result<search_path::SearchPathVec> {
-    let mut file = File::open(filename)?;
-
-    if file.metadata()?.len() > ELFHINTS_MAXFILESIZE {
-        return Err(Error::new(
-            ErrorKind::Other,
-            format!("File larger than {ELFHINTS_MAXFILESIZE}"),
-        ));
-    }
-
-    let hdr: elfhints_hdr = pathutils::read_struct(&mut file)?;
+    let (mut file, _, hdr) = ld_hints::open::<_, elfhints_hdr>(filename, ELFHINTS_MAXFILESIZE)?;
 
     if hdr.magic != ELFHINTS_MAGIC {
-        return Err(Error::new(ErrorKind::Other, "Invalid ELFHINTS_MAGIC"));
+        return Err(Error::other("Invalid ELFHINTS_MAGIC"));
     }
     if hdr.version != ELFHINTS_VERSION {
-        return Err(Error::new(ErrorKind::Other, "Invalid elfhints_hdr version"));
+        return Err(Error::other("Invalid elfhints_hdr version"));
     }
 
     let mut dirlist: Vec<u8> = vec![0; hdr.dirlistlen as usize];
@@ -57,17 +47,7 @@ pub fn parse_ld_so_hints<P: AsRef<Path>>(filename: &P) -> Result<search_path::Se
     file.seek(SeekFrom::Start(dirlistoff))?;
     file.read_exact(&mut dirlist)?;
 
-    if let Some(dirlist) = str::from_utf8(&dirlist)
-        .ok()
-        .map(|s| s.trim_matches(char::from(0)).to_string())
-    {
-        return Ok(search_path::from_string(dirlist, &[':']));
-    }
-
-    Err(Error::new(
-        ErrorKind::Other,
-        "Invalid directory list in hint file",
-    ))
+    ld_hints::parse_dirlist(&dirlist, &[':'])
 }
 
 #[cfg(test)]
@@ -75,6 +55,8 @@ mod tests {
     use super::*;
     use crate::tempdir::TempDir;
     use std::fs;
+    use std::fs::File;
+    use std::io::ErrorKind;
     use std::io::Write;
 
     fn write_elf_hints(file: &mut File, dirlist: Option<&Vec<&str>>) -> Result<()> {
