@@ -4,8 +4,6 @@
 // - Lines that ddo not begin with a `/' are parsed as hardware dependent per library
 //   directives (not supported).
 
-use std::fs::File;
-use std::io::{self, BufRead};
 use std::path::Path;
 
 use crate::search_path::*;
@@ -13,7 +11,7 @@ use crate::search_path::*;
 // Returns a vector of all available paths (it must exist on the filesystem)
 // parsed form the filename.
 pub fn parse_ld_so_conf<P: AsRef<Path>>(filename: &P) -> Result<SearchPathVec, &'static str> {
-    let mut lines = match read_lines(filename) {
+    let mut lines = match crate::pathutils::read_lines(filename) {
         Ok(lines) => lines,
         Err(_e) => return Err("Could not open the filename"),
     };
@@ -32,14 +30,6 @@ pub fn parse_ld_so_conf<P: AsRef<Path>>(filename: &P) -> Result<SearchPathVec, &
     }
 
     Ok(r)
-}
-
-fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>>
-where
-    P: AsRef<Path>,
-{
-    let file = File::open(filename)?;
-    Ok(io::BufReader::new(file).lines())
 }
 
 fn parse_line(line: &str) -> Option<String> {
