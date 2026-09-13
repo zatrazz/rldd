@@ -1,16 +1,6 @@
 // Glibc ld.so.preload parsing function.  Each line issues a directive to an absolute path.
 
-use std::fs::File;
-use std::io::{self, BufRead};
 use std::path::Path;
-
-fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>>
-where
-    P: AsRef<Path>,
-{
-    let file = File::open(filename)?;
-    Ok(io::BufReader::new(file).lines())
-}
 
 fn parse_line(line: &str) -> Option<String> {
     // Remove leading whitespace.
@@ -35,7 +25,7 @@ fn parse_line(line: &str) -> Option<String> {
 pub fn parse_ld_so_preload<P: AsRef<Path>>(filename: &P) -> Vec<String> {
     let mut r = Vec::new();
 
-    let mut lines = match read_lines(filename) {
+    let mut lines = match crate::pathutils::read_lines(filename) {
         Ok(lines) => lines,
         // Ignore errors if file can not be read.
         Err(_) => return r,

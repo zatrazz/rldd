@@ -1,7 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
-use std::fs::File;
-use std::io::{self, BufRead};
 use std::path::Path;
 
 use crate::elf::android::*;
@@ -307,7 +305,9 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
         return Err("asan not supported");
     }
 
-    let lines = match read_lines(filename) {
+    let lines = match crate::pathutils::read_lines(filename)
+        .and_then(|lines| lines.collect::<std::io::Result<Vec<String>>>())
+    {
         Ok(lines) => lines,
         Err(_e) => return Err("Could not open the filename"),
     };
@@ -513,14 +513,6 @@ fn find_section(section: &String, lines: &[String]) -> Result<usize, &'static st
         }
     }
     Err("section for binary not found")
-}
-
-fn read_lines<P>(filename: P) -> io::Result<Vec<String>>
-where
-    P: AsRef<Path>,
-{
-    let file = File::open(filename)?;
-    io::BufReader::new(file).lines().collect()
 }
 
 fn next_token(line: &str) -> Option<(Token, String)> {

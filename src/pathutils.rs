@@ -52,6 +52,15 @@ pub fn has_prefix(path: &str, prefixes: &[String]) -> bool {
     })
 }
 
+// The lines of FILENAME, for the loader configuration files.
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "netbsd"))]
+pub fn read_lines<P: AsRef<Path>>(
+    filename: P,
+) -> Result<std::io::Lines<std::io::BufReader<fs::File>>> {
+    use std::io::BufRead;
+    Ok(std::io::BufReader::new(fs::File::open(filename)?).lines())
+}
+
 // Strip the verbatim prefix added by fs::canonicalize (for instance,
 // \\?\C:\Windows\System32 -> C:\Windows\System32).
 #[cfg(windows)]
