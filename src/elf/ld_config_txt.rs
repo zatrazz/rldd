@@ -46,7 +46,7 @@ impl NamespaceConfig {
             return false;
         }
 
-        // The resolve_dependency_ld_cache will check the search_path and fail if it is not
+        // The loader cache resolution will check the search_path and fail if it is not
         // found.
         true
     }
