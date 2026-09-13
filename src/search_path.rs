@@ -26,6 +26,27 @@ pub struct SearchPath {
     #[cfg(windows)]
     key: String,
 }
+// The entries taken as is, without checking they exist, carry no device and
+// inode.  Only the ELF system directories use them.
+#[cfg(all(unix, not(target_os = "macos")))]
+impl SearchPath {
+    pub fn fixed<S: Into<String>>(path: S) -> Self {
+        Self {
+            path: path.into(),
+            dev: 0,
+            ino: 0,
+        }
+    }
+}
+
+// A list of entries taken as is, in the given order.  The Android default
+// directories are pushed one at a time instead.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg_attr(target_os = "android", allow(dead_code))]
+pub fn fixed_list<S: Into<String>>(paths: impl IntoIterator<Item = S>) -> SearchPathVec {
+    paths.into_iter().map(SearchPath::fixed).collect()
+}
+
 impl PartialEq for SearchPath {
     #[cfg(unix)]
     fn eq(&self, other: &Self) -> bool {

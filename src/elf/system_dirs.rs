@@ -105,25 +105,14 @@ fn get_musl_system_dirs(interp: &Option<String>) -> search_path::SearchPathVec {
             let dirs: search_path::SearchPathVec = contents
                 .split([':', '\n'])
                 .filter(|p| !p.is_empty())
-                .map(|p| search_path::SearchPath {
-                    path: p.to_string(),
-                    dev: 0,
-                    ino: 0,
-                })
+                .map(search_path::SearchPath::fixed)
                 .collect();
             if !dirs.is_empty() {
                 return dirs;
             }
         }
     }
-    ["/lib", "/usr/local/lib", "/usr/lib"]
-        .iter()
-        .map(|p| search_path::SearchPath {
-            path: p.to_string(),
-            dev: 0,
-            ino: 0,
-        })
-        .collect()
+    search_path::fixed_list(["/lib", "/usr/local/lib", "/usr/lib"])
 }
 
 // The loader keep the configured system directories in a static array of NUL
@@ -211,21 +200,13 @@ pub fn get_system_dirs(
     // Without a loader to read, the upstream default of the slibdir and its
     // /usr counterpart.
     let path = get_slibdir(elc.e_machine, elc.ei_class, elc.e_flags)?;
-    Ok(vec![
-        search_path::SearchPath {
-            path: path.to_string(),
-            dev: 0,
-            ino: 0,
-        },
-        // The '/usr' part is configurable on glibc install, however there is no direct
-        // way to obtain it on runtime.
-        // TODO: Add an option to override it.
-        search_path::SearchPath {
-            path: format!("/usr{path}"),
-            dev: 0,
-            ino: 0,
-        },
-    ])
+    // The '/usr' part is configurable on glibc install, however there is no direct
+    // way to obtain it on runtime.
+    // TODO: Add an option to override it.
+    Ok(search_path::fixed_list([
+        path.to_string(),
+        format!("/usr{path}"),
+    ]))
 }
 
 // The bionic loader default search paths, used when no ld.config.txt applies:
@@ -258,13 +239,7 @@ pub fn get_system_dirs(elc: &ElfInfo) -> Result<search_path::SearchPathVec, std:
     };
 
     let mut r = search_path::SearchPathVec::new();
-    let mut push = |path: String| {
-        r.push(search_path::SearchPath {
-            path,
-            dev: 0,
-            ino: 0,
-        })
-    };
+    let mut push = |path: String| r.push(search_path::SearchPath::fixed(path));
 
     for partition in ["/system", "/odm", "/vendor"] {
         // The /odm partition was added on Android 9.
@@ -291,23 +266,12 @@ pub fn get_system_dirs(elc: &ElfInfo) -> Result<search_path::SearchPathVec, std:
         } else {
             &["/lib/casper", "/lib", "/usr/lib"]
         };
-    Ok(dirs
-        .iter()
-        .map(|path| search_path::SearchPath {
-            path: path.to_string(),
-            dev: 0,
-            ino: 0,
-        })
-        .collect())
+    Ok(search_path::fixed_list(dirs.iter().copied()))
 }
 
 #[cfg(target_os = "openbsd")]
 pub fn get_system_dirs(_elc: &ElfInfo) -> Result<search_path::SearchPathVec, std::io::Error> {
-    Ok(vec![search_path::SearchPath {
-        path: "/usr/lib".to_string(),
-        dev: 0,
-        ino: 0,
-    }])
+    Ok(search_path::fixed_list(["/usr/lib"]))
 }
 
 // The NetBSD compat loaders (ld.elf_so-$(MLIBDIR) search the
@@ -352,14 +316,7 @@ pub fn get_system_dirs(elc: &ElfInfo) -> Result<search_path::SearchPathVec, std:
     if let Some(subdir) = netbsd_compat_subdir(elc.e_machine, elc.ei_class, elc.e_flags) {
         dirs.push(format!("/usr/lib/{subdir}"));
     }
-    Ok(dirs
-        .into_iter()
-        .map(|path| search_path::SearchPath {
-            path,
-            dev: 0,
-            ino: 0,
-        })
-        .collect())
+    Ok(search_path::fixed_list(dirs))
 }
 
 #[cfg(all(test, target_os = "netbsd"))]
@@ -383,30 +340,8 @@ mod tests {
 #[cfg(any(target_os = "illumos", target_os = "solaris"))]
 pub fn get_system_dirs(elc: &ElfInfo) -> Result<search_path::SearchPathVec, std::io::Error> {
     match elc.e_machine {
-        EM_386 => Ok(vec![
-            search_path::SearchPath {
-                path: "/lib".to_string(),
-                dev: 0,
-                ino: 0,
-            },
-            search_path::SearchPath {
-                path: "/usr/lib".to_string(),
-                dev: 0,
-                ino: 0,
-            },
-        ]),
-        EM_X86_64 => Ok(vec![
-            search_path::SearchPath {
-                path: "/lib64".to_string(),
-                dev: 0,
-                ino: 0,
-            },
-            search_path::SearchPath {
-                path: "/usr/lib/64".to_string(),
-                dev: 0,
-                ino: 0,
-            },
-        ]),
+        EM_386 => Ok(search_path::fixed_list(["/lib", "/usr/lib"])),
+        EM_X86_64 => Ok(search_path::fixed_list(["/lib64", "/usr/lib/64"])),
         _ => return_error(),
     }
 }
