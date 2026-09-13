@@ -3,12 +3,13 @@
 
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
-use std::path::{Path, MAIN_SEPARATOR};
+use std::path::Path;
 
 use windows_sys::Win32::Foundation::MAX_PATH;
 use windows_sys::Win32::System::SystemInformation::GetWindowsDirectoryW;
 
 use crate::deptree::DepMode;
+use crate::pathutils;
 use crate::search_path::{SearchPath, SearchPathVec, SearchPathVecExt, LIST_SEPARATOR};
 
 pub type SearchDirs = Vec<(SearchPath, DepMode)>;
@@ -30,7 +31,7 @@ pub fn windows_dir() -> String {
 // The system directory, which is SysWOW64 for 32 bit images.
 pub fn system_dir(windows: &str, is_32bit: bool) -> String {
     let name = if is_32bit { "SysWOW64" } else { "System32" };
-    format!("{windows}{MAIN_SEPARATOR}{name}")
+    pathutils::join(windows, name)
 }
 
 // A Windows on ARM host holds SyChpe32, the CHPE (hybrid x86) build of the
@@ -42,7 +43,7 @@ fn chpe_dir(windows: &str, is_32bit: bool) -> Option<String> {
     if !is_32bit {
         return None;
     }
-    let chpe = format!("{windows}{MAIN_SEPARATOR}SyChpe32");
+    let chpe = pathutils::join(windows, "SyChpe32");
     Path::new(&chpe).is_dir().then_some(chpe)
 }
 
@@ -128,7 +129,7 @@ pub fn build(
     );
     add(
         &mut dirs,
-        &format!("{windows}{MAIN_SEPARATOR}System"),
+        &pathutils::join(windows, "System"),
         DepMode::SystemDirs,
     );
     add(&mut dirs, windows, DepMode::WindowsDir);
@@ -175,7 +176,7 @@ mod tests {
 
         let dirs = system_dirs(&windows, true);
         assert_eq!(*dirs.last().unwrap(), system_dir(&windows, true));
-        let chpe = format!("{windows}{MAIN_SEPARATOR}SyChpe32");
+        let chpe = pathutils::join(&windows, "SyChpe32");
         match Path::new(&chpe).is_dir() {
             true => assert_eq!(dirs, [chpe, system_dir(&windows, true)]),
             false => assert_eq!(dirs.len(), 1),
