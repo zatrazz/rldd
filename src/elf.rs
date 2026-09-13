@@ -232,18 +232,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
     origin: &str,
     platform: Option<&String>,
 ) -> Result<ElfInfo, &'static str> {
-    let dynamic = match segment.dynamic(endian, data) {
-        Ok(Some(dynamic)) => Some(dynamic),
-        // A PT_DYNAMIC whose size is not a multiple of the entry size, the
-        // the loader reads up to DT_NULL regardless.
-        _ => segment.data(endian, data).ok().and_then(|bytes| {
-            let count = bytes.len() / std::mem::size_of::<Elf::Dyn>();
-            object::slice_from_bytes::<Elf::Dyn>(bytes, count)
-                .ok()
-                .map(|(dynamic, _)| dynamic)
-        }),
-    };
-    if let Some(dynamic) = dynamic {
+    if let Some(dynamic) = dynamic_entries::<Elf>(endian, data, segment) {
         // The loader rejects an object whose dynamic section has no entries (for instance the
         // separated debug info files).
         if !dynamic.iter().any(|d| {
@@ -270,8 +259,8 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
             None => return Err("Failure to parse the string table"),
         };
 
-        let dt_flags_1 = DynamicFlags1(parse_elf_dyn_flags::<Elf>(endian, DT_FLAGS_1, dynamic));
-        let nodeflibs = dt_flags_1.contains(DF_1_NODEFLIB);
+        let tags = DynamicTags::parse::<Elf>(endian, dynamic, dynstr);
+        let nodeflibs = DynamicFlags1(tags.flags_1).contains(DF_1_NODEFLIB);
 
         return match parse_elf_dtneeded::<Elf>(endian, elf, dynamic, dynstr, origin, platform) {
             Ok((dtneeded, filters, has_needed)) => Ok(ElfInfo {
@@ -282,15 +271,10 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
                 e_machine: elf.e_machine(endian),
                 e_flags: elf.e_flags(endian),
                 interp: None,
-                soname: parse_elf_dyn_str::<Elf>(endian, DT_SONAME, dynamic, dynstr),
-                rpath: parse_elf_dyn_searchpath(
-                    endian, elf, DT_RPATH, dynamic, dynstr, origin, platform,
-                ),
-                runpath: parse_elf_dyn_searchpath(
-                    endian, elf, DT_RUNPATH, dynamic, dynstr, origin, platform,
-                ),
-                has_runpath: parse_elf_dyn_str::<Elf>(endian, DT_RUNPATH, dynamic, dynstr)
-                    .is_some(),
+                rpath: parse_elf_dyn_searchpath(endian, elf, &tags.rpath, origin, platform),
+                runpath: parse_elf_dyn_searchpath(endian, elf, &tags.runpath, origin, platform),
+                has_runpath: tags.runpath.is_some(),
+                soname: tags.soname,
                 nodeflibs,
                 deps: dtneeded,
                 has_needed,
@@ -304,6 +288,74 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
     Err("Failure to parse dynamic segment")
 }
 
+// The entries of the PT_DYNAMIC SEGMENT.
+fn dynamic_entries<'data, Elf: FileHeader>(
+    endian: Elf::Endian,
+    data: &'data [u8],
+    segment: &Elf::ProgramHeader,
+) -> Option<&'data [Elf::Dyn]> {
+    match segment.dynamic(endian, data) {
+        Ok(Some(dynamic)) => Some(dynamic),
+        // A PT_DYNAMIC whose size is not a multiple of the entry size, the
+        // the loader reads up to DT_NULL regardless.
+        _ => segment.data(endian, data).ok().and_then(|bytes| {
+            let count = bytes.len() / std::mem::size_of::<Elf::Dyn>();
+            object::slice_from_bytes::<Elf::Dyn>(bytes, count)
+                .ok()
+                .map(|(dynamic, _)| dynamic)
+        }),
+    }
+}
+
+// The dynamic tags read up to DT_NULL, each one holding the value of its
+// first entry (the first one with a valid string for the string tags).
+#[derive(Default)]
+struct DynamicTags {
+    soname: Option<String>,
+    rpath: Option<String>,
+    runpath: Option<String>,
+    flags_1: u64,
+}
+
+impl DynamicTags {
+    fn parse<Elf: FileHeader>(
+        endian: Elf::Endian,
+        dynamic: &[Elf::Dyn],
+        dynstr: StringTable,
+    ) -> Self {
+        let mut r = Self::default();
+        let mut flags_1 = None;
+        for d in dynamic {
+            let tag = d.d_tag(endian);
+            if tag == DT_NULL {
+                break;
+            }
+            if d.tag32(endian).is_none() {
+                continue;
+            }
+            let field = match tag {
+                DT_SONAME => &mut r.soname,
+                DT_RPATH => &mut r.rpath,
+                DT_RUNPATH => &mut r.runpath,
+                DT_FLAGS_1 => {
+                    flags_1.get_or_insert(d.d_val(endian).into());
+                    continue;
+                }
+                _ => continue,
+            };
+            if field.is_none() {
+                *field = d
+                    .string(endian, dynstr)
+                    .ok()
+                    .and_then(|s| str::from_utf8(s).ok())
+                    .map(str::to_string);
+            }
+        }
+        r.flags_1 = flags_1.unwrap_or(0);
+        r
+    }
+}
+
 fn parse_elf_stringtable<'a, Elf: FileHeader>(
     endian: Elf::Endian,
     data: &'a [u8],
@@ -314,30 +366,6 @@ fn parse_elf_stringtable<'a, Elf: FileHeader>(
     for s in segments {
         if let Ok(Some(data)) = s.data_range(endian, data, strtab, strsz) {
             return Some(StringTable::new(data, 0, data.len() as u64));
-        }
-    }
-    None
-}
-
-fn parse_elf_dyn_str<Elf: FileHeader>(
-    endian: Elf::Endian,
-    tag: DynamicTag,
-    dynamic: &[Elf::Dyn],
-    dynstr: StringTable,
-) -> Option<String> {
-    for d in dynamic {
-        if d.d_tag(endian) == DT_NULL {
-            break;
-        }
-
-        if d.tag32(endian).is_none() || d.d_tag(endian) != tag {
-            continue;
-        }
-
-        if let Ok(s) = d.string(endian, dynstr) {
-            if let Ok(s) = str::from_utf8(s) {
-                return Some(s.to_string());
-            }
         }
     }
     None
@@ -375,13 +403,11 @@ fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
 fn parse_elf_dyn_searchpath<Elf: FileHeader>(
     endian: Elf::Endian,
     elf: &Elf,
-    tag: DynamicTag,
-    dynamic: &[Elf::Dyn],
-    dynstr: StringTable,
+    dynstr: &Option<String>,
     origin: &str,
     platform: Option<&String>,
 ) -> search_path::SearchPathVec {
-    if let Some(dynstr) = parse_elf_dyn_str::<Elf>(endian, tag, dynamic, dynstr) {
+    if let Some(dynstr) = dynstr {
         return search_path::from_string(
             expand_dst::<Elf>(endian, elf, &dynstr, origin, platform),
             &[':'],
@@ -451,25 +477,6 @@ fn parse_elf_dtneeded<Elf: FileHeader>(
         }
     }
     Ok((dtneeded, filters, has_needed))
-}
-
-fn parse_elf_dyn_flags<Elf: FileHeader>(
-    endian: Elf::Endian,
-    tag: DynamicTag,
-    dynamic: &[Elf::Dyn],
-) -> u64 {
-    for d in dynamic {
-        if d.d_tag(endian) == DT_NULL {
-            break;
-        }
-
-        if d.tag32(endian).is_none() || d.d_tag(endian) != tag {
-            continue;
-        }
-
-        return d.d_val(endian).into();
-    }
-    0
 }
 
 fn open_elf_file<P: AsRef<Path>>(

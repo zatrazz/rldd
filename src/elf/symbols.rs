@@ -402,7 +402,7 @@ fn parse_dynamic_info<Elf: FileHeader>(endian: Elf::Endian, elf: &Elf, data: &[u
     else {
         return r;
     };
-    let Ok(Some(dynamic)) = segment.dynamic(endian, data) else {
+    let Some(dynamic) = super::dynamic_entries::<Elf>(endian, data, segment) else {
         return r;
     };
     for d in dynamic {
