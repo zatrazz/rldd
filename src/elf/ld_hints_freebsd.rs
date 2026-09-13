@@ -5,12 +5,14 @@
 
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Result, Seek, SeekFrom};
-use std::mem::{size_of, transmute};
 use std::path::Path;
 use std::str;
 
-use crate::search_path;
+use object::Pod;
 
+use crate::{pathutils, search_path};
+
+#[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
 struct elfhints_hdr {
     magic: u32,
@@ -21,7 +23,10 @@ struct elfhints_hdr {
     dirlistlen: u32,
     spare: [u32; 26usize],
 }
-const ELFHINTS_HDR_LEN: u32 = size_of::<elfhints_hdr>() as u32;
+// SAFETY: repr(C) integers and byte arrays, without padding (the size is the
+// sum of the fields).
+unsafe impl Pod for elfhints_hdr {}
+const _: () = assert!(std::mem::size_of::<elfhints_hdr>() == (6 + 26) * 4);
 
 const ELFHINTS_MAGIC: u32 = 0x746e6845;
 const ELFHINTS_VERSION: u32 = 0x1;
@@ -37,11 +42,7 @@ pub fn parse_ld_so_hints<P: AsRef<Path>>(filename: &P) -> Result<search_path::Se
         ));
     }
 
-    let hdr: elfhints_hdr = {
-        let mut h = [0u8; ELFHINTS_HDR_LEN as usize];
-        file.read_exact(&mut h[..])?;
-        unsafe { transmute(h) }
-    };
+    let hdr: elfhints_hdr = pathutils::read_struct(&mut file)?;
 
     if hdr.magic != ELFHINTS_MAGIC {
         return Err(Error::new(ErrorKind::Other, "Invalid ELFHINTS_MAGIC"));
@@ -76,10 +77,6 @@ mod tests {
     use std::fs;
     use std::io::Write;
 
-    unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
-        ::std::slice::from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>())
-    }
-
     fn write_elf_hints(file: &mut File, dirlist: Option<&Vec<&str>>) -> Result<()> {
         let mut dirlistlen = 0u32;
         if let Some(dirlist) = &dirlist {
@@ -93,13 +90,12 @@ mod tests {
             version: 1,
             strtab: 0,
             strsize: 0,
-            dirlist: ELFHINTS_HDR_LEN,
+            dirlist: std::mem::size_of::<elfhints_hdr>() as u32,
             dirlistlen: dirlistlen,
             spare: [0; 26usize],
         };
 
-        let hdrbytes = unsafe { any_as_u8_slice(&hdr) };
-        file.write_all(hdrbytes)?;
+        file.write_all(object::pod::bytes_of(&hdr))?;
         if let Some(dirlist) = dirlist {
             for dir in dirlist {
                 file.write_all(dir.as_bytes())?;

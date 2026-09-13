@@ -67,6 +67,17 @@ pub fn read_lines<P: AsRef<Path>>(
     Ok(std::io::BufReader::new(fs::File::open(filename)?).lines())
 }
 
+// Read a T in native layout from READER, for the loader binary cache and
+// hints files.
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
+pub fn read_struct<T: object::Pod + Default, R: std::io::Read + ?Sized>(
+    reader: &mut R,
+) -> Result<T> {
+    let mut value = T::default();
+    reader.read_exact(object::pod::bytes_of_mut(&mut value))?;
+    Ok(value)
+}
+
 // Strip the verbatim prefix added by fs::canonicalize (for instance,
 // \\?\C:\Windows\System32 -> C:\Windows\System32).
 #[cfg(windows)]

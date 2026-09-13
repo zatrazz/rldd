@@ -1,13 +1,15 @@
 // Run-time link-editor configuration file parsing function.  OpenBSD version.
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Result, Seek, SeekFrom};
-use std::mem::{size_of, transmute};
+use std::io::{BufRead, BufReader, Error, ErrorKind, Result, Seek, SeekFrom};
 use std::path::Path;
 use std::str;
 
-use crate::search_path;
+use object::Pod;
 
+use crate::{pathutils, search_path};
+
+#[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
 struct hints_header {
     hh_magic: i64,
@@ -19,7 +21,10 @@ struct hints_header {
     hh_ehints: i64,
     hh_dirlist: i64,
 }
-const HINTS_HEADER_LEN: u32 = size_of::<hints_header>() as u32;
+// SAFETY: repr(C) integers and byte arrays, without padding (the size is the
+// sum of the fields).
+unsafe impl Pod for hints_header {}
+const _: () = assert!(std::mem::size_of::<hints_header>() == 8 * 8);
 
 const HH_MAGIC: i64 = 0o11421044151;
 const LD_HINTS_VERSION_2: i64 = 2;
@@ -36,11 +41,7 @@ pub fn parse_ld_so_hints<P: AsRef<Path>>(filename: &P) -> Result<search_path::Se
         ));
     }
 
-    let hdr: hints_header = {
-        let mut h = [0u8; HINTS_HEADER_LEN as usize];
-        file.read_exact(&mut h[..])?;
-        unsafe { transmute(h) }
-    };
+    let hdr: hints_header = pathutils::read_struct(&mut file)?;
 
     if hdr.hh_magic != HH_MAGIC || hdr.hh_ehints > hsize {
         return Err(Error::new(ErrorKind::Other, "Invalid ELFHINTS_MAGIC"));

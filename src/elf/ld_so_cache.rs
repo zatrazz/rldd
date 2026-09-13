@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Error, Read, Result, Seek, SeekFrom};
-use std::mem::{align_of, size_of, transmute};
+use std::mem::{align_of, size_of};
 use std::path::Path;
 use std::str;
 
 use crate::pathutils;
 use object::elf::*;
+use object::Pod;
 
 mod hwcap;
 
@@ -14,24 +15,34 @@ const CACHEMAGIC: &str = "ld.so-1.7.0";
 const CACHEMAGIC_NEW: &str = "glibc-ld.so.cache";
 const CACHE_VERSION: &str = "1.1";
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
 struct cache_file {
     magic: [u8; CACHEMAGIC.len()],
+    // The alignment padding before nlibs, explicit so the struct has none.
+    _padding: [u8; 1],
     nlibs: u32,
 }
+// SAFETY: repr(C) integers and byte arrays, without padding (the size is the
+// sum of the fields).
+unsafe impl Pod for cache_file {}
+const _: () = assert!(std::mem::size_of::<cache_file>() == CACHEMAGIC.len() + 1 + 4);
 const CACHE_FILE_LEN: usize = size_of::<cache_file>();
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
 struct file_entry {
     flags: i32,
     key: u32,
     value: u32,
 }
+// SAFETY: repr(C) integers and byte arrays, without padding (the size is the
+// sum of the fields).
+unsafe impl Pod for file_entry {}
+const _: () = assert!(std::mem::size_of::<file_entry>() == 3 * 4);
 const FILE_ENTRY_LEN: usize = size_of::<file_entry>();
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
 struct cache_file_new {
     magic: [u8; CACHEMAGIC_NEW.len()],
@@ -43,9 +54,16 @@ struct cache_file_new {
     extension_offset: u32,
     unused: [u32; 3],
 }
+// SAFETY: repr(C) integers and byte arrays, without padding (the size is the
+// sum of the fields).
+unsafe impl Pod for cache_file_new {}
+const _: () = assert!(
+    std::mem::size_of::<cache_file_new>()
+        == CACHEMAGIC_NEW.len() + CACHE_VERSION.len() + 4 + 4 + 1 + 3 + 4 + 3 * 4
+);
 const CACHE_FILE_NEW_LEN: usize = size_of::<cache_file_new>();
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
 struct file_entry_new {
     flags: i32,
@@ -54,18 +72,26 @@ struct file_entry_new {
     osversion_unused: u32,
     hwcap: u64,
 }
+// SAFETY: repr(C) integers and byte arrays, without padding (the size is the
+// sum of the fields).
+unsafe impl Pod for file_entry_new {}
+const _: () = assert!(std::mem::size_of::<file_entry_new>() == 4 * 4 + 8);
 const FILE_ENTRY_NEW_LEN: usize = size_of::<file_entry_new>();
 
 // The cache_file_new extension header, pointer by extension_offset field.  The MAGIC should be
 // 'cache_extension_magic' and COUNT indicates ow many cache_extension_section can be read
 // (on glibc definition the cache_extension_section is defined as a flexible array meant to be
 // accessed through mmap).
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
 struct cache_extension {
     magic: u32,
     count: u32,
 }
+// SAFETY: repr(C) integers and byte arrays, without padding (the size is the
+// sum of the fields).
+unsafe impl Pod for cache_extension {}
+const _: () = assert!(std::mem::size_of::<cache_extension>() == 2 * 4);
 const CACHE_EXTENSION_LEN: usize = size_of::<cache_extension>();
 
 #[allow(non_upper_case_globals)]
@@ -74,7 +100,7 @@ const cache_extension_magic: u32 = 0xeaa42174;
 const CACHE_EXTENSION_TAG_GLIBC_HWCAPS: u32 = 1;
 
 // Element in the array following struct cache_extension.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
 struct cache_extension_section {
     tag: u32,    // Type of the extension section (CACHE_EXTENSION_TAG_*).
@@ -82,6 +108,10 @@ struct cache_extension_section {
     offset: u32, // Offset from the start of the file for the data in this extension section.
     size: u32,   // Length in bytes of the extension data.
 }
+// SAFETY: repr(C) integers and byte arrays, without padding (the size is the
+// sum of the fields).
+unsafe impl Pod for cache_extension_section {}
+const _: () = assert!(std::mem::size_of::<cache_extension_section>() == 4 * 4);
 const CACHE_EXTENSION_SECTION_LEN: usize = size_of::<cache_extension_section>();
 
 // Check the ld.so.cache file_entry_new flags against a pre-defined value from glibc
@@ -214,13 +244,6 @@ fn read_string<R: Read + Seek>(
     Ok(value)
 }
 
-// Read a u32 value in native endianess format.
-fn read_u32<R: Read + Seek>(reader: &mut BufReader<R>) -> Result<u32> {
-    let mut buffer = [0; 4];
-    reader.read_exact(&mut buffer[..]).unwrap();
-    Ok(u32::from_ne_bytes(buffer))
-}
-
 fn align_cache(value: usize) -> usize {
     (value + (align_of::<cache_file_new>() - 1)) & !(align_of::<cache_file_new>() - 1)
 }
@@ -234,11 +257,7 @@ fn parse_ld_so_cache_old<R: Read + Seek>(
     e_machine: Machine,
     e_flags: FileFlags,
 ) -> Result<LdCache> {
-    let hdr: cache_file = {
-        let mut h = [0u8; CACHE_FILE_LEN];
-        reader.read_exact(&mut h[..])?;
-        unsafe { transmute(h) }
-    };
+    let hdr: cache_file = pathutils::read_struct(reader)?;
 
     if (cache_size - CACHE_FILE_LEN) / FILE_ENTRY_LEN < hdr.nlibs as usize {
         return Err(Error::other("Invalid cache file"));
@@ -258,11 +277,7 @@ fn parse_ld_so_cache_old<R: Read + Seek>(
 
     let mut offsets: Vec<(u32, u32)> = Vec::with_capacity(hdr.nlibs as usize);
     for _i in 0..hdr.nlibs {
-        let entry: file_entry = {
-            let mut e = [0u8; FILE_ENTRY_LEN];
-            reader.read_exact(&mut e[..])?;
-            unsafe { transmute(e) }
-        };
+        let entry: file_entry = pathutils::read_struct(reader)?;
         if !check_file_entry_flags(entry.flags, ei_class, e_machine, e_flags) {
             continue;
         }
@@ -289,11 +304,7 @@ fn parse_ld_so_cache_new<R: Read + Seek>(
     e_flags: FileFlags,
 ) -> Result<LdCache> {
     reader.seek(SeekFrom::Start(initial as u64))?;
-    let hdr: cache_file_new = {
-        let mut h = [0u8; CACHE_FILE_NEW_LEN];
-        reader.read_exact(&mut h[..])?;
-        unsafe { transmute(h) }
-    };
+    let hdr: cache_file_new = pathutils::read_struct(reader)?;
 
     if hdr.magic != CACHEMAGIC_NEW.as_bytes() {
         return Err(Error::other("Invalid new cache magic"));
@@ -311,11 +322,7 @@ fn parse_ld_so_cache_new<R: Read + Seek>(
     let mut offsets: Vec<(u32, u32, Option<u32>)> = Vec::with_capacity(hdr.nlibs as usize);
 
     for _i in 0..hdr.nlibs {
-        let entry: file_entry_new = {
-            let mut e = [0u8; FILE_ENTRY_NEW_LEN];
-            reader.read_exact(&mut e[..])?;
-            unsafe { transmute(e) }
-        };
+        let entry: file_entry_new = pathutils::read_struct(reader)?;
         // Skip not supported entries for the binary architecture, for instance x86_64/i686
         // with multilib support.
         if !check_file_entry_flags(entry.flags, ei_class, e_machine, e_flags) {
@@ -431,11 +438,7 @@ fn parse_ld_so_cache_glibc_hwcap<R: Read + Seek>(
         return Ok(Vec::<String>::new());
     }
     reader.seek_relative(cur - *prev_off)?;
-    let ext: cache_extension = {
-        let mut h = [0u8; CACHE_EXTENSION_LEN];
-        reader.read_exact(&mut h[..])?;
-        unsafe { transmute(h) }
-    };
+    let ext: cache_extension = pathutils::read_struct(reader)?;
     *prev_off = cur + CACHE_EXTENSION_LEN as i64;
 
     if ext.magic != cache_extension_magic {
@@ -445,11 +448,7 @@ fn parse_ld_so_cache_glibc_hwcap<R: Read + Seek>(
     // Return an empty set if the cache does not have any glibc-hwcap extension.
     let mut r = Vec::<String>::new();
     for _i in 0..ext.count {
-        let ext_sec: cache_extension_section = {
-            let mut h = [0u8; CACHE_EXTENSION_SECTION_LEN];
-            reader.read_exact(&mut h[..])?;
-            unsafe { transmute(h) }
-        };
+        let ext_sec: cache_extension_section = pathutils::read_struct(reader)?;
         *prev_off += CACHE_EXTENSION_SECTION_LEN as i64;
 
         if ext_sec.tag == CACHE_EXTENSION_TAG_GLIBC_HWCAPS {
@@ -459,7 +458,7 @@ fn parse_ld_so_cache_glibc_hwcap<R: Read + Seek>(
             let mut idxs: Vec<u32> = Vec::with_capacity(idxslen);
 
             for _j in 0..idxslen {
-                idxs.push(read_u32(reader)?);
+                idxs.push(pathutils::read_struct::<u32, _>(reader)?);
             }
 
             *prev_off = ext_sec.offset as i64 + ext_sec.size as i64;
