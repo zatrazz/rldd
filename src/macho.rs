@@ -218,7 +218,7 @@ fn print_object_information(ctx: &MachOContext, env: &DyldEnv, filename: &Path, 
             format!("{} images", ctx.cache.len())
         }
     ));
-    println!("{}", lines.join("\n"));
+    outln!("{}", lines.join("\n"));
 }
 
 struct Config<'a> {

@@ -253,7 +253,7 @@ fn print_object_information(
     for (dir, mode) in dirs {
         lines.push(format!("  search path: {} {mode}", dir.path));
     }
-    println!("{}", lines.join("\n"));
+    outln!("{}", lines.join("\n"));
 }
 
 // When a '<object>.local' directory exists the dependencies are taken from it, and

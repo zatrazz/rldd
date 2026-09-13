@@ -3,7 +3,8 @@
 use std::io::{IsTerminal, Write};
 use termcolor::{BufferWriter, ColorChoice, WriteColor};
 
-// Ignore output error for now.
+// Ignore the in memory buffer write errors, the output errors are handled
+// when the buffer is printed.
 macro_rules! ok {
     ($expr:expr) => {
         match $expr {
@@ -39,6 +40,13 @@ impl Printer {
 
     pub fn is_verbose(&self) -> bool {
         self.verbose
+    }
+
+    // Write the assembled line out.
+    fn flush(&self, writer: &BufferWriter, buffer: &termcolor::Buffer) {
+        if let Err(err) = writer.print(buffer) {
+            crate::output::write_error(err);
+        }
     }
 
     fn write_colorized<S: Into<String>>(
@@ -91,7 +99,7 @@ impl Printer {
             self.writeln_colorized(&mut buffer, &color_name, name);
         }
 
-        ok!(writer.print(&buffer));
+        self.flush(&writer, &buffer);
     }
 
     fn print_entry(
@@ -133,20 +141,20 @@ impl Printer {
         }
         self.writeln_colorized(&mut buffer, &color, format!(" {mode}"));
 
-        ok!(writer.print(&buffer));
+        self.flush(&writer, &buffer);
     }
 
     // The tree guide columns, one for each DEPTRACE level, continued when
     // the level has further siblings.
     fn print_indent(&self, deptrace: &[bool]) {
         for v in deptrace {
-            print!("{}", if *v { "|  " } else { "   " });
+            out!("{}", if *v { "|  " } else { "   " });
         }
     }
 
     fn print_preamble(&self, deptrace: &[bool]) {
         self.print_indent(&deptrace[0..deptrace.len() - 1]);
-        print!("\\_ ");
+        out!("\\_ ");
     }
 
     fn print_ldd(&self, dtneeded: &String, alias: Option<&str>, path: &String) {
@@ -164,7 +172,7 @@ impl Printer {
             .as_bytes()
         ));
 
-        ok!(writer.print(&buffer));
+        self.flush(&writer, &buffer);
     }
 
     pub fn print_dependency(
@@ -202,7 +210,7 @@ impl Printer {
     #[cfg(all(target_family = "unix", not(target_os = "macos")))]
     pub fn print_statically_linked(&self) {
         if self.ldd {
-            println!("        statically linked");
+            outln!("        statically linked");
         }
     }
 
@@ -220,7 +228,7 @@ impl Printer {
             format!(" [{}]", attrs.join(" "))
         };
         if self.ldd {
-            println!("        {} => not found{attrs}", alias.unwrap_or(dtneeded));
+            outln!("        {} => not found{attrs}", alias.unwrap_or(dtneeded));
             return;
         }
         // The recorded name, when the resolved module differs from it.
@@ -238,12 +246,12 @@ impl Printer {
                 .set_bold(true),
             format!("{dtneeded} not found{attrs}"),
         );
-        ok!(writer.print(&buffer));
+        self.flush(&writer, &buffer);
 
         if self.verbose {
             for location in searched {
                 self.print_indent(deptrace);
-                println!("   searched {location}");
+                outln!("   searched {location}");
             }
         }
     }
