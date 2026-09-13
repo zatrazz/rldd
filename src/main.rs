@@ -1,5 +1,8 @@
 use argh::FromArgs;
 
+#[macro_use]
+mod output;
+
 #[cfg(all(test, any(target_os = "android", target_os = "freebsd", windows)))]
 mod tempdir;
 
@@ -221,9 +224,11 @@ struct Options {
 #[cfg(target_os = "linux")]
 fn print_version_errors(arg: &str, errors: &[elf::VersionError]) {
     for error in errors {
-        println!(
+        outln!(
             "{arg}: {}: version `{}' not found (required by {})",
-            error.object, error.version, error.required_by
+            error.object,
+            error.version,
+            error.required_by
         );
     }
 }
@@ -276,9 +281,9 @@ fn main() {
                     let relocs = check_relocations(&deptree, true, true);
                     print_version_errors(&arg, &relocs.version_errors);
                     if !relocs.unused.is_empty() {
-                        println!("Unused direct dependencies:");
+                        outln!("Unused direct dependencies:");
                         for path in relocs.unused {
-                            println!("\t{path}");
+                            outln!("\t{path}");
                         }
                         exitcode = 1;
                     }
@@ -299,7 +304,7 @@ fn main() {
                     let undefined = check_imports(&ctx, &deptree, opts.function_relocs);
                     print_deps(&printer, &deptree);
                     for undef in undefined {
-                        println!("undefined symbol: {undef}\t({})", undef.object);
+                        outln!("undefined symbol: {undef}\t({})", undef.object);
                     }
                     continue;
                 }

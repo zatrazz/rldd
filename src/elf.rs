@@ -531,7 +531,7 @@ enum SearchStep {
 }
 
 fn print_search_path_information<P: AsRef<Path>>(filename: &P, config: &Config, elc: &ElfInfo) {
-    println!(
+    outln!(
         "{}: search path information\n\
         \x20 rpath: {}\n\
         \x20 preload: {}\n\

@@ -1,6 +1,6 @@
 // Configurable printer module.
 
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 
 // The SGR sequences for the normal (not intense) foreground colors, matching
 // what a terminal renders for the 30-37 range.
@@ -121,11 +121,9 @@ impl Printer {
         self.verbose
     }
 
-    // Write the assembled line out, ignoring the output error the way the
-    // tree listing has no way to report it.
-    fn flush(&self, out: &str) {
-        let mut stdout = std::io::stdout().lock();
-        let _ = stdout.write_all(out.as_bytes());
+    // Write the assembled line out.
+    fn flush(&self, line: &str) {
+        out!("{line}");
     }
 
     fn write_colorized(&self, out: &mut String, style: &Style, content: &str) {
@@ -221,13 +219,13 @@ impl Printer {
     // the level has further siblings.
     fn print_indent(&self, deptrace: &[bool]) {
         for v in deptrace {
-            print!("{}", if *v { "|  " } else { "   " });
+            out!("{}", if *v { "|  " } else { "   " });
         }
     }
 
     fn print_preamble(&self, deptrace: &[bool]) {
         self.print_indent(&deptrace[0..deptrace.len() - 1]);
-        print!("\\_ ");
+        out!("\\_ ");
     }
 
     fn print_ldd(&self, dtneeded: &String, alias: Option<&str>, path: &String) {
@@ -275,7 +273,7 @@ impl Printer {
     #[cfg(all(target_family = "unix", not(target_os = "macos")))]
     pub fn print_statically_linked(&self) {
         if self.ldd {
-            println!("        statically linked");
+            outln!("        statically linked");
         }
     }
 
@@ -293,7 +291,7 @@ impl Printer {
             format!(" [{}]", attrs.join(" "))
         };
         if self.ldd {
-            println!("        {} => not found{attrs}", alias.unwrap_or(dtneeded));
+            outln!("        {} => not found{attrs}", alias.unwrap_or(dtneeded));
             return;
         }
         // The recorded name, when the resolved module differs from it.
@@ -313,7 +311,7 @@ impl Printer {
         if self.verbose {
             for location in searched {
                 self.print_indent(deptrace);
-                println!("   searched {location}");
+                outln!("   searched {location}");
             }
         }
     }
