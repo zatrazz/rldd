@@ -166,16 +166,23 @@ mod tests {
     }
 }
 
-// Format a search path list for diagnostics printing.  The PE backend prints
-// each directory with its search order mode instead.
+// What the diagnostics print for an empty or absent list.
+#[cfg_attr(windows, allow(dead_code))]
+pub const EMPTY_LIST: &str = "(none)";
+
+// Format a list for diagnostics printing, separated the way the loader
+// environment variables are.  The PE backend prints each directory with its
+// search order mode instead.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn format_entries<'a>(entries: impl IntoIterator<Item = &'a str>) -> String {
+    let entries: Vec<&str> = entries.into_iter().collect();
+    if entries.is_empty() {
+        return EMPTY_LIST.to_string();
+    }
+    entries.join(&LIST_SEPARATOR.to_string())
+}
+
 #[cfg_attr(windows, allow(dead_code))]
 pub fn format_list(searchpaths: &SearchPathVec) -> String {
-    if searchpaths.is_empty() {
-        return "(none)".to_string();
-    }
-    searchpaths
-        .iter()
-        .map(|path| path.path.as_str())
-        .collect::<Vec<&str>>()
-        .join(&LIST_SEPARATOR.to_string())
+    format_entries(searchpaths.iter().map(|path| path.path.as_str()))
 }
