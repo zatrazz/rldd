@@ -18,6 +18,12 @@ pub fn get_name<P: AsRef<Path>>(path: &P) -> String {
         .to_string()
 }
 
+// The NAME entry of the DIR directory, joined with the platform separator
+// the way the loaders report it (unlike Path::join, NAME is appended as is).
+pub fn join(dir: &str, name: &str) -> String {
+    format!("{dir}{}{name}", std::path::MAIN_SEPARATOR)
+}
+
 // Map the whole FILE in memory for reading.
 pub fn map(file: &fs::File) -> Result<Mmap> {
     // SAFETY: the mapping is only read.  Another process modifying the file

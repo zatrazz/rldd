@@ -4,9 +4,10 @@
 
 use std::cell::OnceCell;
 use std::fs;
-use std::path::MAIN_SEPARATOR;
 
 use object::pe;
+
+use crate::pathutils;
 
 // The identity of a dependent assembly, as recorded on the manifest.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,7 +32,7 @@ pub struct WinSxs {
 impl WinSxs {
     pub fn new(windows_dir: &str) -> WinSxs {
         WinSxs {
-            root: format!("{windows_dir}{MAIN_SEPARATOR}WinSxS"),
+            root: pathutils::join(windows_dir, "WinSxS"),
             dirs: OnceCell::new(),
         }
     }
@@ -76,7 +77,7 @@ impl WinSxs {
         arch_names(&assembly.arch, machine)
             .iter()
             .find_map(|arch| self.best_build(assembly, arch))
-            .map(|dir| format!("{}{MAIN_SEPARATOR}{dir}", self.root))
+            .map(|dir| pathutils::join(&self.root, &dir))
     }
 
     fn best_build(&self, assembly: &Assembly, arch: &str) -> Option<&String> {

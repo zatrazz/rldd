@@ -103,13 +103,7 @@ impl arenatree::EqualString for DepNode {
         } else if self.path.is_none() || !Path::new(other).is_absolute() {
             *other == self.name
         } else {
-            *other
-                == format!(
-                    "{}{}{}",
-                    self.path.as_ref().unwrap(),
-                    std::path::MAIN_SEPARATOR,
-                    self.name
-                )
+            *other == pathutils::join(self.path.as_ref().unwrap(), &self.name)
         }
     }
 
@@ -121,8 +115,7 @@ impl arenatree::EqualString for DepNode {
             let Some(path) = &self.path else {
                 return false;
             };
-            let resolved = format!("{}{}{}", path, std::path::MAIN_SEPARATOR, self.name);
-            return other.eq_ignore_ascii_case(&resolved);
+            return other.eq_ignore_ascii_case(&pathutils::join(path, &self.name));
         }
         pathutils::get_name(&Path::new(other)).eq_ignore_ascii_case(&self.name)
     }

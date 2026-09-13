@@ -360,7 +360,7 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
         let mut searched = Vec::new();
         let redirect = find_in_dirs(config, &name, &item.redirect, &mut searched);
         let lookup = match &redirect {
-            Some((_, dir, _)) => format!("{dir}{}{name}", std::path::MAIN_SEPARATOR),
+            Some((_, dir, _)) => pathutils::join(dir, &name),
             None => name.clone(),
         };
 
@@ -416,7 +416,7 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
             continue;
         };
 
-        let resolved = format!("{dir}{}{name}", std::path::MAIN_SEPARATOR);
+        let resolved = pathutils::join(&dir, &name);
         if ignored(config, &resolved) {
             continue;
         }
@@ -546,9 +546,8 @@ pub fn check_imports(ctx: &PeContext, deptree: &DepTree, delay_load: bool) -> Ve
                 .find(|child| child.name.eq_ignore_ascii_case(&name))
                 .cloned()
                 .or_else(|| {
-                    sxs.iter().find_map(|dir| {
-                        deptree.get(&format!("{dir}{}{name}", std::path::MAIN_SEPARATOR))
-                    })
+                    sxs.iter()
+                        .find_map(|dir| deptree.get(&pathutils::join(dir, &name)))
                 })
                 .or_else(|| deptree.get(&name));
             let Some(target) = target else {

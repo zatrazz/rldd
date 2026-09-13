@@ -1350,7 +1350,7 @@ fn resolve_dependencies(
             // The resolved path of this dependency, used as the reference path
             // for its own dependencies resolution.
             let depref = match &r.0 {
-                Some(path) => format!("{}{}{}", path, std::path::MAIN_SEPARATOR, r.1),
+                Some(path) => pathutils::join(path, &r.1),
                 None => r.1.clone(),
             };
             // The loaders recognize a file already loaded under another name
