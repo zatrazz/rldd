@@ -136,10 +136,16 @@ impl Printer {
         ok!(writer.print(&buffer));
     }
 
-    fn print_preamble(&self, deptrace: &[bool]) {
-        for v in &deptrace[0..deptrace.len() - 1] {
+    // The tree guide columns, one for each DEPTRACE level, continued when
+    // the level has further siblings.
+    fn print_indent(&self, deptrace: &[bool]) {
+        for v in deptrace {
             print!("{}", if *v { "|  " } else { "   " });
         }
+    }
+
+    fn print_preamble(&self, deptrace: &[bool]) {
+        self.print_indent(&deptrace[0..deptrace.len() - 1]);
         print!("\\_ ");
     }
 
@@ -236,9 +242,7 @@ impl Printer {
 
         if self.verbose {
             for location in searched {
-                for v in deptrace {
-                    print!("{}", if *v { "|  " } else { "   " });
-                }
+                self.print_indent(deptrace);
                 println!("   searched {location}");
             }
         }
