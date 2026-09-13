@@ -34,18 +34,13 @@ mod ld_preload;
 mod ld_so_cache;
 #[cfg(target_os = "netbsd")]
 mod ld_so_conf_netbsd;
+mod loader;
 #[cfg(target_os = "linux")]
 mod symbols;
+use loader::{Loader, Rtld, SearchCache};
 
-#[cfg(target_os = "linux")]
-type LoaderCache = ld_so_cache::LdCache;
-#[cfg(target_os = "android")]
-type LoaderCache = ld_config_txt::LdCache;
-#[cfg(all(
-    target_family = "unix",
-    not(any(target_os = "linux", target_os = "android"))
-))]
-type LoaderCache = search_path::SearchPathVec;
+type LoaderCache = <Rtld as Loader>::Cache;
+type ObjectNamespace = <LoaderCache as SearchCache>::Namespace;
 
 type DepsVec = Vec<String>;
 
@@ -131,46 +126,12 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
 }
 
 #[cfg(target_os = "linux")]
-fn handle_loader(elc: &mut ElfInfo) {
-    elc.is_musl = interp::is_musl(&elc.interp)
-        || elc.deps.iter().any(|dep| dep.starts_with("libc.musl-"))
-        || (elc.interp.is_none() && is_musl_system());
-}
-
-#[cfg(target_os = "linux")]
 fn is_musl_system() -> bool {
     use std::sync::OnceLock;
     static MUSL_SYSTEM: OnceLock<bool> = OnceLock::new();
     *MUSL_SYSTEM
         .get_or_init(|| !Path::new("/etc/ld.so.cache").exists() && find_musl_loader().is_some())
 }
-#[cfg(all(target_family = "unix", not(target_os = "linux")))]
-fn handle_loader(_elc: &mut ElfInfo) {}
-
-// The NetBSD loader handles DT_RPATH and DT_RUNPATH the same way, where both
-// are recorded as the object rpath (the last tag wins).
-#[cfg(target_os = "netbsd")]
-fn handle_search_paths(elc: &mut ElfInfo) {
-    if elc.has_runpath {
-        elc.rpath = std::mem::take(&mut elc.runpath);
-        elc.has_runpath = false;
-    }
-}
-// The musl loader takes DT_RUNPATH over DT_RPATH, but searches it the way
-// it searches DT_RPATH.  For the object own dependencies and, walking the
-// chain of the objects that needed a library, for the indirect ones.
-#[cfg(target_os = "linux")]
-fn handle_search_paths(elc: &mut ElfInfo) {
-    if elc.is_musl && elc.has_runpath {
-        elc.rpath = std::mem::take(&mut elc.runpath);
-        elc.has_runpath = false;
-    }
-}
-#[cfg(all(
-    target_family = "unix",
-    not(any(target_os = "netbsd", target_os = "linux"))
-))]
-fn handle_search_paths(_elc: &mut ElfInfo) {}
 
 fn parse_elf_program_headers<Elf: FileHeader>(
     endian: Elf::Endian,
@@ -183,8 +144,8 @@ fn parse_elf_program_headers<Elf: FileHeader>(
     match parse_elf_dynamic_program_header(endian, data, elf, headers, origin, platform) {
         Ok(mut elc) => {
             elc.interp = parse_elf_interp::<Elf>(endian, data, headers);
-            handle_loader(&mut elc);
-            handle_search_paths(&mut elc);
+            Rtld::handle_loader(&mut elc);
+            Rtld::handle_search_paths(&mut elc);
             Ok(elc)
         }
         Err(e) => Err(e),
@@ -379,29 +340,6 @@ fn replace_dyn_str(dynstr: &str, token: &str, value: &str) -> String {
     newdynstr.replace(&format!("${{{token}}}"), value)
 }
 
-#[cfg(target_os = "linux")]
-fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
-    endian: Elf::Endian,
-    elf: &Elf,
-    dynstr: &mut String,
-) {
-    if let Ok(libdir) = system_dirs::get_slibdir(
-        elf.e_machine(endian),
-        elf.e_ident().class,
-        elf.e_flags(endian),
-    ) {
-        *dynstr = replace_dyn_str(dynstr, "LIB", libdir);
-    }
-}
-
-#[cfg(all(target_family = "unix", not(target_os = "linux")))]
-fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
-    _endian: Elf::Endian,
-    _elf: &Elf,
-    _dynstr: &mut str,
-) {
-}
-
 fn parse_elf_dyn_searchpath<Elf: FileHeader>(
     endian: Elf::Endian,
     elf: &Elf,
@@ -428,7 +366,7 @@ fn expand_dst<Elf: FileHeader>(
 ) -> String {
     let mut newdynstr = replace_dyn_str(dynstr, "ORIGIN", origin);
 
-    parse_elf_dyn_searchpath_lib(endian, elf, &mut newdynstr);
+    Rtld::parse_elf_dyn_searchpath_lib(endian, elf, &mut newdynstr);
 
     let platform = match platform {
         Some(platform) => platform.to_string(),
@@ -490,7 +428,7 @@ fn open_elf_file<P: AsRef<Path>>(
     let file = fs::File::open(filename).map_err(|_| Error::other("Failed to open file"))?;
     let mmap = pathutils::map(&file)?;
 
-    let origin = origin_directory(filename, melc);
+    let origin = Rtld::origin_directory(filename, melc);
 
     match parse_object(&mmap, &origin, platform) {
         Ok(elc) => {
@@ -506,97 +444,10 @@ fn open_elf_file<P: AsRef<Path>>(
     }
 }
 
-// The directory the $ORIGIN token expands to for the object being opened:
-// - The glibc loader uses the directory of the path the object was loaded
-//   through (the executable one is canonicalized beforehand).
-// - The FreeBSD and OpenBSD loaders canonicalize the object path first
-//   (realpath), so a symlink or a '..' component on a search path does not
-//   leak into the expansion.
-// - The NetBSD loader expands the token to the executable directory for
-//   every object, so the requesting object value is propagated.
-#[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
-fn origin_directory<P: AsRef<Path>>(filename: &P, _melc: Option<&ElfInfo>) -> String {
-    let path = fs::canonicalize(filename).unwrap_or_else(|_| filename.as_ref().to_path_buf());
-    path.parent()
-        .and_then(Path::to_str)
-        .unwrap_or("")
-        .to_string()
-}
-#[cfg(target_os = "netbsd")]
-fn origin_directory<P: AsRef<Path>>(filename: &P, melc: Option<&ElfInfo>) -> String {
-    match melc {
-        Some(melc) => melc.origin.clone(),
-        None => filename
-            .as_ref()
-            .parent()
-            .and_then(Path::to_str)
-            .unwrap_or("")
-            .to_string(),
-    }
-}
-#[cfg(all(
-    target_family = "unix",
-    not(any(target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))
-))]
-fn origin_directory<P: AsRef<Path>>(filename: &P, _melc: Option<&ElfInfo>) -> String {
-    filename
-        .as_ref()
-        .parent()
-        .and_then(Path::to_str)
-        .unwrap_or("")
-        .to_string()
-}
-
 // The loaders do not check the DT_SONAME of the file they open against the
 // name requested, only the ELF header against the loading object.
 fn match_elf_name(melc: &ElfInfo, elc: &ElfInfo) -> bool {
-    check_elf_header(elc) && match_elf_header(melc, elc)
-}
-
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn check_elf_header(elc: &ElfInfo) -> bool {
-    let maxver = match elc.e_machine {
-        EM_MIPS | EM_MIPS_RS3_LE => 6,
-        EM_PPC | EM_PPC64 | EM_SPARC | EM_X86_64 | EM_RISCV => 5,
-        _ => 4,
-    };
-
-    let check_elf_osabi = match elc.e_machine {
-        EM_ARM => |osabi: OsAbi| {
-            osabi == ELFOSABI_SYSV || osabi == ELFOSABI_GNU || osabi == ELFOSABI_ARM_AEABI
-        },
-        _ => |osabi: OsAbi| osabi == ELFOSABI_SYSV || osabi == ELFOSABI_GNU,
-    };
-
-    let check_elf_abiversion = match elc.e_machine {
-        EM_MIPS => |osabi: OsAbi, ver: u8, maxver: u8| {
-            ver == 0
-                || (osabi == ELFOSABI_SYSV && ver < 6)
-                || (osabi == ELFOSABI_GNU && ver < maxver)
-        },
-        _ => {
-            |osabi: OsAbi, ver: u8, maxver: u8| ver == 0 || (osabi == ELFOSABI_GNU && ver < maxver)
-        }
-    };
-
-    check_elf_osabi(elc.ei_osabi) && check_elf_abiversion(elc.ei_osabi, elc.ei_abiver, maxver)
-}
-#[cfg(target_os = "freebsd")]
-fn check_elf_header(elc: &ElfInfo) -> bool {
-    elc.ei_osabi == ELFOSABI_FREEBSD
-}
-#[cfg(target_os = "openbsd")]
-fn check_elf_header(elc: &ElfInfo) -> bool {
-    elc.ei_osabi == ELFOSABI_SYSV || elc.ei_osabi == ELFOSABI_OPENBSD
-}
-// The NetBSD loader does not check the EI_OSABI field.
-#[cfg(target_os = "netbsd")]
-fn check_elf_header(_elc: &ElfInfo) -> bool {
-    true
-}
-#[cfg(any(target_os = "illumos", target_os = "solaris"))]
-fn check_elf_header(elc: &ElfInfo) -> bool {
-    elc.ei_osabi == ELFOSABI_SYSV || elc.ei_osabi == ELFOSABI_SOLARIS
+    Rtld::check_elf_header(elc) && match_elf_header(melc, elc)
 }
 
 fn same_file(a: &str, b: &str) -> bool {
@@ -628,39 +479,6 @@ struct Config<'a> {
     libmap: Option<ld_libmap_freebsd::LibMap>,
 }
 
-// Remap the dependency name using the libmap.conf mappings for the referencing
-// object path (FreeBSD only).
-#[cfg(target_os = "freebsd")]
-fn libmap_dependency(config: &Config, refpath: &str, dependency: &String) -> String {
-    match &config.libmap {
-        Some(libmap) => libmap
-            .lookup(refpath, dependency)
-            .map(|target| target.to_string())
-            .unwrap_or_else(|| dependency.to_string()),
-        None => dependency.to_string(),
-    }
-}
-#[cfg(all(target_family = "unix", not(target_os = "freebsd")))]
-fn libmap_dependency(_config: &Config, _refpath: &str, dependency: &String) -> String {
-    dependency.to_string()
-}
-
-#[cfg(target_os = "linux")]
-fn format_ld_cache(ld_cache: &LoaderCache) -> String {
-    format!("{} entries", ld_cache.len())
-}
-#[cfg(target_os = "android")]
-fn format_ld_cache(ld_cache: &LoaderCache) -> String {
-    format!("{} namespaces", ld_cache.namespaces_count())
-}
-#[cfg(all(
-    target_family = "unix",
-    not(any(target_os = "linux", target_os = "android"))
-))]
-fn format_ld_cache(ld_cache: &LoaderCache) -> String {
-    search_path::format_list(ld_cache)
-}
-
 fn push_searched(r: &mut Vec<String>, name: &str, searchpaths: &search_path::SearchPathVec) {
     if !searchpaths.is_empty() {
         r.push(format!("{name}: {}", search_path::format_list(searchpaths)));
@@ -675,10 +493,10 @@ fn searched_locations(config: &Config, elc: &ElfInfo, dependency: &str) -> Vec<S
         r.push(dependency.to_string());
         return r;
     }
-    for step in SEARCH_ORDER {
+    for step in Rtld::SEARCH_ORDER {
         match step {
             SearchStep::Rpath => {
-                if rpath_search(elc) {
+                if Rtld::rpath_search(elc) {
                     push_searched(&mut r, "rpath", &elc.rpath);
                 }
             }
@@ -712,28 +530,6 @@ enum SearchStep {
     SystemDirs,
 }
 
-// The NetBSD loader searches the LD_LIBRARY_PATH directories, then the
-// ld.so.conf ones, then the requesting object DT_RPATH/DT_RUNPATH, and at last
-// the default directories.
-#[cfg(target_os = "netbsd")]
-const SEARCH_ORDER: &[SearchStep] = &[
-    SearchStep::LibraryPath,
-    SearchStep::Cache,
-    SearchStep::Rpath,
-    SearchStep::SystemDirs,
-];
-// The other loaders search the object DT_RPATH, the LD_LIBRARY_PATH
-// directories, the object DT_RUNPATH, the loader cache/hints, and at last the
-// default directories.
-#[cfg(all(target_family = "unix", not(target_os = "netbsd")))]
-const SEARCH_ORDER: &[SearchStep] = &[
-    SearchStep::Rpath,
-    SearchStep::LibraryPath,
-    SearchStep::Runpath,
-    SearchStep::Cache,
-    SearchStep::SystemDirs,
-];
-
 fn print_search_path_information<P: AsRef<Path>>(filename: &P, config: &Config, elc: &ElfInfo) {
     println!(
         "{}: search path information\n\
@@ -752,34 +548,9 @@ fn print_search_path_information<P: AsRef<Path>>(filename: &P, config: &Config, 
         config
             .ld_cache
             .as_ref()
-            .map_or(search_path::EMPTY_LIST.to_string(), format_ld_cache),
+            .map_or(search_path::EMPTY_LIST.to_string(), |cache| cache.summary()),
         search_path::format_list(&config.system_dirs),
     );
-}
-
-// Function that mimic the dynamic loader resolution.
-#[cfg(target_os = "linux")]
-fn resolve_binary_arch(
-    elc: &ElfInfo,
-    deptree: &mut DepTree,
-    depp: usize,
-) -> Result<(), std::io::Error> {
-    // musl loader and libc is on the same shared object, so adds a synthetic dependendy for
-    // the binary so it is also shown and to be returned in case a objects has libc.so
-    // as needed.
-    if !elc.is_musl {
-        return Ok(());
-    }
-
-    let interp = match &elc.interp {
-        Some(interp) => Some(interp.clone()),
-        None => find_musl_loader(),
-    };
-    if let Some(interp) = interp {
-        let path = Path::new(&interp);
-        deptree.addnode(DepNode::from_path(&path, DepMode::SystemDirs), depp);
-    }
-    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -792,14 +563,6 @@ fn find_musl_loader() -> Option<String> {
         }
     }
     None
-}
-#[cfg(all(target_family = "unix", not(target_os = "linux")))]
-fn resolve_binary_arch(
-    _elc: &ElfInfo,
-    _deptree: &mut DepTree,
-    _depp: usize,
-) -> Result<(), std::io::Error> {
-    Ok(())
 }
 
 // The resolution context: the loader search cache along with the command line
@@ -838,13 +601,8 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
 
     let elc = open_elf_file(&filename, None, ctx.platform.as_ref(), false)?;
 
-    // The OpenBSD loader matches a library by name and major version, picking the best
-    // minor available on the directory (even for the dlopen argument). Mimic it for
-    // shared library inputs (executables are executed directly, with no redirection).
-    #[cfg(target_os = "openbsd")]
-    let (filename, elc) = redirect_to_best_minor(filename, elc, ctx.platform.as_ref());
-
-    let mut elc = elc;
+    // The loader might inspect another file than the one given.
+    let (filename, mut elc) = Rtld::redirect_root(filename, elc, ctx.platform.as_ref());
 
     // The trace reports an object without any DT_NEEDED entry as statically
     // linked, and does not list the filtees of the root object (it lists the ones of
@@ -865,25 +623,13 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
 
     // The cache/hints/config file is usually an optional file and failing to open it
     // does not incur on a resolution failure.
-    load_so_cache(&mut ctx.ld_cache, &filename, &elc);
+    Rtld::load_so_cache(&mut ctx.ld_cache, &filename, &elc);
 
     // Same for glibc ld.so.preload file.
     let mut preload = ctx.ld_preload.to_vec();
     // glibc first parses LD_PRELOAD and then ld.so.preload.
     // We need a new vector for the case of binaries with different interpreters.
-    preload.extend(load_ld_so_preload(&elc.interp));
-
-    // android loader only uses the default system search patch if the ld.so.config file can not
-    // be loader or if an error was found parsing it (for instance if the executable does not
-    // has an entry associated in the section).
-    #[cfg(target_os = "android")]
-    fn load_system_dirs(ld_cache: &Option<LoaderCache>) -> bool {
-        ld_cache.is_none()
-    }
-    #[cfg(not(target_os = "android"))]
-    fn load_system_dirs(_ld_cache: &Option<LoaderCache>) -> bool {
-        true
-    }
+    preload.extend(Rtld::load_ld_so_preload(&elc.interp));
 
     #[cfg(target_os = "linux")]
     let loader = elc.interp.clone().or_else(|| {
@@ -894,7 +640,7 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
         })
     });
 
-    let system_dirs = if load_system_dirs(&ctx.ld_cache) {
+    let system_dirs = if Rtld::load_system_dirs(&ctx.ld_cache) {
         #[cfg(target_os = "linux")]
         let dirs = system_dirs::get_system_dirs(loader.as_deref(), &elc)?;
         #[cfg(not(target_os = "linux"))]
@@ -923,174 +669,12 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
 
     let depp = deptree.addroot(DepNode::from_path(&filename, DepMode::Executable));
 
-    resolve_binary_arch(&elc, &mut deptree, depp)?;
+    Rtld::resolve_binary_arch(&elc, &mut deptree, depp)?;
 
     let refpath = filename.to_string_lossy().into_owned();
     resolve_dependencies(&config, elc, refpath, &mut deptree, depp);
 
     Ok(deptree)
-}
-
-#[cfg(target_os = "openbsd")]
-fn redirect_to_best_minor(
-    filename: std::path::PathBuf,
-    elc: ElfInfo,
-    platform: Option<&String>,
-) -> (std::path::PathBuf, ElfInfo) {
-    if elc.interp.is_some() {
-        return (filename, elc);
-    }
-    let (Some(dir), Some(name)) = (
-        filename.parent().and_then(|p| p.to_str()),
-        filename.file_name().and_then(|n| n.to_str()),
-    ) else {
-        return (filename, elc);
-    };
-    let candidate = dependency_path(dir, name);
-    if candidate != filename {
-        if let Ok(nelc) = open_elf_file(&candidate, None, platform, false) {
-            return (candidate, nelc);
-        }
-    }
-    (filename, elc)
-}
-
-#[cfg(target_os = "linux")]
-fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, _binary: &P, elc: &ElfInfo) {
-    if interp::is_glibc(&elc.interp) {
-        // glibc's ld.so.cache is shared between all executables, so there is no need
-        // to reload for multiple entries.
-        if ld_cache.is_none() {
-            *ld_cache = ld_so_cache::parse_ld_so_cache(
-                &Path::new("/etc/ld.so.cache"),
-                elc.ei_class,
-                elc.e_machine,
-                elc.e_flags,
-            )
-            .ok();
-        }
-    };
-}
-#[cfg(target_os = "android")]
-fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, binary: &P, elc: &ElfInfo) {
-    if let Some(ld_config_path) =
-        ld_config_txt::get_ld_config_path(binary, elc.e_machine, elc.ei_class)
-    {
-        // On Android 10 and forward each executable might have a associated ld.config.txt
-        // file in different paths, so we need to reload for each argument.
-        // A shared library has no PT_INTERP segment, so no sanitizer applies.
-        *ld_cache = ld_config_txt::parse_ld_config_txt(
-            &Path::new(&ld_config_path),
-            binary,
-            elc.interp.as_deref(),
-            elc.ei_class,
-        )
-        .ok();
-    }
-}
-#[cfg(target_os = "freebsd")]
-fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, _binary: &P, elc: &ElfInfo) {
-    // The 32-bit compat objects use a separate hints file (the rtld
-    // COMPAT_libcompat suffix), so the cache is reloaded for each binary.
-    let hints = if cfg!(target_pointer_width = "64") && elc.ei_class == ELFCLASS32 {
-        "/var/run/ld-elf32.so.hints"
-    } else {
-        "/var/run/ld-elf.so.hints"
-    };
-    *ld_cache = ld_hints_freebsd::parse_ld_so_hints(&Path::new(hints)).ok();
-}
-#[cfg(target_os = "openbsd")]
-fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, _binary: &P, _ecl: &ElfInfo) {
-    if ld_cache.is_none() {
-        *ld_cache = ld_hints_openbsd::parse_ld_so_hints(&Path::new("/var/run/ld.so.hints")).ok()
-    }
-}
-#[cfg(target_os = "netbsd")]
-fn load_so_cache<P: AsRef<Path>>(ld_cache: &mut Option<LoaderCache>, _binary: &P, _ecl: &ElfInfo) {
-    if ld_cache.is_none() {
-        *ld_cache = ld_so_conf_netbsd::parse_ld_so_conf(&Path::new("/etc/ld.so.conf")).ok()
-    }
-}
-#[cfg(any(target_os = "illumos", target_os = "solaris"))]
-fn load_so_cache<P: AsRef<Path>>(_ld_cache: &mut Option<LoaderCache>, _binary: &P, _ecl: &ElfInfo) {
-}
-
-#[cfg(target_os = "linux")]
-fn load_ld_so_preload(interp: &Option<String>) -> Vec<String> {
-    if interp::is_glibc(interp) {
-        return ld_preload::parse_ld_so_preload(&Path::new("/etc/ld.so.preload"));
-    }
-    Vec::new()
-}
-#[cfg(all(target_family = "unix", not(target_os = "linux")))]
-fn load_ld_so_preload(_interp: &Option<String>) -> Vec<String> {
-    Vec::new()
-}
-
-// Return the path candidate for a dependency on a search directory.  OpenBSD
-// shared objects do not have a DT_SONAME and the DT_NEEDED entries carry the
-// full libname.so.major.minor name, with the loader matching the major version
-// and picking the best minor available on the directory.
-#[cfg(target_os = "openbsd")]
-fn dependency_path(dir: &str, dtneeded: &str) -> std::path::PathBuf {
-    fn parse_version(name: &str) -> Option<(&str, u64)> {
-        let idx = name.find(".so.")?;
-        let stem = &name[..idx + 3];
-        // The version might be either major.minor or only the major.
-        let major = match name[idx + 4..].split_once('.') {
-            Some((major, minor)) => {
-                minor.parse::<u64>().ok()?;
-                major
-            }
-            None => &name[idx + 4..],
-        };
-        Some((stem, major.parse().ok()?))
-    }
-
-    if let Some((stem, major)) = parse_version(dtneeded) {
-        let prefix = format!("{stem}.{major}.");
-        let mut best: Option<(u64, std::path::PathBuf)> = None;
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                if let Some(minor) = entry
-                    .file_name()
-                    .to_str()
-                    .and_then(|filename| filename.strip_prefix(&prefix))
-                    .and_then(|minor| minor.parse::<u64>().ok())
-                {
-                    if best.as_ref().is_none_or(|(m, _)| minor > *m) {
-                        best = Some((minor, entry.path()));
-                    }
-                }
-            }
-        }
-        if let Some((_, path)) = best {
-            return path;
-        }
-    }
-    Path::new(dir).join(dtneeded)
-}
-#[cfg(all(target_family = "unix", not(target_os = "openbsd")))]
-fn dependency_path(dir: &str, dtneeded: &str) -> std::path::PathBuf {
-    Path::new(dir).join(dtneeded)
-}
-
-#[cfg(target_os = "linux")]
-fn rpath_search(elc: &ElfInfo) -> bool {
-    !elc.has_runpath
-}
-// The bionic loader does not implement DT_RPATH at all: it warns about the
-// unused dynamic entry and only searches DT_RUNPATH.
-#[cfg(target_os = "android")]
-fn rpath_search(_elc: &ElfInfo) -> bool {
-    false
-}
-#[cfg(all(
-    target_family = "unix",
-    not(any(target_os = "linux", target_os = "android"))
-))]
-fn rpath_search(_elc: &ElfInfo) -> bool {
-    true
 }
 
 // Returned from resolve_dependency_1 with resolved information.
@@ -1106,18 +690,6 @@ struct ResolvedDependency<'a> {
     // dependencies (Android only).
     namespace: ObjectNamespace,
 }
-
-// The Android linker namespace an object is loaded in, where it can be
-// the ld.config.txt namespace name, or None for the default one.  A dependency
-// is resolved from the namespace of the object that requests it, and not always
-// from the default one.  So a library loaded through a namespace link resolves
-// its own dependencies with the linked namespace search paths.
-#[cfg(target_os = "android")]
-type ObjectNamespace = Option<String>;
-#[cfg(all(target_family = "unix", not(target_os = "android")))]
-#[derive(Clone, Debug, Default)]
-// The other loaders have no equivalent, so the field carries nothing there.
-struct ObjectNamespace;
 
 // A pending dependency to resolve: the DT_NEEDED name along the index of the
 // loading object information (on the parents vector) and the dependency tree
@@ -1193,7 +765,7 @@ fn resolve_dependencies(
 
         // FreeBSD libmap.conf may remap the dependency name based on the
         // referencing object path.
-        let dependency = libmap_dependency(config, refpath, &item.dependency);
+        let dependency = Rtld::libmap_dependency(config, refpath, &item.dependency);
 
         #[cfg(target_os = "openbsd")]
         let dependency = match &openbsd_libc {
@@ -1405,7 +977,7 @@ fn resolve_dependencies(
         }
     }
 
-    add_loader_dependency(config, &parents[0].0, deptree, root_depp);
+    Rtld::add_loader_dependency(config, &parents[0].0, deptree, root_depp);
 }
 
 // The loader is not subject to the dependency search, and only the soname
@@ -1417,13 +989,7 @@ fn resolve_loader<'a>(
     dtneeded: &'a String,
 ) -> Option<ResolvedDependency<'a>> {
     if let Some(ld_cache) = config.ld_cache {
-        if let Some(dep) = resolve_dependency_ld_cache(
-            dtneeded,
-            ld_cache,
-            config.platform,
-            elc,
-            &Default::default(),
-        ) {
+        if let Some(dep) = ld_cache.resolve(dtneeded, config.platform, elc, &Default::default()) {
             return Some(dep);
         }
     }
@@ -1437,71 +1003,6 @@ fn resolve_loader<'a>(
     )
 }
 
-// The dynamic loader is always loaded, and ldd always shows it.  The libc.so is
-// explicitly lists it as a dependency, but an object might not depend on libc at
-// all.  Objects without any dependency are skipped, since the loader is not
-// involved.
-#[cfg(target_os = "linux")]
-fn add_loader_dependency(config: &Config, elc: &ElfInfo, deptree: &mut DepTree, root_depp: usize) {
-    if !interp::is_glibc(&elc.interp) || deptree.arena[root_depp].children.is_empty() {
-        return;
-    }
-    if deptree
-        .arena
-        .iter()
-        .any(|n| interp::is_glibc_name(&n.val.name))
-    {
-        return;
-    }
-
-    // For an executable the PT_INTERP segment has the loader path.
-    if let Some(interp) = &elc.interp {
-        let path = Path::new(interp);
-        if path.exists() {
-            deptree.addnode(DepNode::from_path(&path, DepMode::Direct), root_depp);
-            return;
-        }
-    }
-
-    // Otherwise resolve the loader soname through the loader cache and the
-    // system directories (only the soname matching the object architecture
-    // resolves).  The object search paths do not apply, since the loader is
-    // not subject to the dependency search.
-    for name in interp::glibc_names() {
-        let dtneeded = name.to_string();
-        if let Some(dep) = resolve_loader(config, elc, &dtneeded) {
-            deptree.addnode(
-                DepNode::new(Some(dep.path.to_string()), dep.filename.clone(), dep.mode),
-                root_depp,
-            );
-            return;
-        }
-    }
-}
-// The OpenBSD ldd lists the loader (/usr/libexec/ld.so) for executables (the
-// dlopen trace used for shared libraries does not show it).
-#[cfg(target_os = "openbsd")]
-fn add_loader_dependency(_config: &Config, elc: &ElfInfo, deptree: &mut DepTree, root_depp: usize) {
-    if let Some(interp) = &elc.interp {
-        let path = Path::new(interp);
-        if path.exists() {
-            deptree.addnode(DepNode::from_path(&path, DepMode::Direct), root_depp);
-        }
-    }
-}
-#[cfg(all(
-    target_family = "unix",
-    not(target_os = "linux"),
-    not(target_os = "openbsd")
-))]
-fn add_loader_dependency(
-    _config: &Config,
-    _elc: &ElfInfo,
-    _deptree: &mut DepTree,
-    _root_depp: usize,
-) {
-}
-
 // Try DTNEEDED on the DIR directory, returning it when the object there
 // matches the requesting ELC one.
 fn search_dir<'a>(
@@ -1512,7 +1013,7 @@ fn search_dir<'a>(
     mode: DepMode,
     namespace: &ObjectNamespace,
 ) -> Option<ResolvedDependency<'a>> {
-    let path = dependency_path(dir, dtneeded);
+    let path = Rtld::dependency_path(dir, dtneeded);
     let elc = open_elf_file(&path, Some(elc), platform, false).ok()?;
     Some(ResolvedDependency {
         elc,
@@ -1576,7 +1077,7 @@ fn resolve_dependency_1<'a>(
         search_dirs(searchpaths, dtneeded, elc, config.platform, mode, namespace)
     };
 
-    for step in SEARCH_ORDER {
+    for step in Rtld::SEARCH_ORDER {
         let dep = match step {
             // The rpath field holds the object own DT_RPATH along with any
             // inherited part.  The glibc loader skips the whole search
@@ -1584,15 +1085,16 @@ fn resolve_dependency_1<'a>(
             // has a DT_RUNPATH, while the BSD loaders still search the main
             // object DT_RPATH (the object own rpath is already cleared on
             // DT_RUNPATH presence).
-            SearchStep::Rpath if rpath_search(elc) => search(&elc.rpath, DepMode::DtRpath),
+            SearchStep::Rpath if Rtld::rpath_search(elc) => search(&elc.rpath, DepMode::DtRpath),
             SearchStep::Rpath => None,
             SearchStep::LibraryPath => search(config.ld_library_path, DepMode::LdLibraryPath),
             SearchStep::Runpath => search(&elc.runpath, DepMode::DtRunpath),
             // Skip the system paths if DF_1_NODEFLIB is set.
             SearchStep::Cache | SearchStep::SystemDirs if elc.nodeflibs => None,
-            SearchStep::Cache => config.ld_cache.as_ref().and_then(|ld_cache| {
-                resolve_dependency_ld_cache(dtneeded, ld_cache, config.platform, elc, namespace)
-            }),
+            SearchStep::Cache => config
+                .ld_cache
+                .as_ref()
+                .and_then(|ld_cache| ld_cache.resolve(dtneeded, config.platform, elc, namespace)),
             SearchStep::SystemDirs => search(&config.system_dirs, DepMode::SystemDirs),
         };
         if dep.is_some() {
@@ -1601,103 +1103,6 @@ fn resolve_dependency_1<'a>(
     }
 
     None
-}
-
-#[cfg(target_os = "linux")]
-fn resolve_dependency_ld_cache<'a>(
-    dtneeded: &'a String,
-    ld_cache: &'a LoaderCache,
-    platform: Option<&String>,
-    elc: &'a ElfInfo,
-    _namespace: &ObjectNamespace,
-) -> Option<ResolvedDependency<'a>> {
-    let dir = ld_cache.get(dtneeded)?;
-    search_dir(
-        dir,
-        dtneeded,
-        elc,
-        platform,
-        DepMode::LdCache,
-        &Default::default(),
-    )
-}
-
-#[cfg(target_os = "android")]
-fn resolve_dependency_ld_cache<'a>(
-    dtneeded: &'a String,
-    ld_cache: &'a LoaderCache,
-    platform: Option<&String>,
-    elc: &'a ElfInfo,
-    namespace: &ObjectNamespace,
-) -> Option<ResolvedDependency<'a>> {
-    // The search starts on the namespace the requesting object was loaded in
-    // (the default one for the executable itself) and follows the namespaces
-    // it links against, without following further links.  An object resolved
-    // through a link is loaded on the linked namespace, which is the one its
-    // own dependencies are then resolved from.
-    let current_ns = match namespace {
-        Some(name) => ld_cache.get_namespace(name)?,
-        None => ld_cache.get_default_namespace()?,
-    };
-
-    if let Some(resolved) = search_dirs(
-        &current_ns.search_paths,
-        dtneeded,
-        elc,
-        platform,
-        DepMode::LdCache,
-        namespace,
-    ) {
-        return Some(resolved);
-    }
-
-    for link in &current_ns.namespaces {
-        // A link only makes the libraries on its shared_libs list
-        // accessible (unless it allows all of them).
-        if !link.is_accessible(dtneeded) {
-            continue;
-        }
-
-        if let Some(linked_ns) = ld_cache.get_namespace(&link.namespace) {
-            if !linked_ns.is_accessible(dtneeded) {
-                continue;
-            }
-
-            if let Some(resolved) = search_dirs(
-                &linked_ns.search_paths,
-                dtneeded,
-                elc,
-                platform,
-                DepMode::LdCache,
-                &Some(link.namespace.clone()),
-            ) {
-                return Some(resolved);
-            }
-        }
-    }
-
-    None
-}
-
-#[cfg(all(
-    target_family = "unix",
-    not(any(target_os = "linux", target_os = "android"))
-))]
-fn resolve_dependency_ld_cache<'a>(
-    dtneeded: &'a String,
-    ld_cache: &'a LoaderCache,
-    platform: Option<&String>,
-    elc: &'a ElfInfo,
-    _namespace: &ObjectNamespace,
-) -> Option<ResolvedDependency<'a>> {
-    search_dirs(
-        ld_cache,
-        dtneeded,
-        elc,
-        platform,
-        DepMode::LdCache,
-        &Default::default(),
-    )
 }
 
 // Symbol resolution mimicking, used to implement the ldd like --data-relocs,
