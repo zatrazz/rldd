@@ -565,15 +565,7 @@ fn resolve_cache(
     let Some(elc) = config.ctx.get(name, config.executable_path) else {
         return ResolveResult::Miss;
     };
-    let path = Path::new(name);
-    let dir = pathutils::get_path(&path);
-    let depd = deptree.addnode(
-        DepNode::new(dir.clone(), pathutils::get_name(&path), DepMode::LdCache)
-            .with_attrs(dep.attrs.clone())
-            .with_version(dep.version.clone()),
-        depp,
-    );
-    ResolveResult::Found((elc, depd, dir.unwrap_or_default()))
+    add_found(elc, Path::new(name), DepMode::LdCache, dep, deptree, depp)
 }
 
 fn resolve_file(
@@ -594,6 +586,20 @@ fn resolve_file(
     let Ok(elc) = open_macho_file(&path, &config.ctx.arch, config.executable_path) else {
         return ResolveResult::Miss;
     };
+    add_found(elc, &path, mode, dep, deptree, depp)
+}
+
+// Add the object ELC found at PATH to the dependency tree, returning it along
+// with the node index and its directory (the @loader_path for the object own
+// dependencies).
+fn add_found(
+    elc: MachOInfo,
+    path: &Path,
+    mode: DepMode,
+    dep: &MachODep,
+    deptree: &mut DepTree,
+    depp: usize,
+) -> ResolveResult {
     let dir = pathutils::get_path(&path);
     let depd = deptree.addnode(
         DepNode::new(dir.clone(), pathutils::get_name(&path), mode)
