@@ -358,7 +358,7 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
         // The side-by-side redirection comes before the loaded-module list,
         // so the same name may be loaded from more than one assembly.
         let mut searched = Vec::new();
-        let redirect = find_redirected(config, &name, &item.redirect, &mut searched);
+        let redirect = find_in_dirs(config, &name, &item.redirect, &mut searched);
         let lookup = match &redirect {
             Some((_, dir, _)) => format!("{dir}{}{name}", std::path::MAIN_SEPARATOR),
             None => name.clone(),
@@ -598,20 +598,33 @@ fn add_not_found(config: &Config, item: &WorkItem, deptree: &mut DepTree, search
     );
 }
 
-fn find_redirected(
+// Search NAME on each of the DIRS in order, recording every candidate path on
+// SEARCHED, and returning the parsed object, the directory it was found at,
+// and the mode of that directory.
+fn find_in<'d>(
+    config: &Config,
+    name: &str,
+    dirs: impl IntoIterator<Item = (&'d str, DepMode)>,
+    searched: &mut Vec<String>,
+) -> Option<(PeInfo, String, DepMode)> {
+    for (dir, mode) in dirs {
+        let candidate = Path::new(dir).join(name);
+        searched.push(candidate.to_string_lossy().into_owned());
+        if let Some(info) = try_open(config, &candidate) {
+            return Some((info, dir.to_string(), mode));
+        }
+    }
+    None
+}
+
+fn find_in_dirs(
     config: &Config,
     name: &str,
     dirs: &search_dirs::SearchDirs,
     searched: &mut Vec<String>,
 ) -> Option<(PeInfo, String, DepMode)> {
-    for (dir, mode) in dirs {
-        let candidate = Path::new(&dir.path).join(name);
-        searched.push(candidate.to_string_lossy().into_owned());
-        if let Some(info) = try_open(config, &candidate) {
-            return Some((info, dir.path.clone(), *mode));
-        }
-    }
-    None
+    let dirs = dirs.iter().map(|(dir, mode)| (dir.path.as_str(), *mode));
+    find_in(config, name, dirs, searched)
 }
 
 // Resolve NAME against the known DLLs and then the search directories, returning th
@@ -631,24 +644,14 @@ fn find_dependency(
     }
 
     if known || config.ctx.knowndlls.contains(name) {
-        for dir in config.ctx.knowndll_dirs(machine::is_32bit(config.machine)) {
-            let candidate = Path::new(&dir).join(name);
-            searched.push(candidate.to_string_lossy().into_owned());
-            if let Some(info) = try_open(config, &candidate) {
-                return Some((info, dir, DepMode::LdCache));
-            }
+        let known = config.ctx.knowndll_dirs(machine::is_32bit(config.machine));
+        let known = known.iter().map(|dir| (dir.as_str(), DepMode::LdCache));
+        if let Some(found) = find_in(config, name, known, searched) {
+            return Some(found);
         }
     }
 
-    for (dir, mode) in &config.dirs {
-        let candidate = Path::new(&dir.path).join(name);
-        searched.push(candidate.to_string_lossy().into_owned());
-        if let Some(info) = try_open(config, &candidate) {
-            return Some((info, dir.path.clone(), *mode));
-        }
-    }
-
-    None
+    find_in_dirs(config, name, &config.dirs, searched)
 }
 
 // The loader skips a candidate built for another machine and keeps searching,
