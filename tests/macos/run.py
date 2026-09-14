@@ -98,7 +98,7 @@ def parse_dyld_info(out):
             state = s[1:-1]
             cur["linked"] |= state == "linked_dylibs"
             continue
-        if not line.startswith("        ") or not s or s == "attributes     load path":
+        if not line.startswith("        ") or not s or s.split() == ["attributes", "load", "path"]:
             continue
         if state == "linked_dylibs":
             attrs = set()
