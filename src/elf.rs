@@ -82,8 +82,11 @@ struct ElfInfo {
     e_flags: FileFlags,
 
     interp: Option<String>,
-    // Read by the glibc and the FreeBSD rules only.
-    #[cfg_attr(not(any(target_os = "linux", target_os = "freebsd")), allow(dead_code))]
+    // Read by the glibc, FreeBSD and OpenBSD rules only.
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd")),
+        allow(dead_code)
+    )]
     soname: Option<String>,
     dt_rpath: Option<String>,
     dt_runpath: Option<String>,
@@ -1110,9 +1113,9 @@ fn resolve_dependencies(
             }
         }
 
-        // The glibc and FreeBSD loaders also match a name against the main
-        // object DT_SONAME.
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        // The glibc, FreeBSD and OpenBSD loaders also match a name against
+        // the main object DT_SONAME.
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
         if !elc.is_musl && root_elc.soname.as_deref() == Some(dependency.as_str()) {
             continue;
         }
@@ -1148,7 +1151,9 @@ fn resolve_dependencies(
         let loaded = found
             .find(deptree, dependency)
             .or_else(|| requested.get(dependency.as_str()).copied());
-        #[cfg(target_os = "linux")]
+        // The FreeBSD and OpenBSD loaders match the DT_SONAME of every
+        // object loaded too (object_match_name, _dl_lookup_object).
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
         let loaded = loaded.or_else(|| {
             if elc.is_musl {
                 return None;
