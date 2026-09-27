@@ -132,3 +132,38 @@ impl Loader for OpenBsd {
         !elc.has_runpath
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tempdir::TempDir;
+
+    // The file picked in a directory: the major must match, and the highest
+    // minor wins.
+    #[test]
+    fn dependency_minor_version() -> std::io::Result<()> {
+        let tmpdir = TempDir::new()?;
+        for name in [
+            "libfoo.so.1.0",
+            "libfoo.so.1.2",
+            "libfoo.so.1.10",
+            "libfoo.so.1.11.1",
+            "libfoo.so.1.x",
+            "libfoo.so.2.0",
+            "libfoobar.so.1.20",
+        ] {
+            fs::write(tmpdir.path().join(name), [])?;
+        }
+        let dir = tmpdir.path().to_str().unwrap();
+        let resolve = |dtneeded| pathutils::get_name(&OpenBsd::dependency_path(dir, dtneeded));
+
+        assert_eq!(resolve("libfoo.so.1.1"), "libfoo.so.1.10");
+        assert_eq!(resolve("libfoo.so.1.20"), "libfoo.so.1.10");
+        assert_eq!(resolve("libfoo.so.1"), "libfoo.so.1.10");
+        assert_eq!(resolve("libfoo.so.2.5"), "libfoo.so.2.0");
+        // Without a match, the name as is.
+        assert_eq!(resolve("libfoo.so.3.0"), "libfoo.so.3.0");
+        assert_eq!(resolve("libfoo.so"), "libfoo.so");
+        Ok(())
+    }
+}

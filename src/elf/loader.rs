@@ -17,7 +17,8 @@ mod freebsd;
 mod linux;
 #[cfg(target_os = "netbsd")]
 mod netbsd;
-#[cfg(target_os = "openbsd")]
+// Also built for the Linux tests, which check its dependency matching.
+#[cfg(any(target_os = "openbsd", all(test, target_os = "linux")))]
 mod openbsd;
 #[cfg(any(target_os = "illumos", target_os = "solaris"))]
 mod solaris;
@@ -223,7 +224,11 @@ impl SearchCache for search_path::SearchPathVec {
 // The FreeBSD and OpenBSD loaders canonicalize the object path first
 // (realpath), so a symlink or a '..' component on a search path does not leak
 // into the $ORIGIN expansion.
-#[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
+#[cfg(any(
+    target_os = "freebsd",
+    target_os = "openbsd",
+    all(test, target_os = "linux")
+))]
 fn canonical_origin_directory<P: AsRef<Path>>(filename: &P) -> String {
     let path = fs::canonicalize(filename).unwrap_or_else(|_| filename.as_ref().to_path_buf());
     path.parent()
