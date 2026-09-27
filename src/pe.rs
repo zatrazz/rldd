@@ -669,7 +669,7 @@ fn open_pe_file<P: AsRef<Path>>(filename: &P) -> Result<PeInfo, std::io::Error> 
     // none.
     if !pei.manifest {
         let external = format!("{}.manifest", filename.as_ref().to_string_lossy());
-        if let Ok(manifest) = fs::read_to_string(&external) {
+        if let Ok(manifest) = fs::read(&external) {
             pei.assemblies = sxs::parse_manifest(&manifest);
         }
     }
@@ -749,7 +749,7 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
     }
 
     if let Some(manifest) = manifest_resource(&file) {
-        pei.assemblies = sxs::parse_manifest(&manifest);
+        pei.assemblies = sxs::parse_manifest(manifest);
         pei.manifest = true;
     }
 
@@ -810,7 +810,7 @@ fn has_chpe_metadata<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> bool {
 
 // The embedded RT_MANIFEST resource, which declares the side-by-side
 // assemblies the object depends on.
-fn manifest_resource<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> Option<String> {
+fn manifest_resource<'data, Pe: ImageNtHeaders>(file: &PeFile<'data, Pe>) -> Option<&'data [u8]> {
     let sections = file.section_table();
     let directory = file
         .data_directories()
@@ -830,8 +830,7 @@ fn manifest_resource<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> Option<String> {
     let entry = languages.entries.first()?.data(directory).ok()?.data()?;
 
     let data = sections.pe_data_at(file.data(), entry.offset_to_data.get(LE))?;
-    let data = data.get(..entry.size.get(LE) as usize)?;
-    Some(String::from_utf8_lossy(data).into_owned())
+    data.get(..entry.size.get(LE) as usize)
 }
 
 // The name and the thunk array a descriptor points at do not need to live on
