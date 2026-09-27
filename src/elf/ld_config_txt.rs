@@ -266,7 +266,7 @@ impl Properties {
 // location.  The loader falls back to the normalized path when it can not
 // canonicalize an existing directory, and also accepts a directory inside a
 // zip file, neither of which rldd can search.
-fn resolve_path(path: &str) -> Option<String> {
+pub(in crate::elf) fn resolve_path(path: &str) -> Option<String> {
     if path.is_empty() {
         return None;
     }
@@ -280,7 +280,7 @@ fn resolve_path(path: &str) -> Option<String> {
 // is replaced, the variables tried in order with NAME matched as a prefix of
 // what follows the '$' (so '$LIBFOO' is 'lib64FOO').  A replacement is not
 // scanned again, and any other '$' is kept as is.
-fn format_string(s: &str, params: &[(&str, &str)]) -> String {
+pub(in crate::elf) fn format_string(s: &str, params: &[(&str, &str)]) -> String {
     let mut r = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(pos) = rest.find('$') {

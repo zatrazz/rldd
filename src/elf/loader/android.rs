@@ -1,18 +1,32 @@
 // The bionic linker.
 
 use super::*;
+use crate::elf::android::{self as bionic, AndroidRelease};
 
 pub(in crate::elf) struct Android;
+
+// The release of the device, None on the host tests, where the rules of the
+// latest release apply.
+#[cfg(target_os = "android")]
+fn release() -> Option<AndroidRelease> {
+    crate::elf::android::SystemProperties::current().map(|props| props.release)
+}
+
+#[cfg(not(target_os = "android"))]
+fn release() -> Option<AndroidRelease> {
+    None
+}
 
 impl Loader for Android {
     type Cache = ld_config_txt::LdCache;
 
+    #[cfg(target_os = "android")]
     fn load_so_cache<P: AsRef<Path>>(
         ld_cache: &mut Option<Self::Cache>,
         binary: &P,
         elc: &ElfInfo,
     ) {
-        let Ok(props) = crate::elf::android::SystemProperties::get() else {
+        let Some(props) = crate::elf::android::SystemProperties::current() else {
             return;
         };
         if let Some(ld_config_path) = ld_config_txt::get_ld_config_path(
@@ -20,7 +34,7 @@ impl Loader for Android {
             elc.interp.as_deref(),
             elc.e_machine,
             elc.ei_class,
-            &props,
+            props,
         ) {
             // On Android 10 and forward each executable might have a associated ld.config.txt
             // file in different paths, so we need to reload for each argument.
@@ -30,7 +44,7 @@ impl Loader for Android {
                 binary,
                 elc.interp.as_deref(),
                 elc.ei_class,
-                &props,
+                props,
             )
             .ok();
         }
@@ -41,6 +55,46 @@ impl Loader for Android {
     // has an entry associated in the section).
     fn load_system_dirs(ld_cache: &Option<Self::Cache>) -> bool {
         ld_cache.is_none()
+    }
+
+    fn preload_list(list: &str, _elc: &ElfInfo) -> Vec<String> {
+        bionic::preload_list(list)
+    }
+
+    // The DT_RUNPATH entries with $ORIGIN and $LIB expanded, and the
+    // LD_LIBRARY_PATH ones without any token, both resolved to their real
+    // path the way the linker keeps them.
+    fn search_list(
+        list: &str,
+        site: TokenSite,
+        elc: &ElfInfo,
+        _platform: Option<&String>,
+    ) -> Vec<Result<String, String>> {
+        match site {
+            TokenSite::SearchPath => {
+                bionic::runpath_list(list, elc.origin.as_deref(), elc.ei_class, release())
+            }
+            _ => bionic::library_path_list(list)
+                .into_iter()
+                .map(Ok)
+                .collect(),
+        }
+    }
+
+    // No token is expanded on DT_NEEDED nor on LD_PRELOAD.
+    fn expand_tokens(
+        input: &str,
+        _site: TokenSite,
+        _elc: &ElfInfo,
+        _platform: Option<&String>,
+    ) -> Option<String> {
+        Some(input.to_string())
+    }
+
+    // $ORIGIN is the directory of the object real path (the soinfo realpath
+    // the linker gets from the file descriptor).
+    fn origin_directory<P: AsRef<Path>>(filename: &P, _melc: Option<&ElfInfo>) -> Option<String> {
+        canonical_origin_directory(filename)
     }
 
     // The bionic loader does not implement DT_RPATH at all: it warns about the
