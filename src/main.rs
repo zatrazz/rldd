@@ -93,8 +93,9 @@ fn print_deps_children(p: &Printer, deps: &DepTree, children: &[usize], deptrace
 }
 
 #[derive(FromArgs)]
-/// Print shared objects dependencies
-#[argh(help_triggers("-h", "--help", "help"))]
+/// Print shared object dependencies
+// A 'help' trigger would take a file named help as the request for the usage.
+#[argh(help_triggers("-h", "--help"))]
 struct Options {
     /// assume the LD_LIBRARY_PATH is set.
     #[cfg(all(target_family = "unix", not(target_os = "macos")))]
@@ -107,7 +108,7 @@ struct Options {
     arch: Option<String>,
 
     /// limit the dependency tree to the given number of levels, with 0
-    /// meaning no limit..
+    /// meaning no limit (default 1).
     #[cfg(any(target_os = "macos", windows))]
     #[argh(option, default = "1")]
     depth: usize,
@@ -213,7 +214,7 @@ struct Options {
     #[argh(switch, short = 'a')]
     all: bool,
 
-    /// output similar to lld (unique dependencies, one per line).
+    /// output similar to ldd (unique dependencies, one per line).
     #[argh(switch, short = 'l')]
     ldd: bool,
 
