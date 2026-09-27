@@ -134,6 +134,36 @@ impl Loader for OpenBsd {
         (filename, elc)
     }
 
+    // _dl_find_loaded_shlib: a name without a slash matches a loaded object
+    // of the same name and major, with a minor at least the requested one,
+    // and then with any minor, with a warning.
+    fn find_loaded(name: &str, deptree: &DepTree) -> Option<usize> {
+        if name.contains('/') {
+            return None;
+        }
+        let requested = Sod::parse(name);
+        let loaded: Vec<(usize, Sod)> = deptree
+            .arena
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| !node.val.found && node.val.mode != DepMode::NotFound)
+            .map(|(index, node)| (index, Sod::parse(&node.val.name)))
+            .collect();
+        let lookup = |req: &Sod| loaded.iter().find(|(_, sod)| req.matches(sod));
+        if let Some((index, _)) = lookup(&requested) {
+            return Some(*index);
+        }
+        if !requested.library || requested.minor == -1 {
+            return None;
+        }
+        let (index, found) = lookup(&Sod {
+            minor: -1,
+            ..requested.clone()
+        })?;
+        minor_warning(&requested, found);
+        Some(*index)
+    }
+
     // _dl_load_shlib: a name with a slash is matched in its directory, and a
     // name without one is first matched against the loaded objects (see
     // find_loaded), and then searched on the LD_LIBRARY_PATH directories, the
@@ -181,16 +211,7 @@ impl Loader for OpenBsd {
                 else {
                     continue;
                 };
-                if found.minor < requested.minor {
-                    errln!(
-                        "warning: lib{}.so.{}.{}: minor version >= {} expected, \
-                         using it anyway",
-                        requested.name,
-                        requested.major,
-                        found.minor,
-                        requested.minor
-                    );
-                }
+                minor_warning(&requested, &found);
                 return Some(tryload(dir, &file, elc, config, mode, namespace));
             }
         }
@@ -292,11 +313,31 @@ impl Sod {
             return None;
         }
         let sod = Sod::parse(file);
-        (sod.name == req.name
-            && sod.library == req.library
-            && (req.major == -1 || req.major == sod.major)
-            && (req.minor == -1 || sod.minor >= req.minor))
-            .then_some(sod)
+        req.matches(&sod).then_some(sod)
+    }
+
+    // Whether the SOD object description matches this requested one
+    // (_dl_cmp_sod): the same name, and the same major and at least the minor
+    // when requested.
+    fn matches(&self, sod: &Sod) -> bool {
+        sod.name == self.name
+            && sod.library == self.library
+            && (self.major == -1 || self.major == sod.major)
+            && (self.minor == -1 || sod.minor >= self.minor)
+    }
+}
+
+// The warning ld.so prints when it takes the FOUND version of the REQUESTED
+// library, of a lower minor.
+fn minor_warning(requested: &Sod, found: &Sod) {
+    if found.minor < requested.minor {
+        errln!(
+            "warning: lib{}.so.{}.{}: minor version >= {} expected, using it anyway",
+            requested.name,
+            requested.major,
+            found.minor,
+            requested.minor
+        );
     }
 }
 
@@ -756,6 +797,36 @@ mod tests {
             Some(format!("{d}/libfoo.so.1.9"))
         );
         Ok(())
+    }
+
+    // A loaded library of the name and major, with a minor high enough, and
+    // then any minor.
+    #[test]
+    fn loaded_library() {
+        let mut deptree = DepTree::new();
+        let root = deptree.addroot(DepNode::new(None, "prog".to_string(), DepMode::Executable));
+        let lib = |name: &str| {
+            DepNode::new(
+                Some("/usr/lib".to_string()),
+                name.to_string(),
+                DepMode::SystemDirs,
+            )
+        };
+        deptree.addnode(
+            DepNode::not_found("libbar.so.1.0".to_string(), Vec::new()),
+            root,
+        );
+        deptree.addnode(lib("libfoo.so.2.3").already_found(), root);
+        let foo = deptree.addnode(lib("libfoo.so.2.3"), root);
+        let baz = deptree.addnode(lib("libbaz.so.1.0"), root);
+        let find = |name| OpenBsd::find_loaded(name, &deptree);
+        assert_eq!(find("libfoo.so.2.1"), Some(foo));
+        assert_eq!(find("libfoo.so.2"), Some(foo));
+        assert_eq!(find("libfoo.so.2.7"), Some(foo));
+        assert_eq!(find("libfoo.so.3.0"), None);
+        assert_eq!(find("libbar.so.1.0"), None);
+        assert_eq!(find("libbaz.so"), Some(baz));
+        assert_eq!(find("/usr/lib/libfoo.so.2.3"), None);
     }
 
     // The hints first, for the directories of the list, or anywhere for the

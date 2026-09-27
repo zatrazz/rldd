@@ -1161,6 +1161,8 @@ fn resolve_dependencies(
             }
             sonames.get(dependency.as_str()).copied()
         });
+        #[cfg(not(target_os = "android"))]
+        let loaded = loaded.or_else(|| Rtld::find_loaded(dependency, deptree));
         // The Android linker is on every namespace under its own soname.
         #[cfg(target_os = "android")]
         if let Some(node) = Rtld::linker_dependency(dependency, root_elc) {

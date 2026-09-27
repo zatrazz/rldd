@@ -182,6 +182,15 @@ pub(super) trait Loader {
         }
     }
 
+    // The tree node of an object already loaded that the loader takes for the
+    // NAME dependency before any search, besides the objects loaded under
+    // that name or with that DT_SONAME.  Most loaders take none, and the
+    // Android linker looks them up on the namespaces instead.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    fn find_loaded(_name: &str, _deptree: &DepTree) -> Option<usize> {
+        None
+    }
+
     // Resolve DEPENDENCY, not already loaded, for ELC, the object at REFPATH
     // requesting it (the input object for a PRELOAD entry).  Most loaders
     // open a name with a slash as is, and search the other ones on the
