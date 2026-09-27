@@ -130,6 +130,9 @@ const ISOLATIONAWARE_MANIFEST_RESOURCE_ID: u16 = 2;
 // system modules stay well under 1 MiB.
 const NAMES_BUDGET: usize = 16 << 20;
 
+// The runtime shim the loader maps for the .NET images.
+const MSCOREE: &str = "mscoree.dll";
+
 // The delay load descriptor attribute of the RVA based layout.
 const DLATTR_RVA: u32 = 1;
 
@@ -1102,6 +1105,23 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
         }
     }
 
+    // The loader maps mscoree.dll for a .NET image itself, as the runtime
+    // documentation of _CorValidateImage describes, which an IL only one
+    // built for x86_64 or ARM64 does not import at all (AppVStreamingUX.exe
+    // has no import directory and maps System32\mscoree.dll).
+    if clr_flags(&file).is_some()
+        && !pei
+            .deps
+            .iter()
+            .any(|dep| dep.name.eq_ignore_ascii_case(MSCOREE))
+    {
+        pei.deps.push(PeDep {
+            name: MSCOREE.to_string(),
+            attrs: vec!["clr"],
+            imports: Vec::new(),
+        });
+    }
+
     // The delay load imports are only resolved on the first call.  The
     // descriptors the Visual C++ 6 linker wrote lack the dlattrRva attribute
     // and hold virtual addresses instead of RVAs, and so do the thunks of
@@ -1144,23 +1164,23 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
     Ok(pei)
 }
 
+// The flags of the CLR header of a .NET image, None for a native one.
+fn clr_flags<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> Option<u32> {
+    let directory = file
+        .data_directories()
+        .get(pe::IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR)?;
+    let data = directory.data(file.data(), &file.section_table()).ok()?;
+    let (header, _) = object::pod::from_bytes::<pe::ImageCor20Header>(data).ok()?;
+    Some(header.flags.get(LE).0)
+}
+
 // Whether the CLR header flags an IL only image that does not ask for a 32 bit
 // process: the 'Any CPU' platform target of a .NET program, without 'Prefer
 // 32-bit', whose PE32 header records i386 all the same.
 fn il_any_cpu<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> bool {
-    let Some(directory) = file
-        .data_directories()
-        .get(pe::IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR)
-    else {
+    let Some(flags) = clr_flags(file) else {
         return false;
     };
-    let Ok(data) = directory.data(file.data(), &file.section_table()) else {
-        return false;
-    };
-    let Ok((header, _)) = object::pod::from_bytes::<pe::ImageCor20Header>(data) else {
-        return false;
-    };
-    let flags = header.flags.get(LE).0;
     let wants_32bit = pe::COMIMAGE_FLAGS_32BITREQUIRED.0 | pe::COMIMAGE_FLAGS_32BITPREFERRED.0;
     flags & pe::COMIMAGE_FLAGS_ILONLY.0 != 0 && flags & wants_32bit == 0
 }
@@ -1849,6 +1869,32 @@ mod tests {
         // process.
         fs::write(&path, clr_image(i386, ilonly).build()).unwrap();
         assert_eq!(open_pe_file(&path).unwrap().machine, i386);
+    }
+
+    // The loader maps mscoree.dll for a .NET image, which may not import it.
+    #[test]
+    fn clr_runtime_dependency() {
+        let deps = |image: testimage::Image| -> Vec<(String, Vec<&'static str>)> {
+            let pei = parse_object(&image.build()).unwrap();
+            pei.deps
+                .into_iter()
+                .map(|dep| (dep.name, dep.attrs))
+                .collect()
+        };
+        let amd64 = pe::IMAGE_FILE_MACHINE_AMD64;
+        assert_eq!(
+            deps(clr_image(amd64, pe::COMIMAGE_FLAGS_ILONLY.0)),
+            [("mscoree.dll".to_string(), vec!["clr"])]
+        );
+        assert!(deps(testimage::Image::exe(amd64, false)).is_empty());
+
+        // An image that imports it has no other entry.
+        let mut image = clr_image(amd64, 0);
+        let main = image.hint_name(b"_CorExeMain");
+        let thunks = image.thunks(&[u64::from(main)]);
+        let module = image.string(b"MSCOREE.DLL");
+        image.imports(&[[thunks, 0, module, thunks]]);
+        assert_eq!(deps(image), [("MSCOREE.DLL".to_string(), vec![])]);
     }
 
     fn config(ctx: &PeContext, machine: pe::Machine) -> Config<'_> {
