@@ -1,7 +1,9 @@
-// Standard output writing.  Unlike print!, which panics on a write error, a
-// reader that went away (for instance 'rldd ... | head') ends the program
-// quietly with the exit status already due, and any other error is reported
-// once.
+// Standard output and error writing.  Unlike print!, which panics on a write
+// error, a reader that went away (for instance 'rldd ... | head') ends the
+// program quietly with the exit status already due, and any other error is
+// reported once.  Unlike eprint!, a failed standard error write is ignored:
+// there is nowhere left to report it, and the exit status still tells the
+// failure.
 
 use std::io::{ErrorKind, Write};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -20,19 +22,28 @@ pub fn exit_status() -> i32 {
 pub fn write_stdout(args: std::fmt::Arguments) {
     let mut stdout = std::io::stdout().lock();
     if let Err(err) = stdout.write_fmt(args) {
+        if err.kind() != ErrorKind::BrokenPipe {
+            write_stderr(format_args!(
+                "{}: error writing to stdout: {err}\n",
+                env!("CARGO_PKG_NAME")
+            ));
+        }
         std::process::exit(write_error_status(&err));
     }
 }
 
 // The exit status after the standard output write failed with ERR: the one
-// already due when the reader went away, and a failure for any other error,
-// which is reported.
+// already due when the reader went away, and a failure for any other error.
 fn write_error_status(err: &std::io::Error) -> i32 {
     if err.kind() == ErrorKind::BrokenPipe {
-        return exit_status();
+        exit_status()
+    } else {
+        1
     }
-    eprintln!("{}: error writing to stdout: {err}", env!("CARGO_PKG_NAME"));
-    1
+}
+
+pub fn write_stderr(args: std::fmt::Arguments) {
+    let _ = std::io::stderr().lock().write_fmt(args);
 }
 
 macro_rules! out {
@@ -44,6 +55,12 @@ macro_rules! out {
 macro_rules! outln {
     ($($arg:tt)*) => {
         $crate::output::write_stdout(format_args!("{}\n", format_args!($($arg)*)))
+    };
+}
+
+macro_rules! errln {
+    ($($arg:tt)*) => {
+        $crate::output::write_stderr(format_args!("{}\n", format_args!($($arg)*)))
     };
 }
 

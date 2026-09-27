@@ -255,13 +255,13 @@ fn main() {
     let mut ctx = match create_context(&opts) {
         Ok(ctx) => ctx,
         Err(err) => {
-            eprintln!("{}: {err}", env!("CARGO_PKG_NAME"));
+            errln!("{}: {err}", env!("CARGO_PKG_NAME"));
             std::process::exit(1);
         }
     };
 
     if opts.args.is_empty() {
-        eprintln!(
+        errln!(
             "{progname}: missing file arguments\n\
             Try `{progname} --help' for more information.",
             progname = env!("CARGO_PKG_NAME")
@@ -316,9 +316,10 @@ fn main() {
                 if let Some(undefined) = check_musl_relocations(&deptree) {
                     if !undefined.is_empty() {
                         for undef in &undefined {
-                            eprintln!(
+                            errln!(
                                 "Error relocating {}: {}: symbol not found",
-                                undef.object, undef.name
+                                undef.object,
+                                undef.name
                             );
                         }
                         output::set_exit_status(127);
@@ -326,7 +327,7 @@ fn main() {
                 }
             }
             Err(e) => {
-                eprintln!("error: {}", print_error(&arg, e));
+                errln!("error: {}", print_error(&arg, e));
                 output::set_exit_status(1);
             }
         }
