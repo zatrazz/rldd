@@ -18,7 +18,11 @@ mod linux;
 mod netbsd;
 #[cfg(any(target_os = "openbsd", all(test, target_os = "linux")))]
 mod openbsd;
-#[cfg(any(target_os = "illumos", target_os = "solaris"))]
+#[cfg(any(
+    target_os = "illumos",
+    target_os = "solaris",
+    all(test, target_os = "linux")
+))]
 mod solaris;
 
 #[cfg(target_os = "android")]
@@ -379,7 +383,12 @@ fn sysctl_string(name: &std::ffi::CStr) -> Option<String> {
 
 // The loaders recording DT_RPATH and DT_RUNPATH in a single slot, where the
 // last entry of either wins, search it as the object rpath.
-#[cfg(any(target_os = "netbsd", all(test, target_os = "linux")))]
+#[cfg(any(
+    target_os = "netbsd",
+    target_os = "illumos",
+    target_os = "solaris",
+    all(test, target_os = "linux")
+))]
 fn single_search_list(elc: &mut ElfInfo) {
     if elc.runpath_last {
         elc.rpath = std::mem::take(&mut elc.runpath);
