@@ -51,7 +51,6 @@ impl NamespaceConfig {
     // directly in one of the LD_LIBRARY_PATH directories (which only the
     // default namespace has) or of its search paths, or anywhere below one of
     // its permitted paths.
-    #[allow(dead_code)] // Not applied by the resolution yet.
     pub fn is_accessible_path(
         &self,
         realpath: &str,
@@ -81,7 +80,7 @@ impl NamespaceConfig {
 }
 
 // The bionic file_is_in_dir: FILE is directly in DIR, compared as strings.
-fn file_is_in_dir(file: &[u8], dir: &[u8]) -> bool {
+pub(in crate::elf) fn file_is_in_dir(file: &[u8], dir: &[u8]) -> bool {
     file.strip_prefix(dir)
         .and_then(|rest| rest.strip_prefix(b"/"))
         .is_some_and(|name| !name.contains(&b'/'))
@@ -104,13 +103,21 @@ pub type LdCacheNs = HashMap<String, NamespaceConfig>;
 #[derive(Debug)]
 pub struct LdCache {
     namespaces_config: LdCacheNs,
+    // The target SDK version of the binary (Config::target_sdk_version),
+    // which the loader compatibility workarounds depend on.
+    target_sdk_version: i64,
 }
 
 impl LdCache {
     fn new() -> LdCache {
         LdCache {
             namespaces_config: LdCacheNs::new(),
+            target_sdk_version: ANDROID_API_FUTURE,
         }
+    }
+
+    pub fn target_sdk_version(&self) -> i64 {
+        self.target_sdk_version
     }
 
     pub fn get_default_namespace(&self) -> Option<&NamespaceConfig> {
@@ -483,14 +490,16 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
     // The '.version' file is only read for the sections that opt in.  The
     // default is not the running release but the loader own __ANDROID_API__,
     // which the platform build defines as __ANDROID_API_FUTURE__.
-    properties.target_sdk_version = ANDROID_API_FUTURE.to_string();
+    let mut target_sdk_version = ANDROID_API_FUTURE;
     if properties.get_bool("enable.target.sdk.version") {
         if let Some(version) = read_version_file(binary)? {
-            properties.target_sdk_version = version.to_string();
+            target_sdk_version = version;
         }
     }
+    properties.target_sdk_version = target_sdk_version.to_string();
 
     let mut ldcache = LdCache::new();
+    ldcache.target_sdk_version = target_sdk_version;
 
     ldcache.push_namespace(DEFAULT_NAME_CONFIG);
 
@@ -1537,6 +1546,7 @@ mod tests {
             search_paths(&ldcache, "default"),
             vec![fixture.path("sdk10000")]
         );
+        assert_eq!(ldcache.target_sdk_version(), 10000);
 
         // The content is trimmed.
         fs::write(&version, "26\n")?;
@@ -1545,6 +1555,7 @@ mod tests {
             search_paths(&ldcache, "default"),
             vec![fixture.path("sdk26")]
         );
+        assert_eq!(ldcache.target_sdk_version(), 26);
 
         // Anything but a positive number fails the configuration.
         for invalid in ["", "abc", "0", "-26", "26 27"] {

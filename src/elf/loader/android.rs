@@ -190,6 +190,91 @@ impl<'a> Namespace<'a> {
     fn ld_library_paths(&self, config: &'a Config) -> Option<&'a search_path::SearchPathVec> {
         self.key.is_none().then_some(&config.ld_library_path)
     }
+
+    // The name the linker reports the namespace with.
+    fn name(&self) -> &str {
+        self.key.as_deref().unwrap_or("(default)")
+    }
+
+    // Whether the namespace loads the file at REALPATH
+    // (android_namespace_t::is_accessible).
+    fn is_accessible(&self, config: &'a Config, realpath: &str) -> bool {
+        let none = search_path::SearchPathVec::new();
+        let ld_library_paths = self.ld_library_paths(config).unwrap_or(&none);
+        self.config
+            .is_none_or(|ns| ns.is_accessible_path(realpath, ld_library_paths))
+    }
+}
+
+// The real path of the file at PATH, which the linker records and checks the
+// accessibility of (the path as given when it can not be resolved).
+fn realpath(path: &Path) -> String {
+    fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+// The libraries an application targeting an API level below 24 loads even
+// from a namespace that can not access them (the bionic kLibraryExemptList,
+// a workaround for b/26394120).
+const EXEMPT_LIBS: &[&str] = &[
+    "libandroid_runtime.so",
+    "libbinder.so",
+    "libcrypto.so",
+    "libcutils.so",
+    "libexpat.so",
+    "libgui.so",
+    "libmedia.so",
+    "libnativehelper.so",
+    "libssl.so",
+    "libstagefright.so",
+    "libsqlite.so",
+    "libui.so",
+    "libutils.so",
+];
+
+// The bionic is_exempt_lib: whether the NS namespace loads NAME, needed by
+// the object at NEEDED_BY, although it can not access it.  It only applies
+// when the target SDK version of the binary, which only a '.version' file
+// the configuration opts in sets for an executable, is below 24.  A library
+// needed by a system one (on the default namespace search paths) is exempt
+// unless a link of the namespace shares it, and otherwise only the ones on
+// the list, by name or by their /system/lib[64] path.
+fn is_exempt_lib(
+    config: &Config,
+    elc: &ElfInfo,
+    ns: &Namespace,
+    name: &str,
+    needed_by: &str,
+) -> bool {
+    let Some(cache) = config.ld_cache else {
+        return false;
+    };
+    if cache.target_sdk_version() >= 24 {
+        return false;
+    }
+
+    let needed_by = realpath(Path::new(needed_by));
+    let is_system_library = cache.get_default_namespace().is_some_and(|default| {
+        default
+            .search_paths
+            .iter()
+            .any(|dir| ld_config_txt::file_is_in_dir(needed_by.as_bytes(), dir.path.as_bytes()))
+    });
+    let basename = pathutils::get_name(&Path::new(name));
+    if is_system_library {
+        return !ns.links().iter().any(|link| link.is_accessible(&basename));
+    }
+
+    let system_lib_dir = format!("/system/{}", bionic::libpath(elc.ei_class));
+    let name = match Path::new(name).parent() {
+        Some(dir) if name.starts_with('/') && dir == Path::new(&system_lib_dir) => {
+            basename.as_str()
+        }
+        _ => name,
+    };
+    EXEMPT_LIBS.contains(&name)
 }
 
 // The outcome of the bionic load_library on a namespace: done, or failed
@@ -202,15 +287,17 @@ enum Load<'a> {
 
 impl Android {
     // The bionic find_library_internal for NAME, a dependency of the ELC
-    // object loaded on NAMESPACE (the executable and the preload entries are
-    // on the default one).  An object already loaded with NAME as soname on
-    // the namespace, or on a linked one that shares it, is taken.  Otherwise
-    // the name is searched on the namespace, and then on each linked
-    // namespace whose link shares it, where the object would be loaded.
+    // object at NEEDED_BY loaded on NAMESPACE (the executable and the preload
+    // entries are on the default one).  An object already loaded with NAME
+    // as soname on the namespace, or on a linked one that shares it, is
+    // taken.  Otherwise the name is searched on the namespace, and then on
+    // each linked namespace whose link shares it, where the object would be
+    // loaded.
     pub(in crate::elf) fn find_library<'a>(
         config: &'a Config,
         loaded: &bionic::LoadedObjects,
         elc: &'a ElfInfo,
+        needed_by: &str,
         namespace: &Option<String>,
         name: &'a String,
     ) -> Lookup<'a> {
@@ -223,7 +310,10 @@ impl Android {
             return Lookup::Loaded(node);
         }
 
-        let error = match load_library(config, loaded, elc, &ns, name, true) {
+        let load = |ns: &Namespace<'a>, search_linked| {
+            load_library(config, loaded, elc, needed_by, ns, name, search_linked)
+        };
+        let error = match load(&ns, true) {
             Load::Done(lookup) => return lookup,
             Load::Failed(error) => error,
         };
@@ -246,7 +336,7 @@ impl Android {
             if let Some(node) = candidate {
                 return Lookup::Loaded(node);
             }
-            if let Load::Done(lookup) = load_library(config, loaded, elc, &linked, name, false) {
+            if let Load::Done(lookup) = load(&linked, false) {
                 return lookup;
             }
         }
@@ -256,13 +346,15 @@ impl Android {
     }
 }
 
-// The bionic load_library of NAME on the NS namespace: an object already
-// loaded from the file found (on the namespace, or with SEARCH_LINKED on a
-// linked one that shares it) is taken, otherwise the file is loaded.
+// The bionic load_library of NAME, needed by the ELC object at NEEDED_BY, on
+// the NS namespace: an object already loaded from the file found (on the
+// namespace, or with SEARCH_LINKED on a linked one that shares it) is taken,
+// otherwise the file is loaded if the namespace can access it.
 fn load_library<'a>(
     config: &'a Config,
     loaded: &bionic::LoadedObjects,
     elc: &'a ElfInfo,
+    needed_by: &str,
     ns: &Namespace<'a>,
     name: &'a String,
     search_linked: bool,
@@ -278,6 +370,15 @@ fn load_library<'a>(
         .and_then(|id| loaded.find_by_file(config.ld_cache.as_ref(), &ns.key, id, search_linked))
     {
         return Load::Done(Lookup::Loaded(node));
+    }
+
+    if !ns.is_accessible(config, &realpath(&path))
+        && !is_exempt_lib(config, elc, ns, name, needed_by)
+    {
+        return Load::Failed(Some(format!(
+            "library \"{name}\" needed or dlopened by \"{needed_by}\" is not accessible for the namespace \"{}\"",
+            ns.name()
+        )));
     }
 
     match open_dependency(&path, elc, config.platform) {
@@ -297,7 +398,8 @@ fn load_library<'a>(
 // The bionic open_library: the file NAME is on the NS namespace, the path
 // itself for a name with a slash, or else the first one of the
 // LD_LIBRARY_PATH directories (default namespace only), the DT_RUNPATH ones
-// of the ELC requesting object, and the namespace search paths.
+// of the ELC requesting object (only when the namespace can access the file
+// found there), and the namespace search paths.
 fn open_library<'a>(
     config: &'a Config,
     elc: &'a ElfInfo,
@@ -319,6 +421,9 @@ fn open_library<'a>(
     };
     ns.ld_library_paths(config)
         .and_then(|dirs| first(dirs, DepMode::LdLibraryPath))
-        .or_else(|| first(&elc.runpath, DepMode::DtRunpath))
+        .or_else(|| {
+            first(&elc.runpath, DepMode::DtRunpath)
+                .filter(|(_, _, path)| ns.is_accessible(config, &realpath(path)))
+        })
         .or_else(|| first(ns.search_paths, ns.mode))
 }
