@@ -173,21 +173,6 @@ pub fn resolve_binary(ctx: &mut MachOContext, arg: &str) -> Result<DepTree, std:
         print_object_information(&arch, cache, &ctx.env, &filename, &omf);
     }
 
-    let mut tree = Tree::new();
-    let path = filename.to_string_lossy().into_owned();
-    let cache_image = cache.image_id(&path).filter(|_| from_cache);
-    let depp = tree.add_image(
-        DepNode::new(
-            Some(executable_path.clone()),
-            pathutils::get_name(&filename),
-            DepMode::Executable,
-        ),
-        None,
-        path,
-        &omf,
-        cache_image,
-    );
-
     let config = Config {
         arch: &arch,
         macos: omf.filetype == MH_EXECUTE
@@ -201,38 +186,114 @@ pub fn resolve_binary(ctx: &mut MachOContext, arg: &str) -> Result<DepTree, std:
         ignore_prefix: &ctx.ignore_prefix,
     };
 
+    let mut tree = Tree::new();
+    let path = filename.to_string_lossy().into_owned();
+    let cache_image = cache.image_id(&path).filter(|_| from_cache);
+    let main_rpath = omf.rpath.clone();
+    let root = tree.add_image(
+        DepNode::new(
+            Some(executable_path.clone()),
+            pathutils::get_name(&filename),
+            DepMode::Executable,
+        ),
+        None,
+        path,
+        omf,
+        cache_image,
+        executable_path.clone(),
+    );
+
+    // Like dyld, the inserted libraries are loaded first
+    // (RuntimeState::loadInsertedLibraries), a duplicated one only once,
+    // then the main executable dependencies along with theirs, and at last
+    // the dependencies of each inserted library, whose run-path stack is the
+    // main executable one.
+    let root_place = tree.images[root].place;
+    let mut inserted = Vec::new();
     for pload in &ctx.preload {
         let dep = MachODep {
             name: pload.clone(),
             attrs: Vec::new(),
             version: None,
         };
-        resolve_dependency(
+        if let Some(image) = resolve_dependency(
             &config,
             &executable_path,
-            &omf.rpath,
+            &[],
             &dep,
             &mut tree,
-            depp,
+            root_place,
             true,
-            1,
-        );
+        ) {
+            if image != root && !inserted.contains(&image) {
+                inserted.push(image);
+            }
+        }
     }
-
-    for dep in &omf.deps {
-        resolve_dependency(
-            &config,
-            &executable_path,
-            &omf.rpath,
-            dep,
-            &mut tree,
-            depp,
-            false,
-            1,
-        );
+    load_dependents(&config, &mut tree, root, &[]);
+    for image in inserted {
+        load_dependents(&config, &mut tree, image, &main_rpath);
     }
 
     Ok(tree.deptree)
+}
+
+// Load the dependencies of IMAGE the way dyld does
+// (JustInTimeLoader::loadDependents): each one is looked up first, and only
+// then are the dependencies of the images they lead to loaded, in order.
+// So an image a later sibling names is loaded before the dependencies of an
+// earlier one, which then match it.  The dependencies of an image are
+// loaded once, by the first requester reaching it after it was loaded
+// (which may only name it again), with the run-path stack of that
+// requester: RPATHS, preceded by the image own LC_RPATH entries.
+fn load_dependents(config: &Config, tree: &mut Tree, image: usize, rpaths: &[String]) {
+    let Some(pending) = tree.images[image].pending.take() else {
+        return;
+    };
+    let place = tree.images[image].place;
+    // Stop descending once the depth limit is reached.
+    if config.depth != 0 && place.level >= config.depth {
+        return;
+    }
+    let mut stack = pending.rpath;
+    for rpath in rpaths {
+        if !stack.contains(rpath) {
+            stack.push(rpath.clone());
+        }
+    }
+    let loaded: Vec<usize> = pending
+        .deps
+        .iter()
+        .filter_map(|dep| {
+            resolve_dependency(
+                config,
+                &pending.loader_path,
+                &stack,
+                dep,
+                tree,
+                place,
+                false,
+            )
+        })
+        .collect();
+    for dep in loaded {
+        load_dependents(config, tree, dep, &stack);
+    }
+}
+
+// The node of an image on the tree, along with its level below the root.
+#[derive(Clone, Copy)]
+struct Place {
+    node: usize,
+    level: usize,
+}
+
+// The dependencies of an image, until they are loaded, with the image
+// run-path entries and directory (their @loader_path).
+struct Pending {
+    deps: DepsVec,
+    rpath: Vec<String>,
+    loader_path: String,
 }
 
 // An image loaded on the dependency tree.  Like dyld (Loader::matchesPath),
@@ -244,6 +305,8 @@ struct Image {
     install_name: Option<String>,
     cache_image: Option<(usize, u64)>,
     node: DepNode,
+    place: Place,
+    pending: Option<Pending>,
 }
 
 // The dependency tree along with the images loaded on it.  A dependency not
@@ -264,51 +327,63 @@ impl Tree {
         }
     }
 
-    // Add the node of the image ELC loaded from PATH, below PARENT (or as the
-    // root), returning the node index.
+    // Add the node of the image ELC loaded from PATH, below the REQUESTER (or
+    // as the root), returning the image index.  Its dependencies are loaded
+    // later, from LOADER_PATH.
     fn add_image(
         &mut self,
         node: DepNode,
-        parent: Option<usize>,
+        requester: Option<Place>,
         path: String,
-        elc: &MachOInfo,
+        elc: MachOInfo,
         cache_image: Option<(usize, u64)>,
+        loader_path: String,
     ) -> usize {
         // Only a dylib is also matched by its install name.
-        let install_name = elc.id.clone().filter(|_| elc.filetype == MH_DYLIB);
+        let install_name = elc.id.filter(|_| elc.filetype == MH_DYLIB);
+        let place = match requester {
+            Some(requester) => Place {
+                node: self.deptree.addnode(node.clone(), requester.node),
+                level: requester.level + 1,
+            },
+            None => Place {
+                node: self.deptree.addroot(node.clone()),
+                level: 0,
+            },
+        };
         self.images.push(Image {
             path,
             install_name,
             cache_image,
-            node: node.clone(),
+            node,
+            place,
+            pending: Some(Pending {
+                deps: elc.deps,
+                rpath: elc.rpath,
+                loader_path,
+            }),
         });
-        match parent {
-            Some(parent) => self.deptree.addnode(node, parent),
-            None => self.deptree.addroot(node),
-        }
+        self.images.len() - 1
     }
 
-    // The node of the image loaded from PATH, or whose install name is PATH.
-    fn image(&self, path: &str) -> Option<DepNode> {
+    // The image loaded from PATH, or whose install name is PATH.
+    fn image(&self, path: &str) -> Option<usize> {
         self.find(|image| image.path == path || image.install_name.as_deref() == Some(path))
     }
 
-    // The node of the image loaded from the file at the real PATH, which dyld
-    // matches by the file identity instead.
-    fn file_image(&self, path: &str) -> Option<DepNode> {
+    // The image loaded from the file at the real PATH, which dyld matches by
+    // the file identity instead.
+    fn file_image(&self, path: &str) -> Option<usize> {
         self.find(|image| image.cache_image.is_none() && image.path == path)
     }
 
-    // The node of the image loaded from the dyld cache image ID.
-    fn cache_image(&self, id: Option<(usize, u64)>) -> Option<DepNode> {
+    // The image loaded from the dyld cache image ID.
+    fn cache_image(&self, id: Option<(usize, u64)>) -> Option<usize> {
         id.and_then(|id| self.find(|image| image.cache_image == Some(id)))
     }
 
-    fn find(&self, matches: impl Fn(&Image) -> bool) -> Option<DepNode> {
-        self.images
-            .iter()
-            .find(|image| matches(image))
-            .map(|image| image.node.clone())
+    fn find(&self, matches: impl Fn(&Image) -> bool) -> Option<usize> {
+        self.images.iter().position(matches)
     }
 }
 
@@ -383,17 +458,19 @@ struct Config<'a> {
     ignore_prefix: &'a [String],
 }
 
-#[allow(clippy::too_many_arguments)]
+// Look the dependency DEP of the REQUESTER image up, adding its node to the
+// tree, and return the image it leads to, either a new one or one already
+// loaded, or None when it is not found (or skipped).  LOADER_PATH and
+// RPATHS are the requester directory and run-path stack.
 fn resolve_dependency(
     config: &Config,
     loader_path: &str,
     rpaths: &[String],
     dep: &MachODep,
     tree: &mut Tree,
-    depp: usize,
+    requester: Place,
     preload: bool,
-    level: usize,
-) {
+) -> Option<usize> {
     // dyld does not expand @loader_path in DYLD_INSERT_LIBRARIES.
     let dependency = expand_at_path(
         &dep.name,
@@ -402,84 +479,59 @@ fn resolve_dependency(
     );
 
     if pathutils::has_prefix(&dependency, config.ignore_prefix) {
-        return;
+        return None;
     }
 
     // To avoid circular dependencies, check if the dependency names an image
     // already loaded.  An @rpath load path only names an image with that
     // install name (dyld checks it first, before expanding the run-path
     // list), and its expansions are checked like any other candidate.
-    if check_already_resolved(config, tree.image(&dependency), dep, tree, depp) {
-        return;
+    if let Some(image) =
+        check_already_resolved(config, tree.image(&dependency), dep, tree, requester)
+    {
+        return Some(image);
     }
 
-    if let Some((elc, depd, path)) =
-        find_dependency(config, rpaths, &dependency, dep, tree, depp, preload)
-    {
-        // Stop descending once the depth limit is reached.
-        if config.depth != 0 && level >= config.depth {
-            return;
-        }
-        // The run-path list for the object own dependencies: the object
-        // LC_RPATH entries followed by the ones inherited from the loading
-        // chain, mimicking the dyld run-path stack.
-        let mut newrpaths = elc.rpath.clone();
-        for rpath in rpaths {
-            if !newrpaths.contains(rpath) {
-                newrpaths.push(rpath.clone());
-            }
-        }
-        // The dependencies of an inserted library are loaded like any other
-        // (dyld only inserts the DYLD_INSERT_LIBRARIES entries themselves).
-        for dep in &elc.deps {
-            resolve_dependency(config, &path, &newrpaths, dep, tree, depd, false, level + 1);
-        }
-    }
+    find_dependency(config, rpaths, &dependency, dep, tree, requester, preload)
 }
 
 // Check if the dependency names the image FOUND already loaded, adding an
-// already found node when the -a option is used.
+// already found node when the -a option is used, and return it.
 fn check_already_resolved(
     config: &Config,
-    found: Option<DepNode>,
+    found: Option<usize>,
     dep: &MachODep,
     tree: &mut Tree,
-    depp: usize,
-) -> bool {
-    let Some(entry) = found else {
-        return false;
-    };
-    tree.deptree.add_repeated(
-        config.all,
-        DepNode::repeat_of(&entry, entry.name.clone())
-            .with_attrs(dep.attrs.clone())
-            .with_version(dep.version.clone()),
-        depp,
-    );
-    true
+    requester: Place,
+) -> Option<usize> {
+    let image = found?;
+    let entry = &tree.images[image].node;
+    let node = DepNode::repeat_of(entry, entry.name.clone())
+        .with_attrs(dep.attrs.clone())
+        .with_version(dep.version.clone());
+    tree.deptree.add_repeated(config.all, node, requester.node);
+    Some(image)
 }
 
 // Resolve DEPENDENCY the way dyld_info/otool, the recorded load path is taken
 // verbatim (with @executable_path, @loader_path, and @rpath expanded) and
 // checked against the dyld cache and the filesystem, with the DYLD_*
 // environment search paths applied in the dyld order.
-// When found a node is added to the dependency tree and the parsed object, the
-// node index, and the directory of the resolved path (the @loader_path for the
-// object own dependencies) are returned.
+// When found a node is added to the dependency tree, and the image it
+// leads to (a new one or one already loaded) is returned.
 fn find_dependency(
     config: &Config,
     rpaths: &[String],
     dependency: &str,
     dep: &MachODep,
     tree: &mut Tree,
-    depp: usize,
+    requester: Place,
     preload: bool,
-) -> Option<(MachOInfo, usize, String)> {
+) -> Option<usize> {
     for (candidate, mode) in candidate_paths(config, rpaths, dependency, preload) {
         for candidate in suffix_variants(config.env.image_suffix.as_deref(), &candidate) {
-            match resolve_path(config, &candidate, dep, mode, tree, depp) {
-                ResolveResult::Found(r) => return Some(r),
-                ResolveResult::Skip => return None,
+            match resolve_path(config, &candidate, dep, mode, tree, requester) {
+                ResolveResult::Loaded(image) => return Some(image),
                 ResolveResult::Miss => {}
             }
         }
@@ -495,7 +547,7 @@ fn find_dependency(
         )
         .with_attrs(dep.attrs.clone())
         .with_version(dep.version.clone()),
-        depp,
+        requester.node,
     );
     None
 }
@@ -707,10 +759,9 @@ fn searched_locations(
 
 // The result of a single candidate path resolution.
 enum ResolveResult {
-    // Found and added to the dependency tree.
-    Found((MachOInfo, usize, String)),
-    // Already present in the dependency tree.
-    Skip,
+    // The image the candidate leads to, either loaded now and added to the
+    // dependency tree, or loaded already.
+    Loaded(usize),
     // Not found through this candidate path.
     Miss,
 }
@@ -725,9 +776,9 @@ fn resolve_path(
     dep: &MachODep,
     mode: DepMode,
     tree: &mut Tree,
-    depp: usize,
+    requester: Place,
 ) -> ResolveResult {
-    match resolve_cache(config, dependency, dep, tree, depp) {
+    match resolve_cache(config, dependency, dep, tree, requester) {
         ResolveResult::Miss => {}
         result => return result,
     }
@@ -737,12 +788,12 @@ fn resolve_path(
     if !path.is_absolute() {
         return ResolveResult::Miss;
     }
-    match resolve_file(config, path, dep, mode, tree, depp) {
+    match resolve_file(config, path, dep, mode, tree, requester) {
         ResolveResult::Miss => {}
         result => return result,
     }
     if let Some(cryptex) = cryptex_path(path) {
-        match resolve_file(config, &cryptex, dep, mode, tree, depp) {
+        match resolve_file(config, &cryptex, dep, mode, tree, requester) {
             ResolveResult::Miss => {}
             result => return result,
         }
@@ -752,7 +803,7 @@ fn resolve_path(
     // does not start with @ (Loader::getLoader).
     if matches!(mode, DepMode::Direct | DepMode::Preload) && !dep.name.starts_with('@') {
         if let Some(real) = realpath_leaf(path).filter(|real| real != dependency) {
-            return resolve_cache(config, &real, dep, tree, depp);
+            return resolve_cache(config, &real, dep, tree, requester);
         }
     }
     ResolveResult::Miss
@@ -764,14 +815,14 @@ fn resolve_cache(
     name: &str,
     dep: &MachODep,
     tree: &mut Tree,
-    depp: usize,
+    requester: Place,
 ) -> ResolveResult {
     // Each candidate is checked against the images already loaded, by its
     // path and by the cache image an alias path leads to.
     let cache_image = config.cache.image_id(name);
     let found = tree.image(name).or_else(|| tree.cache_image(cache_image));
-    if check_already_resolved(config, found, dep, tree, depp) {
-        return ResolveResult::Skip;
+    if let Some(image) = check_already_resolved(config, found, dep, tree, requester) {
+        return ResolveResult::Loaded(image);
     }
     let Some(elc) = self::cache_image(config.cache, name, config.executable_path)
         .filter(|elc| loads_platform(config, elc))
@@ -784,7 +835,7 @@ fn resolve_cache(
         DepMode::LdCache,
         dep,
         tree,
-        depp,
+        requester,
         cache_image,
     )
 }
@@ -795,10 +846,11 @@ fn resolve_file(
     dep: &MachODep,
     mode: DepMode,
     tree: &mut Tree,
-    depp: usize,
+    requester: Place,
 ) -> ResolveResult {
-    if check_already_resolved(config, tree.image(&path.to_string_lossy()), dep, tree, depp) {
-        return ResolveResult::Skip;
+    let found = tree.image(&path.to_string_lossy());
+    if let Some(image) = check_already_resolved(config, found, dep, tree, requester) {
+        return ResolveResult::Loaded(image);
     }
     // The canonicalization also checks the file existence, and gives the
     // path of an image already loaded through another path (dyld compares
@@ -806,14 +858,9 @@ fn resolve_file(
     let Ok(path) = path.canonicalize() else {
         return ResolveResult::Miss;
     };
-    if check_already_resolved(
-        config,
-        tree.file_image(&path.to_string_lossy()),
-        dep,
-        tree,
-        depp,
-    ) {
-        return ResolveResult::Skip;
+    let found = tree.file_image(&path.to_string_lossy());
+    if let Some(image) = check_already_resolved(config, found, dep, tree, requester) {
+        return ResolveResult::Loaded(image);
     }
     // dyld only links against a dylib: the dependencies and the inserted
     // libraries are loaded with the canBeDylib option alone, so a bundle or
@@ -828,7 +875,7 @@ fn resolve_file(
     .filter(|elc| elc.filetype == MH_DYLIB && loads_platform(config, elc)) else {
         return ResolveResult::Miss;
     };
-    add_found(elc, &path, mode, dep, tree, depp, None)
+    add_found(elc, &path, mode, dep, tree, requester, None)
 }
 
 // Whether the process platform loads the image ELC, the images of another
@@ -839,28 +886,29 @@ fn loads_platform(config: &Config, elc: &MachOInfo) -> bool {
 }
 
 // Add the object ELC found at PATH (or at the CACHE_IMAGE of the dyld cache)
-// to the dependency tree, returning it along with the node index and its
-// directory (the @loader_path for the object own dependencies).
+// to the dependency tree, below the REQUESTER.  Its directory is the
+// @loader_path of its own dependencies.
 fn add_found(
     elc: MachOInfo,
     path: &Path,
     mode: DepMode,
     dep: &MachODep,
     tree: &mut Tree,
-    depp: usize,
+    requester: Place,
     cache_image: Option<(usize, u64)>,
 ) -> ResolveResult {
     let dir = pathutils::get_path(&path);
-    let depd = tree.add_image(
+    let image = tree.add_image(
         DepNode::new(dir.clone(), pathutils::get_name(&path), mode)
             .with_attrs(dep.attrs.clone())
             .with_version(dep.version.clone()),
-        Some(depp),
+        Some(requester),
         path.to_string_lossy().into_owned(),
-        &elc,
+        elc,
         cache_image,
+        dir.unwrap_or_default(),
     );
-    ResolveResult::Found((elc, depd, dir.unwrap_or_default()))
+    ResolveResult::Loaded(image)
 }
 
 // How the architecture of a Mach-O image is checked.
@@ -1434,14 +1482,30 @@ mod tests {
         ctx
     }
 
-    // The nodes below the root: the full path of a resolved one or the name
-    // of one not found, its mode, and whether it repeats an earlier one.
+    // The nodes below IDX in the order the listing shows them, along with
+    // their level.
+    fn walk<'a>(
+        tree: &'a DepTree,
+        idx: usize,
+        level: usize,
+        nodes: &mut Vec<(usize, &'a DepNode)>,
+    ) {
+        for &child in &tree.arena[idx].children {
+            nodes.push((level, &tree.arena[child].val));
+            walk(tree, child, level + 1, nodes);
+        }
+    }
+
+    // The nodes below the root in the listing order: the full path of a
+    // resolved one or the name of one not found, its mode, and whether it
+    // repeats an earlier one.
     fn resolve(ctx: &mut MachOContext, input: &str) -> Vec<(String, DepMode, bool)> {
         let tree = resolve_binary(ctx, input).unwrap();
-        tree.arena[1..]
-            .iter()
-            .map(|node| {
-                let node = &node.val;
+        let mut nodes = Vec::new();
+        walk(&tree, 0, 1, &mut nodes);
+        nodes
+            .into_iter()
+            .map(|(_, node)| {
                 let name = match &node.path {
                     Some(path) => pathutils::join(path, &node.name),
                     None => node.name.clone(),
@@ -1449,6 +1513,29 @@ mod tests {
                 (name, node.mode, node.found)
             })
             .collect()
+    }
+
+    // The tree the listing shows, a line for each node with its leaf name
+    // indented by its level and a trailing * when it repeats an earlier
+    // one, and the leaf names of the images in the order they were loaded.
+    fn listing(ctx: &mut MachOContext, input: &str) -> (Vec<String>, Vec<String>) {
+        let tree = resolve_binary(ctx, input).unwrap();
+        let mut nodes = Vec::new();
+        walk(&tree, 0, 1, &mut nodes);
+        let lines = nodes
+            .into_iter()
+            .map(|(level, node)| {
+                let name = pathutils::get_name(&Path::new(&node.name));
+                let repeat = if node.found { " *" } else { "" };
+                format!("{}{name}{repeat}", "  ".repeat(level - 1))
+            })
+            .collect();
+        let loaded = tree.arena[1..]
+            .iter()
+            .filter(|node| !node.val.found && node.val.mode != DepMode::NotFound)
+            .map(|node| node.val.name.clone())
+            .collect();
+        (lines, loaded)
     }
 
     fn node(name: &str, mode: DepMode) -> (String, DepMode, bool) {
@@ -1750,6 +1837,135 @@ mod tests {
                 node(&exec, DepMode::Preload),
             ]
         );
+    }
+
+    fn lines(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|line| line.to_string()).collect()
+    }
+
+    #[test]
+    fn load_order_sibling_first() {
+        // The main executable links against libA and @rpath/libX.dylib, and
+        // libA against @rpath/libX.dylib too, with its own run-path entry.
+        // dyld loads @rpath/libX.dylib through the main executable run-path
+        // list before looking at the libA dependencies, which then match it
+        // by its install name.
+        let dir = Scratch::new("order");
+        let id = dylib_command(LC_ID_DYLIB, "@rpath/libX.dylib");
+        let rpath = |dir: String| string_command(LC_RPATH, &[], &dir);
+        let libx_main = dir.write("m/libX.dylib", &x86_64_dylib(std::slice::from_ref(&id)));
+        dir.write("a/libX.dylib", &x86_64_dylib(&[id]));
+        let lib_a = dir.write(
+            "a/libA.dylib",
+            &x86_64_dylib(&[load("@rpath/libX.dylib"), rpath(dir.path("a"))]),
+        );
+        let exe = dir.write(
+            "bin/exe",
+            &x86_64_exe(&[
+                load(&lib_a),
+                load("@rpath/libX.dylib"),
+                rpath(dir.path("m")),
+            ]),
+        );
+        let mut ctx = context(None);
+        assert_eq!(
+            resolve(&mut ctx, &exe),
+            [
+                node(&lib_a, DepMode::Direct),
+                repeat(&libx_main, DepMode::DtRpath),
+                node(&libx_main, DepMode::DtRpath),
+            ]
+        );
+    }
+
+    #[test]
+    fn load_order_dependents_once() {
+        // libC is a dependency of both the main executable and libA, and
+        // links against @rpath/libY.dylib, found through the libA run-path
+        // entry.  dyld loads libC for the main executable, but its
+        // dependencies when libA reaches it, with the libA run-path stack.
+        let dir = Scratch::new("once");
+        dir.write(
+            "a/libY.dylib",
+            &x86_64_dylib(&[load(&dir.path("z/libZ.dylib"))]),
+        );
+        dir.write("z/libZ.dylib", &x86_64_dylib(&[]));
+        let lib_c = dir.write("c/libC.dylib", &x86_64_dylib(&[load("@rpath/libY.dylib")]));
+        let lib_a = dir.write(
+            "a/libA.dylib",
+            &x86_64_dylib(&[load(&lib_c), string_command(LC_RPATH, &[], &dir.path("a"))]),
+        );
+        let exe = dir.write("bin/exe", &x86_64_exe(&[load(&lib_a), load(&lib_c)]));
+        let mut ctx = context(None);
+        let (tree, loaded) = listing(&mut ctx, &exe);
+        assert_eq!(
+            tree,
+            lines(&[
+                "libA.dylib",
+                "  libC.dylib *",
+                "libC.dylib",
+                "  libY.dylib",
+                "    libZ.dylib",
+            ])
+        );
+        assert_eq!(
+            loaded,
+            lines(&["libA.dylib", "libC.dylib", "libY.dylib", "libZ.dylib"])
+        );
+
+        // The depth limit prunes the levels the listing shows.
+        ctx.depth = 1;
+        assert_eq!(
+            listing(&mut ctx, &exe).0,
+            lines(&["libA.dylib", "libC.dylib"])
+        );
+        ctx.depth = 2;
+        assert_eq!(
+            listing(&mut ctx, &exe).0,
+            lines(&["libA.dylib", "  libC.dylib *", "libC.dylib", "  libY.dylib"])
+        );
+    }
+
+    #[test]
+    fn load_order_listing() {
+        // The images are loaded level by level below each image, so libB is
+        // loaded before libC, a dependency of the earlier libA, while the
+        // listing shows libC below libA.
+        let dir = Scratch::new("listing");
+        let lib_c = dir.write("lib/libC.dylib", &x86_64_dylib(&[]));
+        let lib_a = dir.write("lib/libA.dylib", &x86_64_dylib(&[load(&lib_c)]));
+        let lib_b = dir.write("lib/libB.dylib", &x86_64_dylib(&[]));
+        let exe = dir.write("bin/exe", &x86_64_exe(&[load(&lib_a), load(&lib_b)]));
+        let mut ctx = context(None);
+        let (tree, loaded) = listing(&mut ctx, &exe);
+        assert_eq!(tree, lines(&["libA.dylib", "  libC.dylib", "libB.dylib"]));
+        assert_eq!(loaded, lines(&["libA.dylib", "libB.dylib", "libC.dylib"]));
+    }
+
+    #[test]
+    fn load_order_inserted_libraries() {
+        // The inserted libraries are loaded first, but their dependencies
+        // after the main executable ones, so libD is loaded for libA, and
+        // libP only repeats it.
+        let dir = Scratch::new("insertorder");
+        let lib_d = dir.write("lib/libD.dylib", &x86_64_dylib(&[]));
+        let lib_a = dir.write("lib/libA.dylib", &x86_64_dylib(&[load(&lib_d)]));
+        let lib_p = dir.write("pre/libP.dylib", &x86_64_dylib(&[load(&lib_d)]));
+        let exe = dir.write("bin/exe", &x86_64_exe(&[load(&lib_a)]));
+        let mut ctx = context(None);
+        ctx.preload = insert_libraries(&format!("{lib_p}:{lib_p}"));
+        let (tree, loaded) = listing(&mut ctx, &exe);
+        assert_eq!(
+            tree,
+            lines(&[
+                "libP.dylib",
+                "  libD.dylib *",
+                "libP.dylib *",
+                "libA.dylib",
+                "  libD.dylib",
+            ])
+        );
+        assert_eq!(loaded, lines(&["libP.dylib", "libA.dylib", "libD.dylib"]));
     }
 
     #[test]
