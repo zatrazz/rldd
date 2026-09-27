@@ -1,11 +1,13 @@
 // The OpenBSD run-time linker.
 
+use std::borrow::Cow;
+
 use super::*;
 
 pub(in crate::elf) struct OpenBsd;
 
 impl Loader for OpenBsd {
-    type Cache = search_path::SearchPathVec;
+    type Cache = ld_hints_openbsd::Hints;
 
     // The _dl_load_shlib order: the LD_LIBRARY_PATH directories, the requesting
     // object DT_RUNPATH or, without one, its DT_RPATH followed by the main
@@ -98,9 +100,10 @@ impl Loader for OpenBsd {
         }
     }
 
-    // The OpenBSD loader matches a library by name and major version, picking the best
-    // minor available on the directory (even for the dlopen argument). Mimic it for
-    // shared library inputs (executables are executed directly, with no redirection).
+    // The OpenBSD ldd dlopens a shared library, which ld.so matches in its
+    // directory like any name with a slash (the hints are not loaded yet):
+    // the best minor of the major, at least the one of the name, and then
+    // any minor.  Executables are executed directly, with no redirection.
     fn redirect_root(
         filename: PathBuf,
         elc: ElfInfo,
@@ -115,13 +118,83 @@ impl Loader for OpenBsd {
         ) else {
             return (filename, elc);
         };
-        let candidate = Self::dependency_path(dir, name);
-        if candidate != filename {
-            if let Ok(nelc) = open_elf_file(&candidate, None, platform, false) {
-                return (candidate, nelc);
+        let mut req = Sod::parse(name);
+        let found = find_in_dir(dir, &req).or_else(|| {
+            req.minor = -1;
+            find_in_dir(dir, &req)
+        });
+        if let Some((name, _)) = found {
+            let candidate = Path::new(dir).join(name);
+            if candidate != filename {
+                if let Ok(nelc) = open_elf_file(&candidate, None, platform, false) {
+                    return (candidate, nelc);
+                }
             }
         }
         (filename, elc)
+    }
+
+    // _dl_load_shlib: a name with a slash is matched in its directory, and a
+    // name without one is first matched against the loaded objects (see
+    // find_loaded), and then searched on the LD_LIBRARY_PATH directories, the
+    // requesting object DT_RUNPATH or, without one, its DT_RPATH and the main
+    // program one, and at last the standard locations.  The search is made
+    // twice: first with the hints and for a minor version at least the one of
+    // the name, and then without the hints for any minor version, with a
+    // warning.  The file found is loaded, or the load fails, without going on
+    // with the search.
+    fn resolve_dependency<'a>(
+        dependency: &'a String,
+        config: &'a Config,
+        elc: &'a ElfInfo,
+        _refpath: &str,
+        namespace: &ObjectNamespace,
+        _preload: bool,
+    ) -> Option<Resolution<'a>> {
+        let hints = config.ld_cache.as_ref();
+        let (lists, name) = match dependency.rsplit_once('/') {
+            Some((_, "")) => return None,
+            Some((dir, name)) => (vec![SearchList::Path(dir)], name),
+            None => {
+                let mut lists = vec![SearchList::Dirs(
+                    &config.ld_library_path,
+                    DepMode::LdLibraryPath,
+                )];
+                if elc.has_runpath {
+                    lists.push(SearchList::Dirs(&elc.runpath, DepMode::DtRunpath));
+                } else {
+                    lists.push(SearchList::Dirs(&elc.rpath, DepMode::DtRpath));
+                }
+                lists.push(SearchList::Standard(&config.system_dirs));
+                (lists, dependency.as_str())
+            }
+        };
+
+        let requested = Sod::parse(name);
+        let mut req = requested.clone();
+        for with_hints in [true, false] {
+            if !with_hints {
+                req.minor = -1;
+            }
+            for list in &lists {
+                let Some((dir, file, mode, found)) = find_shlib(&req, list, hints, with_hints)
+                else {
+                    continue;
+                };
+                if found.minor < requested.minor {
+                    errln!(
+                        "warning: lib{}.so.{}.{}: minor version >= {} expected, \
+                         using it anyway",
+                        requested.name,
+                        requested.major,
+                        found.minor,
+                        requested.minor
+                    );
+                }
+                return Some(tryload(dir, &file, elc, config, mode, namespace));
+            }
+        }
+        None
     }
 
     // The OpenBSD ldd lists the loader (/usr/libexec/ld.so) for executables (the
@@ -138,48 +211,6 @@ impl Loader for OpenBsd {
                 deptree.addnode(DepNode::from_path(&path, DepMode::Direct), root_depp);
             }
         }
-    }
-
-    // OpenBSD shared objects do not have a DT_SONAME and the DT_NEEDED entries carry
-    // the full libname.so.major.minor name, with the loader matching the major version
-    // and picking the best minor available on the directory.
-    fn dependency_path(dir: &str, dtneeded: &str) -> PathBuf {
-        fn parse_version(name: &str) -> Option<(&str, u64)> {
-            let idx = name.find(".so.")?;
-            let stem = &name[..idx + 3];
-            // The version might be either major.minor or only the major.
-            let major = match name[idx + 4..].split_once('.') {
-                Some((major, minor)) => {
-                    minor.parse::<u64>().ok()?;
-                    major
-                }
-                None => &name[idx + 4..],
-            };
-            Some((stem, major.parse().ok()?))
-        }
-
-        if let Some((stem, major)) = parse_version(dtneeded) {
-            let prefix = format!("{stem}.{major}.");
-            let mut best: Option<(u64, PathBuf)> = None;
-            if let Ok(entries) = fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    if let Some(minor) = entry
-                        .file_name()
-                        .to_str()
-                        .and_then(|filename| filename.strip_prefix(&prefix))
-                        .and_then(|minor| minor.parse::<u64>().ok())
-                    {
-                        if best.as_ref().is_none_or(|(m, _)| minor > *m) {
-                            best = Some((minor, entry.path()));
-                        }
-                    }
-                }
-            }
-            if let Some((_, path)) = best {
-                return path;
-            }
-        }
-        Path::new(dir).join(dtneeded)
     }
 
     // An object with DT_RUNPATH only searches it: neither its own DT_RPATH nor
@@ -199,6 +230,224 @@ impl Loader for OpenBsd {
     // searched.
     fn nodeflib_rule(_step: SearchStep, _elc: &ElfInfo) -> NodeflibRule {
         NodeflibRule::Search
+    }
+}
+
+// The shared object description of a name (_dl_build_sod): the NAME of a
+// libNAME.so[.MAJOR[.MINOR]] library, with -1 for an absent version, or any
+// other name as is, with the versions 0.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Sod {
+    name: String,
+    library: bool,
+    major: i32,
+    minor: i32,
+}
+
+impl Sod {
+    fn parse(name: &str) -> Sod {
+        Self::parse_library(name).unwrap_or_else(|| Sod {
+            name: name.to_string(),
+            library: false,
+            major: 0,
+            minor: 0,
+        })
+    }
+
+    fn parse_library(name: &str) -> Option<Sod> {
+        let rest = name.strip_prefix("lib")?;
+        if name.contains('/') || !rest.contains('.') || rest.ends_with('.') {
+            return None;
+        }
+        let so = rest.find(".so")?;
+        let mut sod = Sod {
+            name: rest[..so].to_string(),
+            library: true,
+            major: -1,
+            minor: -1,
+        };
+        // The dot separated parts from the one of ".so": an empty one, the
+        // one of "so" (whatever follows it), the major, and the minor.
+        for (part, version) in rest[so..].split('.').enumerate() {
+            match part {
+                0 | 1 => {}
+                2 => sod.major = version.parse().ok()?,
+                3 => sod.minor = version.parse().ok()?,
+                _ => return None,
+            }
+        }
+        Some(sod)
+    }
+
+    // _dl_match_file: the description of the FILE name matching the REQ
+    // requested one: the same name, and the same major and at least the minor
+    // when requested.
+    fn match_file(req: &Sod, file: &str) -> Option<Sod> {
+        let name = if req.library {
+            file.strip_prefix("lib")?
+        } else {
+            file
+        };
+        if !name.starts_with(&req.name) {
+            return None;
+        }
+        let sod = Sod::parse(file);
+        (sod.name == req.name
+            && sod.library == req.library
+            && (req.major == -1 || req.major == sod.major)
+            && (req.minor == -1 || sod.minor >= req.minor))
+            .then_some(sod)
+    }
+}
+
+// The best match of the REQ description among the NAMES of a directory, in
+// their order (_dl_find_shlib): an unversioned library is taken at once, and
+// otherwise the highest major, and then the highest minor, the first one on
+// a tie.
+fn best_match<'n>(req: &Sod, names: impl IntoIterator<Item = &'n str>) -> Option<(&'n str, Sod)> {
+    let mut best: Option<(&str, Sod)> = None;
+    for name in names {
+        let Some(sod) = Sod::match_file(req, name) else {
+            continue;
+        };
+        let better = match &best {
+            None => true,
+            Some((_, best)) => {
+                sod.major == -1
+                    || sod.major > best.major
+                    || (sod.major == best.major && sod.minor > best.minor)
+            }
+        };
+        if better {
+            let unversioned = sod.major == -1;
+            best = Some((name, sod));
+            if unversioned {
+                break;
+            }
+        }
+    }
+    best
+}
+
+// The best match of REQ in the DIR directory, in the readdir order.
+fn find_in_dir(dir: &str, req: &Sod) -> Option<(String, Sod)> {
+    let names: Vec<String> = fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    best_match(req, names.iter().map(String::as_str)).map(|(name, sod)| (name.to_string(), sod))
+}
+
+// A list _dl_find_shlib searches.
+enum SearchList<'a> {
+    // The directory of a name with a slash.
+    Path(&'a str),
+    // A search list, whose objects are shown with the mode given.
+    Dirs(&'a search_path::SearchPathVec, DepMode),
+    // The standard locations: any hint, and then the hints directory list,
+    // or the default directories given without a valid hints file.
+    Standard(&'a search_path::SearchPathVec),
+}
+
+// _dl_find_shlib: the directory, the file name, the mode, and the description
+// of the object matching REQ on LIST, the HINTS file giving the directories of
+// the standard locations, and its hash table searched first when WITH_HINTS
+// is set.
+fn find_shlib<'a>(
+    req: &Sod,
+    list: &SearchList<'a>,
+    hints: Option<&'a impl SearchCache>,
+    with_hints: bool,
+) -> Option<(Cow<'a, str>, String, DepMode, Sod)> {
+    if let Some(hints) = hints.filter(|_| with_hints) {
+        let hint = |dir: Option<&str>| hints.hint(&req.name, req.major, req.minor, dir);
+        let hint = match list {
+            SearchList::Path(dir) => hint(Some(dir)).map(|path| (path, DepMode::Direct)),
+            SearchList::Dirs(dirs, mode) => dirs
+                .iter()
+                .find_map(|dir| hint(Some(&dir.path)))
+                .map(|path| (path, *mode)),
+            SearchList::Standard(_) => hint(None).map(|path| (path, DepMode::LdCache)),
+        };
+        if let Some((path, mode)) = hint {
+            let (dir, file) = path.rsplit_once('/')?;
+            return Some((Cow::Borrowed(dir), file.to_string(), mode, req.clone()));
+        }
+    }
+    let dirs: Vec<(&'a str, DepMode)> = match list {
+        SearchList::Path(dir) => vec![(dir, DepMode::Direct)],
+        SearchList::Dirs(dirs, mode) => dirs.iter().map(|dir| (dir.path.as_str(), *mode)).collect(),
+        SearchList::Standard(system_dirs) => match hints.and_then(|hints| hints.directories()) {
+            Some(dirs) => dirs
+                .iter()
+                .map(|dir| (dir.path.as_str(), DepMode::LdCache))
+                .collect(),
+            None => system_dirs
+                .iter()
+                .map(|dir| (dir.path.as_str(), DepMode::SystemDirs))
+                .collect(),
+        },
+    };
+    dirs.into_iter().find_map(|(dir, mode)| {
+        let (file, sod) = find_in_dir(dir, req)?;
+        Some((Cow::Borrowed(dir), file, mode, sod))
+    })
+}
+
+// _dl_tryload_shlib: load the FILE of the DIR directory, which fails the load
+// when it can not be opened, or is not an object ld.so loads.
+fn tryload<'a>(
+    dir: Cow<'a, str>,
+    file: &str,
+    elc: &ElfInfo,
+    config: &Config,
+    mode: DepMode,
+    namespace: &ObjectNamespace,
+) -> Resolution<'a> {
+    let path = pathutils::join(&dir, file);
+    match search_dir(dir, file, elc, config.platform, mode, namespace) {
+        // The object of a name with a slash is shown by its path.
+        Some(Ok(mut dep)) if mode == DepMode::Direct => {
+            dep.path = Cow::Owned(path);
+            Ok(dep)
+        }
+        Some(resolution) => resolution,
+        None => Err(format!("{path}: cannot open")),
+    }
+}
+
+// The hints file: its directory list, along with the library hints.
+impl SearchCache for ld_hints_openbsd::Hints {
+    type Namespace = NoNamespace;
+
+    fn summary(&self) -> String {
+        search_path::format_list(&self.dirs)
+    }
+
+    fn resolve<'a>(
+        &'a self,
+        dtneeded: &str,
+        platform: Option<&String>,
+        elc: &'a ElfInfo,
+        _namespace: &NoNamespace,
+    ) -> Option<Resolution<'a>> {
+        search_dirs(
+            &self.dirs,
+            dtneeded,
+            elc,
+            platform,
+            DepMode::LdCache,
+            &Default::default(),
+        )
+    }
+
+    fn directories(&self) -> Option<&search_path::SearchPathVec> {
+        Some(&self.dirs)
+    }
+
+    fn hint(&self, name: &str, major: i32, minor: i32, dir: Option<&str>) -> Option<&str> {
+        self.find(name, major, minor, dir)
     }
 }
 
@@ -377,32 +626,182 @@ mod tests {
         }
     }
 
-    // The file picked in a directory: the major must match, and the highest
-    // minor wins.
+    fn sod(name: &str, library: bool, major: i32, minor: i32) -> Sod {
+        Sod {
+            name: name.to_string(),
+            library,
+            major,
+            minor,
+        }
+    }
+
     #[test]
-    fn dependency_minor_version() -> std::io::Result<()> {
-        let tmpdir = TempDir::new()?;
-        for name in [
+    fn build_sod() {
+        let cases = [
+            ("libfoo.so.1.2", sod("foo", true, 1, 2)),
+            ("libfoo.so.1", sod("foo", true, 1, -1)),
+            ("libfoo.so", sod("foo", true, -1, -1)),
+            ("libfoo.bar.so.3.4", sod("foo.bar", true, 3, 4)),
+            // Whatever follows ".so" is not checked.
+            ("libfoo.sox.1", sod("foo", true, 1, -1)),
+            // Anything else is a plain name.
+            ("libfoo.so.1.2.3", sod("libfoo.so.1.2.3", false, 0, 0)),
+            ("libfoo.so.x", sod("libfoo.so.x", false, 0, 0)),
+            ("libfoo.so.", sod("libfoo.so.", false, 0, 0)),
+            ("libfoo", sod("libfoo", false, 0, 0)),
+            ("foo.so.1", sod("foo.so.1", false, 0, 0)),
+        ];
+        for (name, sod) in cases {
+            assert_eq!(Sod::parse(name), sod, "{name}");
+        }
+    }
+
+    // The best file of a directory: the major must match and the minor be
+    // at least the one requested, where the highest major and then minor
+    // wins, and an unversioned library at once.
+    #[test]
+    fn best_file() {
+        let names = [
             "libfoo.so.1.0",
-            "libfoo.so.1.2",
             "libfoo.so.1.10",
+            "libfoo.so.1.2",
             "libfoo.so.1.11.1",
             "libfoo.so.1.x",
             "libfoo.so.2.0",
             "libfoobar.so.1.20",
-        ] {
-            fs::write(tmpdir.path().join(name), [])?;
-        }
-        let dir = tmpdir.path().to_str().unwrap();
-        let resolve = |dtneeded| pathutils::get_name(&OpenBsd::dependency_path(dir, dtneeded));
+            "foo.so",
+        ];
+        let best = |name, names: &[&'static str]| {
+            best_match(&Sod::parse(name), names.iter().copied()).map(|(name, _)| name)
+        };
+        assert_eq!(best("libfoo.so.1.1", &names), Some("libfoo.so.1.10"));
+        assert_eq!(best("libfoo.so.1.20", &names), None);
+        assert_eq!(best("libfoo.so.1", &names), Some("libfoo.so.1.10"));
+        assert_eq!(best("libfoo.so.2.5", &names), None);
+        assert_eq!(best("libfoo.so", &names), Some("libfoo.so.2.0"));
+        assert_eq!(
+            best(
+                "libfoo.so",
+                &["libfoo.so.3.0", "libfoo.so", "libfoo.so.4.0"]
+            ),
+            Some("libfoo.so")
+        );
+        assert_eq!(best("foo.so", &names), Some("foo.so"));
+        assert_eq!(best("foo.so.1", &names), None);
+    }
 
-        assert_eq!(resolve("libfoo.so.1.1"), "libfoo.so.1.10");
-        assert_eq!(resolve("libfoo.so.1.20"), "libfoo.so.1.10");
-        assert_eq!(resolve("libfoo.so.1"), "libfoo.so.1.10");
-        assert_eq!(resolve("libfoo.so.2.5"), "libfoo.so.2.0");
-        // Without a match, the name as is.
-        assert_eq!(resolve("libfoo.so.3.0"), "libfoo.so.3.0");
-        assert_eq!(resolve("libfoo.so"), "libfoo.so");
+    // The objects of a name, found in their search order, where the fixture
+    // files are empty, which the candidate check fails on, reporting their
+    // path.
+    #[test]
+    fn search_two_passes() -> std::io::Result<()> {
+        let tmpdir = TempDir::new()?;
+        let dir = |name: &str, files: &[&str]| -> std::io::Result<String> {
+            let dir = tmpdir.path().join(name);
+            fs::create_dir(&dir)?;
+            for file in files {
+                fs::write(dir.join(file), [])?;
+            }
+            Ok(dir.to_str().unwrap().to_string())
+        };
+        let a = dir("a", &["libfoo.so.1.0"])?;
+        let b = dir("b", &["libfoo.so.1.5"])?;
+        let c = dir("c", &["libbar.so.2.0", "libbar.so.3.1"])?;
+        let d = dir("d", &["libfoo.so.1.9"])?;
+
+        let ld_cache = None;
+        let config = Config {
+            ld_preload: &[],
+            ld_library_path: search_path::from_string(format!("{a}:{b}:{c}"), &[':']),
+            ld_cache: &ld_cache,
+            system_dirs: search_path::SearchPathVec::new(),
+            platform: None,
+            all: false,
+            #[cfg(any(target_os = "freebsd", all(test, target_os = "linux")))]
+            libmap: None,
+        };
+        let mut elc = ElfInfo::for_test(EM_X86_64, FileFlags(0));
+        elc.runpath = search_path::from_string(&d, &[':']);
+        let candidate = |elc: &ElfInfo, name: &str| {
+            let name = name.to_string();
+            let dep =
+                OpenBsd::resolve_dependency(&name, &config, elc, "", &Default::default(), false)?;
+            let error = dep.expect_err("empty object loaded");
+            error.split(": ").next().map(str::to_string)
+        };
+
+        // A minor high enough in any directory, and then any minor.
+        assert_eq!(
+            candidate(&elc, "libfoo.so.1.3"),
+            Some(format!("{b}/libfoo.so.1.5"))
+        );
+        assert_eq!(
+            candidate(&elc, "libfoo.so.1.7"),
+            Some(format!("{a}/libfoo.so.1.0"))
+        );
+        assert_eq!(
+            candidate(&elc, "libbar.so"),
+            Some(format!("{c}/libbar.so.3.1"))
+        );
+        assert_eq!(candidate(&elc, "libbaz.so.1.0"), None);
+        // A name with a slash is matched in its directory.
+        assert_eq!(
+            candidate(&elc, &format!("{d}/libfoo.so.1.3")),
+            Some(format!("{d}/libfoo.so.1.9"))
+        );
+        // DT_RUNPATH instead of DT_RPATH.
+        elc.has_runpath = true;
+        assert_eq!(
+            candidate(&elc, "libfoo.so.1.7"),
+            Some(format!("{d}/libfoo.so.1.9"))
+        );
+        Ok(())
+    }
+
+    // The hints first, for the directories of the list, or anywhere for the
+    // standard locations, which are otherwise the hints directory list.
+    #[test]
+    fn search_hints() -> std::io::Result<()> {
+        let tmpdir = TempDir::new()?;
+        let a = tmpdir.path().join("a");
+        fs::create_dir(&a)?;
+        fs::write(a.join("libfoo.so.1.2"), [])?;
+        let a = a.to_str().unwrap();
+        let hints = ld_hints_openbsd::Hints::with_libraries(
+            search_path::from_string(a, &[':']),
+            &[("foo", "/usr/local/lib/libfoo.so.1.5", 1, 5)],
+        );
+        let found = |list: &SearchList, name: &str, with_hints| {
+            find_shlib(&Sod::parse(name), list, Some(&hints), with_hints)
+                .map(|(dir, file, _, _)| format!("{dir}/{file}"))
+        };
+        let standard = search_path::SearchPathVec::new();
+        let dirs = search_path::fixed_list(["/usr/local/lib"]);
+        assert_eq!(
+            found(&SearchList::Standard(&standard), "libfoo.so.1.3", true).as_deref(),
+            Some("/usr/local/lib/libfoo.so.1.5")
+        );
+        assert_eq!(
+            found(&SearchList::Standard(&standard), "libfoo.so.1.0", false),
+            Some(format!("{a}/libfoo.so.1.2"))
+        );
+        assert_eq!(
+            found(
+                &SearchList::Dirs(&dirs, DepMode::DtRpath),
+                "libfoo.so.1.0",
+                true
+            )
+            .as_deref(),
+            Some("/usr/local/lib/libfoo.so.1.5")
+        );
+        assert_eq!(
+            found(
+                &SearchList::Dirs(&dirs, DepMode::DtRpath),
+                "libfoo.so.1.6",
+                true
+            ),
+            None
+        );
         Ok(())
     }
 }

@@ -289,6 +289,14 @@ pub(super) trait SearchCache {
     fn directories(&self) -> Option<&search_path::SearchPathVec> {
         None
     }
+
+    // The path of the NAME library of the MAJOR version, with a minor version
+    // of at least MINOR, in the DIR directory when one is given, recorded on
+    // a hints file hash table (the OpenBSD one).
+    #[cfg_attr(not(target_os = "openbsd"), allow(dead_code))]
+    fn hint(&self, _name: &str, _major: i32, _minor: i32, _dir: Option<&str>) -> Option<&str> {
+        None
+    }
 }
 
 // The loaders without linker namespaces.
