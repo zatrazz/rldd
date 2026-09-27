@@ -34,14 +34,16 @@ argh = "0.1.19"
 [target.'cfg(target_os = "android")'.dependencies]
 libc = "0.2.138"
 
-# The KnownDLLs registry key, the Windows directory, and the console virtual
-# terminal mode.
+# The KnownDLLs registry key, the Windows directory, the console virtual
+# terminal mode, and the system default activation context.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_Console",
+    "Win32_System_ApplicationInstallationAndServicing",
+    "Win32_System_WindowsProgramming",
 ] }
 
 [profile.release]

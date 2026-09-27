@@ -1,4 +1,4 @@
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::io::Error;
@@ -14,6 +14,7 @@ use crate::pathutils;
 use crate::search_path;
 use machine::Wow64;
 
+mod actctx;
 mod apiset;
 mod knowndlls;
 mod machine;
@@ -105,6 +106,10 @@ struct PeInfo {
     // the one of a module, or the process one for the executable (see
     // process_manifest).
     assemblies: Vec<sxs::Assembly>,
+    // Whether the object has an activation context of its own, the manifest
+    // resource 2 of a module or the manifest of the process, which the loader
+    // activates for its imports instead of the one it inherits.
+    context: bool,
     // Whether the process starts with a manifest, the resource 1 or the
     // external file of the executable, which disables the '.local'
     // redirection.  The resource 2 of an executable is activated for its
@@ -155,6 +160,9 @@ pub struct PeContext {
     // images, built on first use.
     known_sections: [OnceCell<HashSet<String>>; 3],
     winsxs: sxs::WinSxs,
+    // The system default activation contexts, by store architecture, created
+    // on first use.
+    system_contexts: RefCell<HashMap<String, Option<actctx::SystemContext>>>,
     windows_dir: String,
     safe_search: bool,
     // The PreferExternalManifest value, which puts the external manifest of
@@ -194,6 +202,7 @@ impl PeContext {
             knowndlls: knowndlls::load(),
             known_sections: Default::default(),
             winsxs: sxs::WinSxs::new(&windows_dir),
+            system_contexts: RefCell::new(HashMap::new()),
             windows_dir,
             safe_search,
             prefer_external_manifest: registry::dword(SIDE_BY_SIDE_KEY, "PreferExternalManifest")
@@ -250,6 +259,27 @@ impl PeContext {
     fn is_known_dll(&self, name: &str, wow64: Wow64) -> bool {
         self.known_dlls(wow64).contains(&name.to_lowercase())
     }
+
+    // The WinSxS directory the system default activation context of the
+    // processes of MACHINE redirects the module NAME to.  The store
+    // architectures are taken in the order the side-by-side assemblies are
+    // matched, the next one only when the context of one cannot be created.
+    fn system_default(&self, name: &str, machine: pe::Machine) -> Option<String> {
+        let mut contexts = self.system_contexts.borrow_mut();
+        for arch in sxs::arch_names("*", machine) {
+            if arch.is_empty() {
+                continue;
+            }
+            let context = contexts
+                .entry(arch.clone())
+                .or_insert_with(|| actctx::SystemContext::new(&arch));
+            if let Some(context) = context {
+                let dir = context.redirect(name)?;
+                return Some(pathutils::join(self.winsxs.root(), &dir));
+            }
+        }
+        None
+    }
 }
 
 struct Config<'a> {
@@ -257,6 +287,9 @@ struct Config<'a> {
     dirs: search_dirs::SearchDirs,
     // The '.local' DLL redirection directory, searched first when present.
     redirect: search_dirs::SearchDirs,
+    // The side-by-side directories of the process default activation
+    // context, searched after the ones of the context active for an import.
+    process: search_dirs::SearchDirs,
     machine: pe::Machine,
     all: bool,
     depth: usize,
@@ -292,10 +325,18 @@ pub fn resolve_binary(ctx: &mut PeContext, arg: &str) -> Result<DepTree, std::io
         DepMode::Executable,
     ));
 
+    // The activation context of an executable is the one of its process,
+    // while a DLL given on the command line runs in a process of another.
+    let process = match pei.is_dll {
+        true => search_dirs::SearchDirs::new(),
+        false => context_dirs(ctx, &pei.assemblies, pei.machine),
+    };
+
     let config = Config {
         ctx,
         dirs,
         redirect,
+        process,
         machine: pei.machine,
         all: ctx.all,
         depth: ctx.depth,
@@ -417,22 +458,21 @@ fn dot_local_dirs(filename: &Path, application: Option<&str>) -> search_dirs::Se
 struct WorkItem {
     dep: PeDep,
     importing: String,
-    // The directories the loading chain redirects to, searched before the
-    // loaded module list.
-    redirect: search_dirs::SearchDirs,
+    // The side-by-side directories of the activation context active for the
+    // import.
+    context: search_dirs::SearchDirs,
     depp: usize,
     level: usize,
 }
 
-// The side-by-side directories of an object, added to the ones it inherits
-// from the loading chain.
-fn assembly_dirs(
-    config: &Config,
-    inherited: &search_dirs::SearchDirs,
+// The side-by-side directories of the ASSEMBLIES of an activation context.
+fn context_dirs(
+    ctx: &PeContext,
     assemblies: &[sxs::Assembly],
+    machine: pe::Machine,
 ) -> search_dirs::SearchDirs {
-    let mut dirs = inherited.clone();
-    for dir in sxs_dirs(config.ctx, assemblies, config.machine) {
+    let mut dirs = search_dirs::SearchDirs::new();
+    for dir in sxs_dirs(ctx, assemblies, machine) {
         search_dirs::add(&mut dirs, &dir, DepMode::SideBySide);
     }
     dirs
@@ -448,9 +488,20 @@ fn sxs_dirs(ctx: &PeContext, assemblies: &[sxs::Assembly], machine: pe::Machine)
 // Resolve the dependencies in breadth-first orde: a module is loaded once
 // and attributed to the first importer, and the search order is the one of
 // the application (not of the importing module).
+//
+// The side-by-side redirection follows the activation contexts the loader
+// searches for a name: the '.local' directory first, then the context active
+// for the import, then the one of the process, and at last the system default
+// one.  The context active for the imports of a module is its own, when it
+// has a manifest, and otherwise the one active for the module that loaded it.
+// Checked on Windows 11 24H2 with a DLL asking for the common controls 5.82
+// loaded by an executable asking for version 6 (5.82), a DLL without a
+// manifest loaded by one asking for version 6 (6), and a DLL whose manifest
+// asks for nothing loaded by one asking for version 6 (the process one, or
+// the system default 5.82 when the process has none).
 fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, root_depp: usize) {
     let root_name = deptree.arena[root_depp].val.name.clone();
-    let root_sxs = assembly_dirs(config, &config.redirect, &root.assemblies);
+    let root_context = context_dirs(config.ctx, &root.assemblies, config.machine);
 
     // The objects already parsed, so a module shared by several importers is
     // only read once, and the forwarded symbols already queued for them.
@@ -462,7 +513,7 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
         queue.push_back(WorkItem {
             dep: dep.clone(),
             importing: root_name.clone(),
-            redirect: root_sxs.clone(),
+            context: root_context.clone(),
             depp: root_depp,
             level: 1,
         });
@@ -492,10 +543,11 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
 
         // A recorded name with a path component resolves to the module FILE
         // names, and is printed as an alias of it.  The '.local' redirection
-        // takes its base name, but the side-by-side one does not apply to it
-        // (with a manifest asking for the common controls version 6, an
-        // import of 'C:\Windows\System32\comctl32.dll' still maps version
-        // 5.82).
+        // takes its base name, but the activation contexts do not apply to
+        // it: an import of a copy of comctl32 by its full path maps that
+        // copy.  One of 'C:\Windows\System32\comctl32.dll' maps the version
+        // 5.82 of the system default context, even when the process asks
+        // for version 6, a System32 special case left out.
         let file = pathutils::get_name(&Path::new(&name));
         let path_name = file != name;
         let alias = match path_name {
@@ -506,12 +558,7 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
         // The redirection comes before the loaded-module list, so the same
         // name may be loaded from more than one assembly.
         let mut searched = Vec::new();
-        let redirect_dirs = item
-            .redirect
-            .iter()
-            .filter(|(_, mode)| !path_name || *mode == DepMode::DllRedirection)
-            .map(|(dir, mode)| (dir.path.as_str(), *mode));
-        let Ok(redirect) = find_in(config, &file, redirect_dirs, &mut searched) else {
+        let Ok(redirect) = find_redirected(config, &item, &file, path_name, &mut searched) else {
             add_not_found(config, &item, deptree, searched, true);
             continue;
         };
@@ -569,7 +616,7 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
                         imports: symbols,
                     },
                     importing: entry.name.clone(),
-                    redirect: item.redirect.clone(),
+                    context: item.context.clone(),
                     // The forwarded module is a dependency of the module
                     // already on the tree, not of the current importer.
                     depp: index,
@@ -606,20 +653,24 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
         if config.depth != 0 && item.level >= config.depth {
             continue;
         }
-        let sxs = assembly_dirs(config, &item.redirect, &info.assemblies);
+        let context = match info.context {
+            true => context_dirs(config.ctx, &info.assemblies, config.machine),
+            false => item.context.clone(),
+        };
         for dep in &info.deps {
             queue.push_back(WorkItem {
                 dep: dep.clone(),
                 importing: file.clone(),
-                redirect: sxs.clone(),
+                context: context.clone(),
                 depp: depd,
                 level: item.level + 1,
             });
         }
         // An imported symbol that resolves to a forwarded export pulls in the
         // module it points at, which no import directory records.  The
-        // module is loaded like any other, and the symbols it must provide
-        // are followed in turn, as they may be forwarded again.
+        // module is loaded like any other dependency of the forwarding one,
+        // and the symbols it must provide are followed in turn, as they may
+        // be forwarded again.
         for (module, symbols) in forwarded_modules(&item.dep.imports, &info) {
             queue.push_back(WorkItem {
                 dep: PeDep {
@@ -628,11 +679,59 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
                     imports: symbols,
                 },
                 importing: file.clone(),
-                redirect: sxs.clone(),
+                context: context.clone(),
                 depp: depd,
                 level: item.level + 1,
             });
         }
+    }
+}
+
+// Search FILE on the directories the loader redirects the ITEM dependency to:
+// the '.local' one, the side-by-side ones of the active and the process
+// activation contexts, and the assembly of the system default context.  A
+// name with a path component (PATH_NAME) is only redirected by the '.local'
+// directory.
+fn find_redirected(
+    config: &Config,
+    item: &WorkItem,
+    file: &str,
+    path_name: bool,
+    searched: &mut Vec<String>,
+) -> Search {
+    let contexts = match path_name {
+        true => [].as_slice(),
+        false => item.context.as_slice(),
+    };
+    let mut dirs: Vec<(&str, DepMode)> = Vec::new();
+    let mut seen: Vec<&search_path::SearchPath> = Vec::new();
+    for (dir, mode) in config.redirect.iter().chain(contexts) {
+        seen.push(dir);
+        dirs.push((dir.path.as_str(), *mode));
+    }
+    // The process context is the active one for the imports of the
+    // executable and of the modules it loads without a manifest.
+    if !path_name {
+        for (dir, mode) in &config.process {
+            if !seen.contains(&dir) {
+                dirs.push((dir.path.as_str(), *mode));
+            }
+        }
+    }
+    if let Some(found) = find_in(config, file, dirs, searched)? {
+        return Ok(Some(found));
+    }
+    if path_name {
+        return Ok(None);
+    }
+    match config.ctx.system_default(file, config.machine) {
+        Some(dir) => find_in(
+            config,
+            file,
+            [(dir.as_str(), DepMode::SideBySide)],
+            searched,
+        ),
+        None => Ok(None),
     }
 }
 
@@ -721,12 +820,15 @@ pub fn check_imports(ctx: &PeContext, deptree: &DepTree, delay_load: bool) -> Ve
             // The child node records the module this object resolved to,
             // which a side-by-side redirection may make differ from the one
             // the loaded-module list holds.  The redirection is redone when
-            // the child was resolved through another object.
+            // the child was resolved through another object, the system
+            // default activation context included.
             let target = child_module(deptree, index, &name)
                 .map(|child| deptree.arena[child].val.clone())
                 .or_else(|| {
                     sxs.iter()
-                        .find_map(|dir| deptree.get(&pathutils::join(dir, &name)))
+                        .cloned()
+                        .chain(ctx.system_default(&name, info.machine))
+                        .find_map(|dir| deptree.get(&pathutils::join(&dir, &name)))
                 })
                 .or_else(|| deptree.get(&name));
             let Some(target) = target else {
@@ -1011,6 +1113,7 @@ fn process_manifest(ctx: &PeContext, filename: &Path, pei: &mut PeInfo) {
     };
     if let Some(assemblies) = manifest {
         pei.assemblies = assemblies;
+        pei.context = true;
         pei.manifest = true;
     }
 }
@@ -1069,6 +1172,7 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
         deps: Vec::new(),
         exports: PeExports::default(),
         assemblies: Vec::new(),
+        context: false,
         manifest: false,
         process_manifest: None,
         any_cpu: !headers.is_type_64()
@@ -1159,6 +1263,7 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
 
     if let Some(manifest) = manifest_resource(&file, ISOLATIONAWARE_MANIFEST_RESOURCE_ID) {
         pei.assemblies = sxs::parse_manifest(manifest);
+        pei.context = true;
     }
     if !pei.is_dll {
         pei.process_manifest =
@@ -1906,6 +2011,7 @@ mod tests {
             ctx,
             dirs: search_dirs::SearchDirs::new(),
             redirect: search_dirs::SearchDirs::new(),
+            process: search_dirs::SearchDirs::new(),
             machine,
             all: false,
             depth: 1,
@@ -2096,6 +2202,100 @@ mod tests {
             exports.lookup(&ImportName::Ordinal(12)),
             ExportLookup::Missing
         ));
+    }
+
+    // A manifest asking for the common controls of VERSION, or for nothing.
+    fn common_controls(version: Option<&str>) -> Vec<u8> {
+        let dependency = version.map_or(String::new(), |version| {
+            format!(
+                r#"<dependency><dependentAssembly><assemblyIdentity type="win32"
+                name="Microsoft.Windows.Common-Controls" version="{version}"
+                processorArchitecture="*" publicKeyToken="6595b64144ccf1df"
+                language="*"/></dependentAssembly></dependency>"#
+            )
+        });
+        format!(r#"<assembly manifestVersion="1.0">{dependency}</assembly>"#).into_bytes()
+    }
+
+    // An image importing InitCommonControls from IMPORT, with the manifest
+    // resources MANIFESTS.
+    fn importer(dll: bool, import: &[u8], manifests: &[(u16, &[u8])]) -> Vec<u8> {
+        let mut image = match dll {
+            true => testimage::Image::dll(pe::IMAGE_FILE_MACHINE_AMD64, true),
+            false => testimage::Image::exe(pe::IMAGE_FILE_MACHINE_AMD64, true),
+        };
+        let symbol = image.hint_name(b"InitCommonControls");
+        let thunks = image.thunks(&[u64::from(symbol)]);
+        let module = image.string(import);
+        image.imports(&[[thunks, 0, module, thunks]]);
+        if !manifests.is_empty() {
+            image.manifests(manifests);
+        }
+        image.build()
+    }
+
+    // The version of the common controls the whole tree of an executable
+    // resolves comctl32 to, for app.exe importing it from the first of the
+    // modules, each with the manifest resources given and importing the next.
+    fn comctl32_version(modules: &[(u16, Option<&str>)]) -> String {
+        let dir = crate::tempdir::TempDir::new().unwrap();
+        let names: Vec<String> = (0..modules.len())
+            .map(|i| match i {
+                0 => "app.exe".to_string(),
+                i => format!("m{i}.dll"),
+            })
+            .collect();
+        for (i, (id, version)) in modules.iter().enumerate() {
+            let import = names.get(i + 1).map_or("comctl32.dll", String::as_str);
+            let manifest = common_controls(*version);
+            let manifests: &[(u16, &[u8])] = match id {
+                0 => &[],
+                id => &[(*id, &manifest)],
+            };
+            let data = importer(i != 0, import.as_bytes(), manifests);
+            fs::write(dir.path().join(&names[i]), data).unwrap();
+        }
+        // comctl32 is on the last level.
+        let mut ctx = PeContext {
+            depth: modules.len(),
+            ..PeContext::new(true)
+        };
+        let exe = dir.path().join("app.exe");
+        let deptree = resolve_binary(&mut ctx, exe.to_str().unwrap()).unwrap();
+        let node = deptree
+            .arena
+            .iter()
+            .find(|node| node.val.name.eq_ignore_ascii_case("comctl32.dll"))
+            .unwrap();
+        assert_eq!(node.val.mode, DepMode::SideBySide);
+        let path = node.val.path.as_ref().unwrap().to_lowercase();
+        let (_, rest) = path
+            .split_once("_microsoft.windows.common-controls_6595b64144ccf1df_")
+            .unwrap_or_else(|| panic!("{path}"));
+        let version: Vec<&str> = rest.split('.').take(2).collect();
+        version.join(".")
+    }
+
+    // The side-by-side redirection takes the context of the module, else
+    // the one inherited from the module that loaded it, then the one of the
+    // process, and at last the system default one, which redirects comctl32
+    // to the common controls version 5.82.
+    #[test]
+    fn activation_context_chain() {
+        let v6 = Some("6.0.0.0");
+        let v5 = Some("5.82.0.0");
+        assert_eq!(comctl32_version(&[(0, None)]), "5.82");
+        assert_eq!(comctl32_version(&[(1, v6)]), "6.0");
+        // A module asking for another version than the process gets its
+        // own.
+        assert_eq!(comctl32_version(&[(1, v6), (2, v5)]), "5.82");
+        assert_eq!(comctl32_version(&[(0, None), (2, v6)]), "6.0");
+        // A module without a manifest takes the context of the one that
+        // loaded it, while one whose manifest asks for nothing falls back
+        // to the process context.
+        assert_eq!(comctl32_version(&[(0, None), (2, v6), (0, None)]), "6.0");
+        assert_eq!(comctl32_version(&[(0, None), (2, v6), (2, None)]), "5.82");
+        assert_eq!(comctl32_version(&[(1, v6), (2, v5), (2, None)]), "6.0");
     }
 
     // An executable importing Foo from a.dll, which forwards it to b.dll,

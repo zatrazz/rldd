@@ -61,6 +61,11 @@ impl WinSxs {
         }
     }
 
+    // The store directory.
+    pub fn root(&self) -> &str {
+        &self.root
+    }
+
     pub fn is_empty(&self) -> bool {
         self.dirs().is_empty()
     }
@@ -138,7 +143,7 @@ fn shorten(field: &str, limit: usize) -> String {
 // The names the assembly directories are prefixed with, in the order they are
 // searched.  A manifest may record the architecture as a wildcard, which the
 // loader matches against the one of the process.
-fn arch_names(arch: &str, machine: pe::Machine) -> Vec<String> {
+pub fn arch_names(arch: &str, machine: pe::Machine) -> Vec<String> {
     let mut names = match arch {
         "" | "*" => vec![image_arch(machine).to_string()],
         arch => vec![arch.to_lowercase()],
