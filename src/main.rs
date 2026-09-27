@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 
 use argh::{ArgsInfo, FromArgs};
 
@@ -255,7 +255,8 @@ struct CommandLine {
 // option nor an option value, and every argument from there on is a file (the
 // files are greedy).  argh requires valid UTF-8 for the whole command line,
 // while the files are kept here as given, so a file name that is not valid
-// UTF-8 fails for that file only.
+// UTF-8 fails for that file only.  An option in the '--option=value' form,
+// which argh does not accept, is split in the option and the value.
 fn split_command_line(
     args: impl IntoIterator<Item = OsString>,
     flags: &[argh::FlagInfo],
@@ -280,6 +281,18 @@ fn split_command_line(
             return Ok(CommandLine { options, files });
         }
 
+        // argh has no '--option=value' form, which is split here.
+        if let Some((option, value)) = split_option(&arg).filter(|(option, _)| takes_value(option))
+        {
+            let value = std::str::from_utf8(value).map_err(|_| {
+                let lossy = arg.to_string_lossy();
+                invalid_value(option, &lossy[option.len() + 1..])
+            })?;
+            options.push(option.to_string());
+            options.push(value.to_string());
+            continue;
+        }
+
         let option = arg
             .into_string()
             .map_err(|arg| format!("Unrecognized argument: {}\n", arg.to_string_lossy()))?;
@@ -297,6 +310,14 @@ fn split_command_line(
     }
     let files = args.collect();
     Ok(CommandLine { options, files })
+}
+
+// The option and the value of ARG in the '--option=value' form.
+fn split_option(arg: &OsStr) -> Option<(&str, &[u8])> {
+    let arg = arg.as_encoded_bytes();
+    let eq = arg.iter().position(|&c| c == b'=')?;
+    let option = std::str::from_utf8(&arg[..eq]).ok()?;
+    option.starts_with("--").then_some((option, &arg[eq + 1..]))
 }
 
 fn invalid_value(option: &str, value: &str) -> String {
@@ -532,6 +553,59 @@ mod tests {
     }
 
     #[test]
+    fn option_equals_value() {
+        assert_eq!(
+            split(&["--depth=0", "a"]),
+            (vec!["--depth".into(), "0".into()], vec!["a".into()])
+        );
+        assert_eq!(
+            split(&["--depth="]),
+            (vec!["--depth".into(), "".into()], vec![])
+        );
+        assert_eq!(
+            split(&["--depth=a=b"]),
+            (vec!["--depth".into(), "a=b".into()], vec![])
+        );
+        // Only an option that takes a value is split, and only in its long
+        // form.
+        assert_eq!(
+            split(&["--verbose=1"]),
+            (vec!["--verbose=1".into()], vec![])
+        );
+        assert_eq!(split(&["--other=1"]), (vec!["--other=1".into()], vec![]));
+        assert_eq!(split(&["-D=0"]), (vec!["-D=0".into()], vec![]));
+        // Nor is an option value or a file.
+        assert_eq!(
+            split(&["--depth", "--depth=0"]),
+            (vec!["--depth".into(), "--depth=0".into()], vec![])
+        );
+        assert_eq!(
+            split(&["a", "--depth=0"]),
+            (vec![], vec!["a".into(), "--depth=0".into()])
+        );
+        assert_eq!(
+            split(&["--", "--depth=0"]),
+            (vec![], vec!["--depth=0".into()])
+        );
+    }
+
+    #[test]
+    fn option_values() {
+        let (opts, files) = parse_ok(&["--library-path=/x:/y", "a"]);
+        assert_eq!(opts.library_path, "/x:/y");
+        assert_eq!(files, ["a"]);
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            assert_eq!(parse_ok(&["a"]).0.depth, 1);
+            assert_eq!(parse_ok(&["--depth=0", "a"]).0.depth, 0);
+            let early_exit = parse("rldd", ["--depth=x", "a"].map(OsString::from))
+                .err()
+                .unwrap();
+            assert_eq!(early_exit.status, Err(()));
+        }
+    }
+
+    #[test]
     fn help_triggers() {
         for help in ["-h", "--help"] {
             let early_exit = parse("rldd", [OsString::from(help)]).err().unwrap();
@@ -591,6 +665,10 @@ mod tests {
         let error = |args: Vec<OsString>| split_command_line(args, FLAGS).err().unwrap();
         assert_eq!(
             error(vec!["--depth".into(), invalid("bin")]),
+            format!("Error parsing option '--depth' with value '{lossy}': not valid UTF-8\n")
+        );
+        assert_eq!(
+            error(vec![invalid("--depth=bin")]),
             format!("Error parsing option '--depth' with value '{lossy}': not valid UTF-8\n")
         );
         assert_eq!(
