@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::elf::android::*;
@@ -176,11 +177,14 @@ impl Properties {
     }
 }
 
-#[derive(Debug)]
-enum Token {
-    PropertyAssign,
-    PropertyAppend,
-    Section,
+// A configuration line: a 'name = value' assignment, a 'name += value'
+// append, a '[section]' header, or anything else, which the loader warns about
+// and ignores.
+#[derive(Debug, PartialEq)]
+enum Token<'a> {
+    PropertyAssign(&'a [u8], &'a [u8]),
+    PropertyAppend(&'a [u8], &'a [u8]),
+    Section(&'a [u8]),
     Error,
 }
 
@@ -306,12 +310,11 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
         return Err("asan not supported");
     }
 
-    let lines = match crate::pathutils::read_lines(filename)
-        .and_then(|lines| lines.collect::<std::io::Result<Vec<String>>>())
-    {
-        Ok(lines) => lines,
-        Err(_e) => return Err("Could not open the filename"),
-    };
+    // The loader reads the file as bytes and only splits it on newlines, so
+    // a byte that is not valid UTF-8 (on a comment, say) does not make the
+    // whole file unreadable.
+    let content = std::fs::read(filename).map_err(|_| "Could not open the filename")?;
+    let lines: Vec<&[u8]> = content.split(|&c| c == b'\n').collect();
 
     let section = find_initial_section(binary, &lines, interp.is_none())?;
 
@@ -319,20 +322,15 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
 
     let mut properties = Properties::new();
     for line in &lines[start..] {
-        let (token, line) = match next_token(line) {
-            Some(fields) => fields,
+        match next_token(line) {
+            Some(Token::PropertyAssign(name, value)) => {
+                properties.add(lossy(name), lossy(value));
+            }
+            Some(Token::PropertyAppend(name, value)) => {
+                properties.append(lossy(name), lossy(value));
+            }
+            Some(Token::Section(_) | Token::Error) => break,
             None => continue,
-        };
-        match token {
-            Token::PropertyAssign => {
-                let (name, value) = parse_assignment(&line)?;
-                properties.add(name, value);
-            }
-            Token::PropertyAppend => {
-                let (name, value) = parse_append(&line)?;
-                properties.append(name, value);
-            }
-            Token::Section | Token::Error => break,
         }
     }
 
@@ -455,34 +453,29 @@ fn partition_prefix<P: AsRef<Path>>(path: &P) -> Option<std::path::PathBuf> {
 // described on find_section_fallback.
 fn find_initial_section<P: AsRef<Path>>(
     binary: &P,
-    lines: &[String],
+    lines: &[&[u8]],
     fallback: bool,
-) -> Result<String, &'static str> {
+) -> Result<Vec<u8>, &'static str> {
     // The mappings, in file order, with the directory already resolved.
-    let mut dirs: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut dirs: Vec<(Vec<u8>, std::path::PathBuf)> = Vec::new();
 
     for line in lines {
-        let (token, line) = match next_token(line) {
-            Some(fields) => fields,
-            None => continue,
-        };
-        // Bionic loader ignore ill formatted lines.
-        match token {
-            Token::PropertyAssign => {
-                let (name, value) = parse_assignment(&line)?;
-                if !name.starts_with("dir.") {
+        match next_token(line) {
+            Some(Token::PropertyAssign(name, value)) => {
+                let Some(section) = name.strip_prefix(b"dir.") else {
                     continue;
-                }
+                };
 
-                if let Ok(resolved) = std::fs::canonicalize(value) {
+                if let Ok(resolved) = std::fs::canonicalize(OsStr::from_bytes(value)) {
                     if binary.as_ref().starts_with(&resolved) {
-                        return Ok(name[4..].to_string());
+                        return Ok(section.to_vec());
                     }
-                    dirs.push((name[4..].to_string(), resolved));
+                    dirs.push((section.to_vec(), resolved));
                 }
             }
-            Token::Section => break,
-            Token::PropertyAppend | Token::Error => continue,
+            Some(Token::Section(_)) => break,
+            // Bionic loader ignore ill formatted lines.
+            _ => continue,
         }
     }
 
@@ -497,8 +490,8 @@ fn find_initial_section<P: AsRef<Path>>(
 
 fn find_section_fallback<P: AsRef<Path>>(
     binary: &P,
-    dirs: &[(String, std::path::PathBuf)],
-) -> Option<String> {
+    dirs: &[(Vec<u8>, std::path::PathBuf)],
+) -> Option<Vec<u8>> {
     let partition = partition_prefix(binary)?;
     dirs.iter()
         .find(|(_, dir)| partition_prefix(dir).is_some_and(|prefix| prefix == partition))
@@ -506,60 +499,67 @@ fn find_section_fallback<P: AsRef<Path>>(
 }
 
 // Return the index of the line that follows the section header.
-fn find_section(section: &String, lines: &[String]) -> Result<usize, &'static str> {
+fn find_section(section: &[u8], lines: &[&[u8]]) -> Result<usize, &'static str> {
     for (index, line) in lines.iter().enumerate() {
-        let (token, line) = match next_token(line) {
-            Some(line) => line,
-            None => continue,
-        };
-        if matches!(token, Token::Section) && section == &line {
+        if matches!(next_token(line), Some(Token::Section(name)) if name == section) {
             return Ok(index + 1);
         }
     }
     Err("section for binary not found")
 }
 
-fn next_token(line: &str) -> Option<(Token, String)> {
-    // Remove leading whitespace.
-    let line = line.trim_start();
-    // Remove trailing comments.
-    let comment = match line.find('#') {
-        Some(comment) => comment,
-        None => line.len(),
+// The property names and values, which are only compared against ASCII names
+// and used as paths or library names.
+fn lossy(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    String::from_utf8_lossy(bytes)
+}
+
+// The android::base::Trim the loader uses, which strips the C locale isspace
+// characters (the vertical tab included).
+fn trim(s: &[u8]) -> &[u8] {
+    let is_space = |c: &u8| matches!(c, b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r');
+    let start = s.iter().position(|c| !is_space(c)).unwrap_or(s.len());
+    let end = s
+        .iter()
+        .rposition(|c| !is_space(c))
+        .map_or(start, |end| end + 1);
+    &s[start..end]
+}
+
+// Split a line the way the bionic ConfigParser::next_token does, returning
+// None for an empty or a comment line.
+fn next_token(line: &[u8]) -> Option<Token<'_>> {
+    // A comment runs from the first '#' to the end of the line.
+    let line = match line.iter().position(|&c| c == b'#') {
+        Some(comment) => &line[..comment],
+        None => line,
     };
-    let line = &line[0..comment];
-    // Remove trailing whitespaces.
-    let line = line.trim_end();
-    // Skip empty lines.
+    let line = trim(line);
     if line.is_empty() {
         return None;
     }
 
-    if line.starts_with('[') && line.ends_with(']') {
-        return Some((Token::Section, line[1..line.len() - 1].to_string()));
-    } else if line.contains("+=") {
-        return Some((Token::PropertyAppend, line.to_string()));
-    } else if line.contains('=') {
-        return Some((Token::PropertyAssign, line.to_string()));
+    if line[0] == b'[' && line[line.len() - 1] == b']' {
+        return Some(Token::Section(&line[1..line.len() - 1]));
     }
 
-    Some((Token::Error, line.to_string()))
-}
-
-fn parse_assignment(line: &str) -> Result<(&str, &str), &'static str> {
-    let vec: Vec<&str> = line.split('=').collect();
-    if vec.len() != 2 {
-        return Err("invalid assigment line");
+    // A line with a '+=' is an append split at the first one, otherwise it
+    // is an assignment split at the first '=', the value keeping any other
+    // separator.
+    if let Some(append) = line.windows(2).position(|w| w == b"+=") {
+        return Some(Token::PropertyAppend(
+            trim(&line[..append]),
+            trim(&line[append + 2..]),
+        ));
     }
-    Ok((vec[0].trim(), vec[1].trim()))
-}
-
-fn parse_append(line: &str) -> Result<(&str, &str), &'static str> {
-    let vec: Vec<&str> = line.split("+=").collect();
-    if vec.len() != 2 {
-        return Err("invalid append line");
+    if let Some(assign) = line.iter().position(|&c| c == b'=') {
+        return Some(Token::PropertyAssign(
+            trim(&line[..assign]),
+            trim(&line[assign + 1..]),
+        ));
     }
-    Ok((vec[0].trim(), vec[1].trim()))
+
+    Some(Token::Error)
 }
 
 #[cfg(test)]
@@ -866,6 +866,132 @@ mod tests {
         assert_eq!(default_ns.search_paths.len(), 1);
         assert_eq!(default_ns.search_paths[0], vendorlib.to_str().unwrap());
 
+        Ok(())
+    }
+
+    // A temporary tree with the 'bin/binary' executable the configurations
+    // are parsed for, along with the 'lib' and 'lib64' directories.  A
+    // '{base}' on a configuration stands for the tree root.
+    struct Fixture {
+        _tmpdir: TempDir,
+        base: String,
+    }
+
+    impl Fixture {
+        fn new() -> Result<Fixture, Error> {
+            let tmpdir = TempDir::new()?;
+            // The binary is matched against the resolved 'dir.' directories.
+            let base = fs::canonicalize(tmpdir.path())?
+                .to_string_lossy()
+                .into_owned();
+            for dir in ["bin", "lib", "lib64"] {
+                fs::create_dir(Path::new(&base).join(dir))?;
+            }
+            File::create(Path::new(&base).join("bin/binary"))?;
+            Ok(Fixture {
+                _tmpdir: tmpdir,
+                base,
+            })
+        }
+
+        fn path(&self, path: &str) -> String {
+            format!("{}/{path}", self.base)
+        }
+
+        fn parse_bytes(&self, config: &[u8]) -> Result<LdCache, &'static str> {
+            let cfgpath = Path::new(&self.base).join("ld.config.txt");
+            fs::write(&cfgpath, config).map_err(|_| "could not write the configuration")?;
+            parse_ld_config_txt(
+                &cfgpath,
+                &self.path("bin/binary"),
+                Some("/system/bin/linker64"),
+                ELFCLASS64,
+                &props(),
+            )
+        }
+
+        fn parse(&self, config: &str) -> Result<LdCache, &'static str> {
+            self.parse_bytes(config.replace("{base}", &self.base).as_bytes())
+        }
+    }
+
+    fn search_paths(ldcache: &LdCache, namespace: &str) -> Vec<String> {
+        ldcache
+            .get_namespace(namespace)
+            .map(|ns| ns.search_paths.iter().map(|p| p.path.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn tokens() {
+        assert_eq!(next_token(b""), None);
+        assert_eq!(next_token(b"  # name = [value]"), None);
+        assert_eq!(
+            next_token(b" [section] # comment"),
+            Some(Token::Section(b"section"))
+        );
+        assert_eq!(
+            next_token(b"[ section ]"),
+            Some(Token::Section(b" section "))
+        );
+        assert_eq!(
+            next_token(b"name = value # comment"),
+            Some(Token::PropertyAssign(b"name", b"value"))
+        );
+        // The line is split at the first separator, the value keeping any
+        // other.
+        assert_eq!(
+            next_token(b"name = a=b"),
+            Some(Token::PropertyAssign(b"name", b"a=b"))
+        );
+        assert_eq!(
+            next_token(b"name += a+=b=c"),
+            Some(Token::PropertyAppend(b"name", b"a+=b=c"))
+        );
+        // A '+=' anywhere makes the line an append.
+        assert_eq!(
+            next_token(b"name = a += b"),
+            Some(Token::PropertyAppend(b"name = a", b"b"))
+        );
+        // The C locale whitespace, the vertical tab and a CRLF ending
+        // included.
+        assert_eq!(
+            next_token(b"\x0bname\t=\x0cvalue\r"),
+            Some(Token::PropertyAssign(b"name", b"value"))
+        );
+        assert_eq!(next_token(b"not a property"), Some(Token::Error));
+        assert_eq!(next_token(b"[section"), Some(Token::Error));
+    }
+
+    #[test]
+    fn value_with_separator() -> Result<(), Error> {
+        let fixture = Fixture::new()?;
+        let ldcache = fixture
+            .parse(
+                "dir.test = {base}/bin\n\
+                 [test]\n\
+                 namespace.default.search.paths = {base}/lib\n\
+                 namespace.default.unknown = a=b\n",
+            )
+            .map_err(Error::other)?;
+        assert_eq!(search_paths(&ldcache, "default"), vec![fixture.path("lib")]);
+        Ok(())
+    }
+
+    #[test]
+    fn non_utf8_bytes() -> Result<(), Error> {
+        let fixture = Fixture::new()?;
+        let base = fixture.base.as_bytes();
+        let config = [
+            b"# caf\xe9\r\ndir.test = ".as_ref(),
+            base,
+            b"/bin # \xff\xfe\r\n[test]\r\nnamespace.default.search.paths = ",
+            base,
+            b"/lib\r\n",
+        ]
+        .concat();
+        let ldcache = fixture.parse_bytes(&config).map_err(Error::other)?;
+        assert_eq!(search_paths(&ldcache, "default"), vec![fixture.path("lib")]);
         Ok(())
     }
 }
