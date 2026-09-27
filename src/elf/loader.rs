@@ -217,6 +217,16 @@ pub(super) trait Loader {
     fn rpath_search(_elc: &ElfInfo) -> bool {
         true
     }
+
+    // How DF_1_NODEFLIB on ELC, the object requesting a dependency, restricts
+    // the STEP search.  Most loaders skip the loader cache and the default
+    // directories.
+    fn nodeflib_rule(step: SearchStep, _elc: &ElfInfo) -> NodeflibRule {
+        match step {
+            SearchStep::Cache | SearchStep::SystemDirs => NodeflibRule::Skip,
+            _ => NodeflibRule::Search,
+        }
+    }
 }
 
 // The operations that depend on the loader cache format.

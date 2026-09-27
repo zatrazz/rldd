@@ -229,6 +229,18 @@ impl Loader for Linux {
     fn rpath_search(elc: &ElfInfo) -> bool {
         !elc.has_runpath
     }
+
+    // The glibc loader skips the default directories, and the cache entries
+    // below them (a cache entry elsewhere, such as an ld.so.conf directory,
+    // is still used), see _dl_map_object.  The musl loader ignores the flag.
+    fn nodeflib_rule(step: SearchStep, elc: &ElfInfo) -> NodeflibRule {
+        match step {
+            _ if elc.is_musl => NodeflibRule::Search,
+            SearchStep::Cache => NodeflibRule::OutsideSystemDirs,
+            SearchStep::SystemDirs => NodeflibRule::Skip,
+            _ => NodeflibRule::Search,
+        }
+    }
 }
 
 impl SearchCache for ld_so_cache::LdCache {

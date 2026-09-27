@@ -517,7 +517,15 @@ fn searched_locations(config: &Config, elc: &ElfInfo, dependency: &str) -> Vec<S
         return r;
     }
     for step in Rtld::SEARCH_ORDER {
+        let rule = nodeflib_rule(*step, elc);
+        // The locations outside the default paths.
+        let outside = if rule == NodeflibRule::OutsideSystemDirs {
+            " outside the default paths"
+        } else {
+            ""
+        };
         match step {
+            _ if rule == NodeflibRule::Skip => {}
             SearchStep::Rpath => {
                 if Rtld::rpath_search(elc) {
                     push_searched(&mut r, "rpath", &elc.rpath);
@@ -528,14 +536,12 @@ fn searched_locations(config: &Config, elc: &ElfInfo, dependency: &str) -> Vec<S
             }
             SearchStep::Runpath => push_searched(&mut r, "runpath", &elc.runpath),
             SearchStep::Cache => {
-                if !elc.nodeflibs && config.ld_cache.is_some() {
-                    r.push(format!("cache {}", DepMode::LdCache));
+                if config.ld_cache.is_some() {
+                    r.push(format!("cache {}{outside}", DepMode::LdCache));
                 }
             }
             SearchStep::SystemDirs => {
-                if !elc.nodeflibs {
-                    push_searched(&mut r, "default paths", &config.system_dirs);
-                }
+                push_searched(&mut r, "default paths", &config.system_dirs);
             }
         }
     }
@@ -551,6 +557,41 @@ enum SearchStep {
     Runpath,
     Cache,
     SystemDirs,
+}
+
+// How DF_1_NODEFLIB on the object requesting a dependency restricts a search
+// step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+enum NodeflibRule {
+    // The step is searched as usual.
+    Search,
+    // The step is not searched.
+    Skip,
+    // Only an object outside the default directories is taken (a glibc
+    // loader cache entry, see _dl_map_object).
+    OutsideSystemDirs,
+}
+
+// The DF_1_NODEFLIB restriction of the STEP search for the ELC requesting
+// object.
+fn nodeflib_rule(step: SearchStep, elc: &ElfInfo) -> NodeflibRule {
+    if elc.nodeflibs {
+        Rtld::nodeflib_rule(step, elc)
+    } else {
+        NodeflibRule::Search
+    }
+}
+
+// Whether the NAME object in DIR lies below one of the SYSTEM_DIRS, compared
+// as path prefixes the way the glibc loader does.
+fn in_system_dirs(system_dirs: &search_path::SearchPathVec, dir: &str, name: &str) -> bool {
+    let path = pathutils::join(dir, name);
+    system_dirs.iter().any(|sysdir| {
+        let prefix = sysdir.path.trim_end_matches('/');
+        path.strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
+    })
 }
 
 // Where a dynamic string token is expanded, since the loaders expand them
@@ -933,42 +974,40 @@ fn resolve_dependencies(
             continue;
         }
 
-        // If DF_1_NODEFLIB is set ignore the search cache in the case a
-        // dependency could resolve the library.
-        if !elc.nodeflibs {
-            // The glibc loader also matches a name against the DT_SONAME of
-            // the objects already loaded, so a library loaded through a
-            // symlink named otherwise is not loaded again under its soname.
-            // A name not found is searched again for each object requesting
-            // it, with the search paths of that object.  The loader skips the
-            // faked entries of its trace when matching the names, so a name a
-            // module fails on resolves for a library with the run path.
-            // A dependency referring back to the root object by its path is
-            // resolved too, since the loader records the name on it and the
-            // trace lists it once.
-            let found =
-                |entry: &DepNode| !matches!(entry.mode, DepMode::NotFound | DepMode::Executable);
-            #[cfg(target_os = "linux")]
-            let loaded = deptree.get(dependency).filter(found).or_else(|| {
-                if elc.is_musl {
-                    return None;
-                }
-                parents
-                    .iter()
-                    .skip(1)
-                    .find(|(pelc, _, _)| pelc.soname.as_deref() == Some(dependency.as_str()))
-                    .and_then(|(_, refpath, _)| deptree.get(refpath))
-            });
-            #[cfg(not(target_os = "linux"))]
-            let loaded = deptree.get(dependency).filter(found);
-            if let Some(entry) = loaded {
-                deptree.add_repeated(
-                    config.all,
-                    DepNode::repeat_of(&entry, pathutils::get_name(&Path::new(dependency))),
-                    item.depp,
-                );
-                continue;
+        // The loaders match a name against the objects already loaded before
+        // any search, so DF_1_NODEFLIB does not apply there (only to the
+        // search itself).  The glibc loader also matches a name against the
+        // DT_SONAME of the objects already loaded, so a library loaded through
+        // a symlink named otherwise is not loaded again under its soname.
+        // A name not found is searched again for each object requesting
+        // it, with the search paths of that object.  The loader skips the
+        // faked entries of its trace when matching the names, so a name a
+        // module fails on resolves for a library with the run path.
+        // A dependency referring back to the root object by its path is
+        // resolved too, since the loader records the name on it and the
+        // trace lists it once.
+        let found =
+            |entry: &DepNode| !matches!(entry.mode, DepMode::NotFound | DepMode::Executable);
+        #[cfg(target_os = "linux")]
+        let loaded = deptree.get(dependency).filter(found).or_else(|| {
+            if elc.is_musl {
+                return None;
             }
+            parents
+                .iter()
+                .skip(1)
+                .find(|(pelc, _, _)| pelc.soname.as_deref() == Some(dependency.as_str()))
+                .and_then(|(_, refpath, _)| deptree.get(refpath))
+        });
+        #[cfg(not(target_os = "linux"))]
+        let loaded = deptree.get(dependency).filter(found);
+        if let Some(entry) = loaded {
+            deptree.add_repeated(
+                config.all,
+                DepNode::repeat_of(&entry, pathutils::get_name(&Path::new(dependency))),
+                item.depp,
+            );
+            continue;
         }
 
         // A dependency naming the program interpreter resolves to the already
@@ -1181,7 +1220,9 @@ fn resolve_dependency_1<'a>(
     };
 
     for step in Rtld::SEARCH_ORDER {
+        let rule = nodeflib_rule(*step, elc);
         let dep = match step {
+            _ if rule == NodeflibRule::Skip => None,
             // The rpath field holds the object own DT_RPATH along with any
             // inherited part.  The glibc loader skips the whole search
             // (including the inherited chain) if the object issuing the load
@@ -1192,14 +1233,16 @@ fn resolve_dependency_1<'a>(
             SearchStep::Rpath => None,
             SearchStep::LibraryPath => search(&config.ld_library_path, DepMode::LdLibraryPath),
             SearchStep::Runpath => search(&elc.runpath, DepMode::DtRunpath),
-            // Skip the system paths if DF_1_NODEFLIB is set.
-            SearchStep::Cache | SearchStep::SystemDirs if elc.nodeflibs => None,
             SearchStep::Cache => config
                 .ld_cache
                 .as_ref()
                 .and_then(|ld_cache| ld_cache.resolve(dtneeded, config.platform, elc, namespace)),
             SearchStep::SystemDirs => search(&config.system_dirs, DepMode::SystemDirs),
         };
+        let dep = dep.filter(|dep| {
+            rule != NodeflibRule::OutsideSystemDirs
+                || !in_system_dirs(&config.system_dirs, dep.path, &dep.filename)
+        });
         if dep.is_some() {
             return dep;
         }
@@ -1547,6 +1590,28 @@ mod tests {
             .collect();
         let dynstr = StringTable::new(strings, 0, strings.len() as u64);
         DynamicTags::parse::<FileHeader64<Endianness>>(endian, &dynamic, dynstr)
+    }
+
+    #[test]
+    fn nodeflib_system_dirs_prefix() {
+        let dirs = vec![
+            search_path::SearchPath::fixed("/lib/x86_64-linux-gnu"),
+            search_path::SearchPath::fixed("/usr/lib"),
+        ];
+        assert!(in_system_dirs(&dirs, "/lib/x86_64-linux-gnu", "libz.so.1"));
+        // A subdirectory is below the prefix too.
+        assert!(in_system_dirs(
+            &dirs,
+            "/usr/lib/x86_64-linux-gnu",
+            "libz.so.1"
+        ));
+        assert!(!in_system_dirs(&dirs, "/usr/local/lib", "libz.so.1"));
+        assert!(!in_system_dirs(&dirs, "/usr/lib64", "libz.so.1"));
+        assert!(in_system_dirs(
+            &vec![search_path::SearchPath::fixed("/")],
+            "/opt",
+            "libz.so.1"
+        ));
     }
 
     #[test]
