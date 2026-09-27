@@ -449,6 +449,7 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
                     &item,
                     deptree,
                     vec!["api set schema (no host)".to_string()],
+                    false,
                 );
                 continue;
             }
@@ -462,7 +463,10 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
         // The side-by-side redirection comes before the loaded-module list,
         // so the same name may be loaded from more than one assembly.
         let mut searched = Vec::new();
-        let redirect = find_in_dirs(config, &name, &item.redirect, &mut searched);
+        let Ok(redirect) = find_in_dirs(config, &name, &item.redirect, &mut searched) else {
+            add_not_found(config, &item, deptree, searched, true);
+            continue;
+        };
         let lookup = match &redirect {
             Some((_, dir, _)) => pathutils::join(dir, &name),
             None => name.clone(),
@@ -511,12 +515,19 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
         }
 
         let found = match redirect {
-            Some(found) => Some(found),
+            Some(found) => Ok(Some(found)),
             None => find_dependency(config, &name, &mut searched),
         };
-        let Some((info, dir, mode)) = found else {
-            add_not_found(config, &item, deptree, searched);
-            continue;
+        let (info, dir, mode) = match found {
+            Ok(Some(found)) => found,
+            Ok(None) => {
+                add_not_found(config, &item, deptree, searched, false);
+                continue;
+            }
+            Err(BadImage) => {
+                add_not_found(config, &item, deptree, searched, true);
+                continue;
+            }
         };
 
         let resolved = pathutils::join(&dir, &name);
@@ -687,33 +698,62 @@ fn ignored(config: &Config, path: &str) -> bool {
     pathutils::has_prefix(path, config.ignore_prefix)
 }
 
-fn add_not_found(config: &Config, item: &WorkItem, deptree: &mut DepTree, searched: Vec<String>) {
+// A dependency the load fails on, printed as not found.  A BAD_IMAGE one found
+// a candidate the loader could not map, which the last SEARCHED entry names.
+fn add_not_found(
+    config: &Config,
+    item: &WorkItem,
+    deptree: &mut DepTree,
+    searched: Vec<String>,
+    bad_image: bool,
+) {
     if ignored(config, &item.dep.name) {
         return;
     }
+    let mut attrs = item.dep.attrs.clone();
+    if bad_image {
+        attrs.push("bad image");
+    }
     deptree.addnode(
-        DepNode::not_found(item.dep.name.clone(), searched).with_attrs(item.dep.attrs.clone()),
+        DepNode::not_found(item.dep.name.clone(), searched).with_attrs(attrs),
         item.depp,
     );
 }
 
-// Search NAME on each of the DIRS in order, recording every candidate path on
-// SEARCHED, and returning the parsed object, the directory it was found at,
+// A module the search found: the parsed object, the directory it was found at,
 // and the mode of that directory.
+type Found = (PeInfo, String, DepMode);
+
+// A candidate that stops the search, since the loader fails the load on it.
+struct BadImage;
+
+// The outcome of a search, Ok(None) when no directory holds the module.
+type Search = Result<Option<Found>, BadImage>;
+
+// Search NAME on each of the DIRS in order, recording every candidate path on
+// SEARCHED.
 fn find_in<'d>(
     config: &Config,
     name: &str,
     dirs: impl IntoIterator<Item = (&'d str, DepMode)>,
     searched: &mut Vec<String>,
-) -> Option<(PeInfo, String, DepMode)> {
+) -> Search {
     for (dir, mode) in dirs {
         let candidate = Path::new(dir).join(name);
-        searched.push(candidate.to_string_lossy().into_owned());
-        if let Some(info) = try_open(config, &candidate) {
-            return Some((info, dir.to_string(), mode));
+        let path = candidate.to_string_lossy().into_owned();
+        match try_open(config, &candidate) {
+            Candidate::Found(info) => {
+                searched.push(path);
+                return Ok(Some((info, dir.to_string(), mode)));
+            }
+            Candidate::Skipped => searched.push(path),
+            Candidate::Bad(reason) => {
+                searched.push(format!("{path} (bad image: {reason})"));
+                return Err(BadImage);
+            }
         }
     }
-    None
+    Ok(None)
 }
 
 fn find_in_dirs(
@@ -721,7 +761,7 @@ fn find_in_dirs(
     name: &str,
     dirs: &search_dirs::SearchDirs,
     searched: &mut Vec<String>,
-) -> Option<(PeInfo, String, DepMode)> {
+) -> Search {
     let dirs = dirs.iter().map(|(dir, mode)| (dir.path.as_str(), *mode));
     find_in(config, name, dirs, searched)
 }
@@ -732,35 +772,54 @@ fn find_in_dirs(
 // module, even one a known DLL pulls in through a forwarder or a delay load
 // import, follows the search order (the loader maps an application copy of
 // CRYPTBASE, which advapi32 forwards SystemFunction001 to).
-fn find_dependency(
-    config: &Config,
-    name: &str,
-    searched: &mut Vec<String>,
-) -> Option<(PeInfo, String, DepMode)> {
+fn find_dependency(config: &Config, name: &str, searched: &mut Vec<String>) -> Search {
     // A recorded name with a path component is taken as is.
     if name.contains(['\\', '/']) {
         let path = Path::new(name);
-        searched.push(name.to_string());
-        let info = try_open(config, path)?;
-        return Some((info, pathutils::get_path(&path)?, DepMode::Direct));
+        let Some(dir) = pathutils::get_path(&path) else {
+            return Ok(None);
+        };
+        return find_in(
+            config,
+            &pathutils::get_name(&path),
+            [(dir.as_str(), DepMode::Direct)],
+            searched,
+        );
     }
 
     if config.ctx.is_known_dll(name, Wow64::of(config.machine)) {
         let known = config.ctx.knowndll_dirs(Wow64::of(config.machine));
         let known = known.iter().map(|dir| (dir.as_str(), DepMode::LdCache));
-        if let Some(found) = find_in(config, name, known, searched) {
-            return Some(found);
+        if let Some(found) = find_in(config, name, known, searched)? {
+            return Ok(Some(found));
         }
     }
 
     find_in_dirs(config, name, &config.dirs, searched)
 }
 
-// The loader skips a candidate built for another machine and keeps searching,
-// which is what tells the System32 and SysWOW64 modules apart.
-fn try_open(config: &Config, path: &Path) -> Option<PeInfo> {
-    let info = open_pe_file(&path).ok()?;
-    machine::compatible(config.machine, info.machine).then_some(info)
+enum Candidate {
+    Found(PeInfo),
+    Skipped,
+    // Why the loader fails the load on it.
+    Bad(String),
+}
+
+// The loader skips a missing candidate and one built for another machine and
+// keeps searching (which is what tells the System32 and SysWOW64 modules
+// apart), but it fails the load on any other one: a file that is not an
+// image, a truncated or an empty one, or a directory by that name stop the
+// search (with STATUS_INVALID_IMAGE_NOT_MZ, STATUS_INVALID_IMAGE_FORMAT,
+// STATUS_INVALID_FILE_FOR_SECTION and STATUS_FILE_IS_A_DIRECTORY on Windows
+// 11 24H2), even with a valid copy further on the order.
+fn try_open(config: &Config, path: &Path) -> Candidate {
+    match open_pe_file(&path) {
+        Ok(info) if machine::compatible(config.machine, info.machine) => Candidate::Found(info),
+        Ok(_) => Candidate::Skipped,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Candidate::Skipped,
+        Err(_) if path.is_dir() => Candidate::Bad("a directory".to_string()),
+        Err(err) => Candidate::Bad(err.to_string()),
+    }
 }
 
 // Open FILENAME, which is the object given on the command line when ROOT is
@@ -1457,6 +1516,71 @@ mod tests {
         // process.
         fs::write(&path, clr_image(i386, ilonly).build()).unwrap();
         assert_eq!(open_pe_file(&path).unwrap().machine, i386);
+    }
+
+    fn config(ctx: &PeContext, machine: pe::Machine) -> Config<'_> {
+        Config {
+            ctx,
+            dirs: search_dirs::SearchDirs::new(),
+            redirect: search_dirs::SearchDirs::new(),
+            machine,
+            all: false,
+            depth: 1,
+            ignore_prefix: &[],
+        }
+    }
+
+    // Only a missing candidate and one built for another machine let the
+    // search go on to the next directory.
+    #[test]
+    fn bad_candidates() {
+        let ctx = PeContext::new(true);
+        let config = config(&ctx, pe::IMAGE_FILE_MACHINE_AMD64);
+        let dir = crate::tempdir::TempDir::new().unwrap();
+        let (first, last) = (dir.path().join("first"), dir.path().join("last"));
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&last).unwrap();
+        let dll = |machine, pe64| testimage::Image::dll(machine, pe64).build();
+        fs::write(last.join("m.dll"), dll(pe::IMAGE_FILE_MACHINE_AMD64, true)).unwrap();
+
+        let search = |searched: &mut Vec<String>| {
+            let dirs = [
+                (first.to_str().unwrap(), DepMode::Application),
+                (last.to_str().unwrap(), DepMode::EnvPath),
+            ];
+            match find_in(&config, "m.dll", dirs, searched) {
+                Ok(Some((_, _, mode))) => Some(mode),
+                Ok(None) => panic!("not found"),
+                Err(BadImage) => None,
+            }
+        };
+        let candidate = first.join("m.dll");
+
+        let mut searched = Vec::new();
+        assert_eq!(search(&mut searched), Some(DepMode::EnvPath));
+        assert_eq!(searched.len(), 2);
+
+        fs::write(&candidate, dll(pe::IMAGE_FILE_MACHINE_I386, false)).unwrap();
+        assert_eq!(search(&mut Vec::new()), Some(DepMode::EnvPath));
+
+        let valid = dll(pe::IMAGE_FILE_MACHINE_AMD64, true);
+        for bad in [&b"not a dll"[..], &valid[..0x100], &[]] {
+            fs::write(&candidate, bad).unwrap();
+            let mut searched = Vec::new();
+            assert_eq!(search(&mut searched), None);
+            assert_eq!(searched.len(), 1);
+            assert!(searched[0].contains("bad image"), "{}", searched[0]);
+        }
+
+        fs::remove_file(&candidate).unwrap();
+        fs::create_dir(&candidate).unwrap();
+        let mut searched = Vec::new();
+        assert_eq!(search(&mut searched), None);
+        assert!(
+            searched[0].ends_with("(bad image: a directory)"),
+            "{}",
+            searched[0]
+        );
     }
 
     #[test]
