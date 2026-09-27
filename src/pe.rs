@@ -24,7 +24,7 @@ mod sxs;
 mod testimage;
 
 // A symbol imported from a dependency.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ImportName {
     Name(String),
     Ordinal(u16),
@@ -55,19 +55,27 @@ impl PeDep {
     }
 }
 
+// Where a forwarded export points at: the module, recorded with the '.dll'
+// suffix, and the symbol the loader binds there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Forward {
+    module: String,
+    symbol: ImportName,
+}
+
 // Where an exported symbol points to.
 enum ExportLookup<'a> {
     Local,
     // Forwarded to another module, which the loader loads to bind it.
-    Forwarded(&'a str),
+    Forwarded(&'a Forward),
     Missing,
 }
 
 #[derive(Default, Debug)]
 struct PeExports {
-    // The value is the module a forwarded export points at.
-    names: HashMap<String, Option<String>>,
-    ordinals: HashMap<u16, Option<String>>,
+    // The value is where a forwarded export points at.
+    names: HashMap<String, Option<Forward>>,
+    ordinals: HashMap<u16, Option<Forward>>,
 }
 
 impl PeExports {
@@ -77,7 +85,7 @@ impl PeExports {
             ImportName::Ordinal(ordinal) => self.ordinals.get(ordinal),
         };
         match forward {
-            Some(Some(module)) => ExportLookup::Forwarded(module),
+            Some(Some(forward)) => ExportLookup::Forwarded(forward),
             Some(None) => ExportLookup::Local,
             None => ExportLookup::Missing,
         }
@@ -124,6 +132,9 @@ const NAMES_BUDGET: usize = 16 << 20;
 
 // The delay load descriptor attribute of the RVA based layout.
 const DLATTR_RVA: u32 = 1;
+
+// The most forwarders an import is followed through, which stops a loop.
+const MAX_FORWARDS: usize = 16;
 
 // The longest symbol or module name read, the MSVC limit on a decorated name.
 const MAX_NAME: usize = 4096;
@@ -435,9 +446,9 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
     let root_sxs = assembly_dirs(config, &config.redirect, &root.assemblies);
 
     // The objects already parsed, so a module shared by several importers is
-    // only read once, and the forwarders already queued for them.
+    // only read once, and the forwarded symbols already queued for them.
     let mut cache = HashMap::<String, PeInfo>::new();
-    let mut forwarded = HashSet::<(usize, String)>::new();
+    let mut forwarded = HashSet::<(usize, String, ImportName)>::new();
 
     let mut queue = VecDeque::new();
     for dep in &root.deps {
@@ -538,15 +549,17 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
             let Some(exports) = module_exports(&entry, &mut cache) else {
                 continue;
             };
-            for module in forwarded_modules(&item.dep.imports, exports) {
-                if !forwarded.insert((index, module.to_lowercase())) {
+            for (module, mut symbols) in forwarded_modules(&item.dep.imports, exports) {
+                let key = module.to_lowercase();
+                symbols.retain(|symbol| forwarded.insert((index, key.clone(), symbol.clone())));
+                if symbols.is_empty() {
                     continue;
                 }
                 queue.push_back(WorkItem {
                     dep: PeDep {
                         name: module,
                         attrs: vec!["forwarded"],
-                        imports: Vec::new(),
+                        imports: symbols,
                     },
                     importing: entry.name.clone(),
                     redirect: item.redirect.clone(),
@@ -597,13 +610,15 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
             });
         }
         // An imported symbol that resolves to a forwarded export pulls in the
-        // module it points at, which no import directory records.
-        for module in forwarded_modules(&item.dep.imports, &info) {
+        // module it points at, which no import directory records.  The
+        // module is loaded like any other, and the symbols it must provide
+        // are followed in turn, as they may be forwarded again.
+        for (module, symbols) in forwarded_modules(&item.dep.imports, &info) {
             queue.push_back(WorkItem {
                 dep: PeDep {
                     name: module,
                     attrs: vec!["forwarded"],
-                    imports: Vec::new(),
+                    imports: symbols,
                 },
                 importing: file.clone(),
                 redirect: sxs.clone(),
@@ -628,23 +643,29 @@ fn module_exports<'a>(
     cache.get(&key)
 }
 
-// The modules the imported symbols are forwarded to, skipping the ones the
-// import directory already records.
-fn forwarded_modules(imports: &[ImportName], info: &PeInfo) -> Vec<String> {
-    let mut modules = Vec::<String>::new();
+// The modules the imported symbols are forwarded to, along with the symbols
+// each must provide, skipping the ones the import directory already records.
+fn forwarded_modules(imports: &[ImportName], info: &PeInfo) -> Vec<(String, Vec<ImportName>)> {
+    let mut modules = Vec::<(String, Vec<ImportName>)>::new();
     for import in imports {
-        let ExportLookup::Forwarded(module) = info.exports.lookup(import) else {
+        let ExportLookup::Forwarded(forward) = info.exports.lookup(import) else {
             continue;
         };
         if info
             .deps
             .iter()
-            .any(|dep| dep.name.eq_ignore_ascii_case(module))
-            || modules.iter().any(|seen| seen.eq_ignore_ascii_case(module))
+            .any(|dep| dep.name.eq_ignore_ascii_case(&forward.module))
         {
             continue;
         }
-        modules.push(module.to_string());
+        match modules
+            .iter_mut()
+            .find(|(module, _)| module.eq_ignore_ascii_case(&forward.module))
+        {
+            Some((_, symbols)) if symbols.contains(&forward.symbol) => {}
+            Some((_, symbols)) => symbols.push(forward.symbol.clone()),
+            None => modules.push((forward.module.clone(), vec![forward.symbol.clone()])),
+        }
     }
     modules
 }
@@ -691,19 +712,8 @@ pub fn check_imports(ctx: &PeContext, deptree: &DepTree, delay_load: bool) -> Ve
             // which a side-by-side redirection may make differ from the one
             // the loaded-module list holds.  The redirection is redone when
             // the child was resolved through another object.
-            let target = node
-                .children
-                .iter()
-                .map(|child| &deptree.arena[*child].val)
-                .find(|child| {
-                    // A name with a path component is recorded as the alias.
-                    child.name.eq_ignore_ascii_case(&name)
-                        || child
-                            .alias
-                            .as_ref()
-                            .is_some_and(|alias| alias.eq_ignore_ascii_case(&name))
-                })
-                .cloned()
+            let target = child_module(deptree, index, &name)
+                .map(|child| deptree.arena[child].val.clone())
                 .or_else(|| {
                     sxs.iter()
                         .find_map(|dir| deptree.get(&pathutils::join(dir, &name)))
@@ -712,27 +722,16 @@ pub fn check_imports(ctx: &PeContext, deptree: &DepTree, delay_load: bool) -> Ve
             let Some(target) = target else {
                 continue;
             };
-            let Some(target_path) = &target.path else {
-                continue;
-            };
-
-            let resolved = Path::new(target_path).join(&target.name);
-            let key = resolved.to_string_lossy().to_lowercase();
-            if !cache.contains_key(&key) {
-                let Ok(target_info) = open_pe_file(&resolved) else {
-                    continue;
-                };
-                cache.insert(key.clone(), target_info.exports);
-            }
-            let exports = &cache[&key];
 
             for import in &dep.imports {
-                if matches!(exports.lookup(import), ExportLookup::Missing) {
+                if let Some((symbol, module)) =
+                    missing_import(ctx, deptree, &mut cache, &target, import)
+                {
                     undefined.push(UndefinedSymbol {
-                        name: import.to_string(),
+                        name: symbol.to_string(),
                         object: node.val.name.clone(),
                         version: None,
-                        from: Some(target.name.clone()),
+                        from: Some(module),
                     });
                 }
             }
@@ -740,6 +739,61 @@ pub fn check_imports(ctx: &PeContext, deptree: &DepTree, delay_load: bool) -> Ve
     }
 
     undefined
+}
+
+// The child of the PARENT node the module NAME resolved to.  A name with a
+// path component is recorded as the alias.
+fn child_module(deptree: &DepTree, parent: usize, name: &str) -> Option<usize> {
+    deptree.arena[parent]
+        .children
+        .iter()
+        .copied()
+        .find(|child| {
+            let child = &deptree.arena[*child].val;
+            child.name.eq_ignore_ascii_case(name)
+                || child
+                    .alias
+                    .as_ref()
+                    .is_some_and(|alias| alias.eq_ignore_ascii_case(name))
+        })
+}
+
+// Bind IMPORT against the TARGET module, following the forwarders it goes
+// through the way the loader binds it, and return the symbol and the module
+// that lack it.  The loader loads a forwarded module by its name, so it is the
+// one of that name on the tree; a forwarder to a module that did not resolve,
+// or that the depth limit left out of the tree, is not followed.
+fn missing_import(
+    ctx: &PeContext,
+    deptree: &DepTree,
+    cache: &mut HashMap<String, PeExports>,
+    target: &DepNode,
+    import: &ImportName,
+) -> Option<(ImportName, String)> {
+    let mut node = target.clone();
+    let mut symbol = import.clone();
+    for _ in 0..MAX_FORWARDS {
+        let path = Path::new(node.path.as_ref()?).join(&node.name);
+        let key = path.to_string_lossy().to_lowercase();
+        if !cache.contains_key(&key) {
+            cache.insert(key.clone(), open_pe_file(&path).ok()?.exports);
+        }
+        let forward = match cache[&key].lookup(&symbol) {
+            ExportLookup::Local => return None,
+            ExportLookup::Missing => return Some((symbol, node.name.clone())),
+            ExportLookup::Forwarded(forward) => forward.clone(),
+        };
+        // The forwarded module may be an api set, resolved for the module
+        // that forwards to it.
+        let module = match ctx.apiset.resolve(&forward.module, &node.name) {
+            Some("") => return None,
+            Some(host) => host.to_string(),
+            None => forward.module,
+        };
+        node = deptree.get(&module)?;
+        symbol = forward.symbol;
+    }
+    None
 }
 
 fn ignored(config: &Config, path: &str) -> bool {
@@ -1383,19 +1437,15 @@ fn parse_exports<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> PeExports {
 
     // The target of each address table entry, None for a malformed one.
     let functions = directory.number_of_functions.get(LE);
-    let mut targets = Vec::new();
+    let mut targets: Vec<Option<Option<Forward>>> = Vec::new();
     for address in rva_u32s(file, directory.address_of_functions.get(LE), functions) {
         if address.wrapping_sub(start) >= size {
             targets.push(Some(None));
             continue;
         }
-        // 'MODULE.Symbol' or 'MODULE.#ordinal'.
-        let target = rva_name(file, address).and_then(|forward| {
-            let dot = forward.iter().rposition(|byte| *byte == b'.')?;
-            (dot > 0 && dot + 1 < forward.len()).then(|| forward_module(&forward[..dot]))
-        });
-        let cost = target.as_ref().map_or(0, String::len);
-        if !spend(&mut budget, std::mem::size_of::<Option<String>>() + cost) {
+        let target = rva_name(file, address).and_then(parse_forward);
+        let cost = target.as_ref().map_or(0, |forward| forward.module.len());
+        if !spend(&mut budget, std::mem::size_of::<Option<Forward>>() + cost) {
             break;
         }
         targets.push(target.map(Some));
@@ -1419,7 +1469,7 @@ fn parse_exports<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> PeExports {
         let Some(name) = rva_name(file, name) else {
             continue;
         };
-        let cost = name.len() + target.as_ref().map_or(0, String::len);
+        let cost = name.len() + target.as_ref().map_or(0, |forward| forward.module.len());
         if !spend(&mut budget, std::mem::size_of::<String>() + cost) {
             break;
         }
@@ -1428,6 +1478,24 @@ fn parse_exports<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> PeExports {
             .insert(String::from_utf8_lossy(name).into_owned(), target.clone());
     }
     exports
+}
+
+// A forwarder string, 'MODULE.Symbol' or 'MODULE.#ordinal', split at the
+// last dot.
+fn parse_forward(forward: &[u8]) -> Option<Forward> {
+    let dot = forward.iter().rposition(|byte| *byte == b'.')?;
+    let (module, symbol) = (&forward[..dot], &forward[dot + 1..]);
+    if module.is_empty() || symbol.is_empty() {
+        return None;
+    }
+    let symbol = match symbol.strip_prefix(b"#") {
+        Some(ordinal) => ImportName::Ordinal(str::from_utf8(ordinal).ok()?.parse().ok()?),
+        None => ImportName::Name(String::from_utf8_lossy(symbol).into_owned()),
+    };
+    Some(Forward {
+        module: forward_module(module),
+        symbol,
+    })
 }
 
 // The module of a forwarder string is recorded without the '.dll' suffix.  The
@@ -1955,11 +2023,9 @@ mod tests {
         );
         let exports = parse_object(&data).unwrap().exports;
         let lookup = |name: &str| exports.lookup(&ImportName::Name(name.to_string()));
+        let func = forward("OTHER.dll", "Func");
         assert!(matches!(lookup("Local"), ExportLookup::Local));
-        assert!(matches!(
-            lookup("Forwarded"),
-            ExportLookup::Forwarded("OTHER.dll")
-        ));
+        assert!(matches!(lookup("Forwarded"), ExportLookup::Forwarded(f) if *f == func));
         assert!(matches!(lookup("NoDot"), ExportLookup::Missing));
         assert!(matches!(lookup("NoSymbol"), ExportLookup::Missing));
         assert!(matches!(lookup("OutOfTable"), ExportLookup::Missing));
@@ -1971,12 +2037,71 @@ mod tests {
         ));
         assert!(matches!(
             exports.lookup(&ImportName::Ordinal(11)),
-            ExportLookup::Forwarded("OTHER.dll")
+            ExportLookup::Forwarded(f) if *f == func
         ));
         assert!(matches!(
             exports.lookup(&ImportName::Ordinal(12)),
             ExportLookup::Missing
         ));
+    }
+
+    // An executable importing Foo from a.dll, which forwards it to b.dll,
+    // which forwards it to c.dll as FORWARD, with c.dll exporting SYMBOL and
+    // the ordinals 10 and 11.
+    fn forwarder_chain(
+        forward: &[u8],
+        symbol: &[u8],
+    ) -> (crate::tempdir::TempDir, DepTree, Vec<String>) {
+        let dir = crate::tempdir::TempDir::new().unwrap();
+        let write = |name: &str, data: Vec<u8>| fs::write(dir.path().join(name), data).unwrap();
+        write("a.dll", export_image(&[Some(b"b.Bar")], &[(b"Foo", 0)]));
+        write("b.dll", export_image(&[Some(forward)], &[(b"Bar", 0)]));
+        write("c.dll", export_image(&[None, None], &[(symbol, 0)]));
+        let mut image = testimage::Image::exe(pe::IMAGE_FILE_MACHINE_AMD64, true);
+        let foo = image.hint_name(b"Foo");
+        let thunks = image.thunks(&[u64::from(foo)]);
+        let module = image.string(b"a.dll");
+        image.imports(&[[thunks, 0, module, thunks]]);
+        write("app.exe", image.build());
+
+        let mut ctx = PeContext {
+            depth: 0,
+            ..PeContext::new(true)
+        };
+        let exe = dir.path().join("app.exe");
+        let deptree = resolve_binary(&mut ctx, exe.to_str().unwrap()).unwrap();
+        let undefined = check_imports(&ctx, &deptree, false)
+            .iter()
+            .map(|undef| format!("{undef} ({})", undef.object))
+            .collect();
+        (dir, deptree, undefined)
+    }
+
+    // A forwarded module is loaded with the symbols it must provide, so a
+    // chain of forwarders is followed to its end, and the import check binds
+    // the symbol there.
+    #[test]
+    fn forwarder_chains() {
+        let (_dir, deptree, undefined) = forwarder_chain(b"c.Baz", b"Baz");
+        let names: Vec<_> = deptree
+            .arena
+            .iter()
+            .map(|node| node.val.name.as_str())
+            .collect();
+        assert_eq!(names, ["app.exe", "a.dll", "b.dll", "c.dll"]);
+        assert_eq!(deptree.arena[2].val.attrs, ["forwarded"]);
+        assert_eq!(deptree.arena[3].val.attrs, ["forwarded"]);
+        assert!(undefined.is_empty(), "{undefined:?}");
+
+        let (_dir, _, undefined) = forwarder_chain(b"c.#11", b"Baz");
+        assert!(undefined.is_empty(), "{undefined:?}");
+
+        // The symbol the chain ends on is reported, from the module lacking
+        // it.
+        let (_dir, _, undefined) = forwarder_chain(b"c.Baz", b"Other");
+        assert_eq!(undefined, ["Baz, from c.dll (app.exe)"]);
+        let (_dir, _, undefined) = forwarder_chain(b"c.#12", b"Baz");
+        assert_eq!(undefined, ["#12, from c.dll (app.exe)"]);
     }
 
     // Import descriptors sharing a huge thunk array are only read up to the
@@ -2173,14 +2298,54 @@ mod tests {
         assert_eq!(ImportName::Ordinal(42).to_string(), "#42");
     }
 
+    fn forward(module: &str, symbol: &str) -> Forward {
+        Forward {
+            module: module.to_string(),
+            symbol: ImportName::Name(symbol.to_string()),
+        }
+    }
+
     fn exports() -> PeExports {
         PeExports {
             names: HashMap::from([
                 ("Local".to_string(), None),
-                ("Forwarded".to_string(), Some("target.dll".to_string())),
-                ("Recorded".to_string(), Some("RECORDED.DLL".to_string())),
+                ("Forwarded".to_string(), Some(forward("target.dll", "One"))),
+                ("Again".to_string(), Some(forward("TARGET.dll", "Two"))),
+                (
+                    "Recorded".to_string(),
+                    Some(forward("RECORDED.DLL", "Three")),
+                ),
             ]),
             ordinals: HashMap::from([(7, None)]),
+        }
+    }
+
+    // A forwarder names the symbol by name or by ordinal, after the last dot.
+    #[test]
+    fn forwarder_strings() {
+        let ordinal = |module: &str, ordinal| Forward {
+            module: module.to_string(),
+            symbol: ImportName::Ordinal(ordinal),
+        };
+        assert_eq!(
+            parse_forward(b"NTDLL.RtlAllocateHeap"),
+            Some(forward("NTDLL.dll", "RtlAllocateHeap"))
+        );
+        assert_eq!(
+            parse_forward(b"api-ms-win-core-x-l1-1-0.Func"),
+            Some(forward("api-ms-win-core-x-l1-1-0.dll", "Func"))
+        );
+        assert_eq!(parse_forward(b"MOD.#12"), Some(ordinal("MOD.dll", 12)));
+        assert_eq!(parse_forward(b"a.b.Func"), Some(forward("a.b.dll", "Func")));
+        for malformed in [
+            &b"NODOT"[..],
+            b"MOD.",
+            b".Func",
+            b"MOD.#",
+            b"MOD.#x",
+            b"MOD.#70000",
+        ] {
+            assert_eq!(parse_forward(malformed), None, "{malformed:?}");
         }
     }
 
@@ -2193,7 +2358,7 @@ mod tests {
         ));
         assert!(matches!(
             exports.lookup(&ImportName::Name("Forwarded".to_string())),
-            ExportLookup::Forwarded("target.dll")
+            ExportLookup::Forwarded(f) if *f == forward("target.dll", "One")
         ));
         assert!(matches!(
             exports.lookup(&ImportName::Name("Missing".to_string())),
@@ -2210,7 +2375,8 @@ mod tests {
     }
 
     // Only the forwarders of the imported symbols count, and the modules the
-    // import directory already records are left out.
+    // import directory already records are left out.  The symbols each
+    // module must provide are gathered once.
     #[test]
     fn forwarded_dependencies() {
         let info = PeInfo {
@@ -2227,9 +2393,15 @@ mod tests {
             ImportName::Name("Missing".to_string()),
             ImportName::Name("Recorded".to_string()),
             ImportName::Name("Forwarded".to_string()),
+            ImportName::Name("Again".to_string()),
             ImportName::Name("Forwarded".to_string()),
         ];
-        assert_eq!(forwarded_modules(&imports, &info), vec!["target.dll"]);
+        let one = ImportName::Name("One".to_string());
+        let two = ImportName::Name("Two".to_string());
+        assert_eq!(
+            forwarded_modules(&imports, &info),
+            vec![("target.dll".to_string(), vec![one, two])]
+        );
         assert!(forwarded_modules(&[], &info).is_empty());
     }
 }
