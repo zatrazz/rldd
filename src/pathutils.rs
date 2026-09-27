@@ -39,11 +39,6 @@ pub fn map(file: &fs::File) -> Result<Mmap> {
 
 // Open and map FILENAME, returning the open error as is, except for a
 // directory, which Windows does not open (access denied).
-// Unused by the Android and BSD backends.
-#[cfg_attr(
-    all(unix, not(any(target_os = "linux", target_os = "macos"))),
-    allow(dead_code)
-)]
 pub fn map_file<P: AsRef<Path>>(filename: &P) -> Result<Mmap> {
     let file = fs::File::open(filename).map_err(|err| match fs::metadata(filename) {
         Ok(metadata) if metadata.is_dir() => Error::from(ErrorKind::IsADirectory),

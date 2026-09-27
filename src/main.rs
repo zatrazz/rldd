@@ -1,4 +1,5 @@
 use std::ffi::{OsStr, OsString};
+use std::io::{Error, ErrorKind};
 
 use argh::{ArgsInfo, FromArgs};
 
@@ -237,10 +238,83 @@ fn print_version_errors(arg: &str, errors: &[elf::VersionError]) {
 }
 
 fn print_error(arg: &str, err: std::io::Error) -> String {
-    match err.kind() {
-        std::io::ErrorKind::NotFound => format!("{arg}: no such file or directory"),
-        std::io::ErrorKind::PermissionDenied => format!("{arg}: permission denied"),
-        _ => format!("{arg}: {err}"),
+    let message = match err.kind() {
+        ErrorKind::NotFound => "no such file or directory".to_string(),
+        ErrorKind::PermissionDenied => "permission denied".to_string(),
+        ErrorKind::IsADirectory => "is a directory".to_string(),
+        ErrorKind::NotADirectory => "not a directory".to_string(),
+        _ => lowercase_first(&err.to_string()),
+    };
+    format!("{arg}: {message}")
+}
+
+// MESSAGE starting in lower case, like the other file errors, unless its first
+// word is an acronym (such as ELF).  The system messages and some of the
+// backend ones are capitalized.
+fn lowercase_first(message: &str) -> String {
+    let mut chars = message.chars();
+    match (chars.next(), chars.next()) {
+        (Some(first), Some(second)) if first.is_uppercase() && second.is_lowercase() => first
+            .to_lowercase()
+            .chain(message.chars().skip(1))
+            .collect(),
+        _ => message.to_string(),
+    }
+}
+
+// The object format this build inspects, which is the host one, along with
+// its article.
+fn host_format() -> (&'static str, &'static str) {
+    if cfg!(target_os = "macos") {
+        ("a", "Mach-O")
+    } else if cfg!(windows) {
+        ("a", "PE")
+    } else {
+        ("an", "ELF")
+    }
+}
+
+// The object format of the files of KIND, for the ones a build inspects.
+fn object_format(kind: object::FileKind) -> Option<&'static str> {
+    use object::FileKind;
+    match kind {
+        FileKind::Elf32 | FileKind::Elf64 => Some("ELF"),
+        FileKind::MachO32 | FileKind::MachO64 | FileKind::MachOFat32 | FileKind::MachOFat64 => {
+            Some("Mach-O")
+        }
+        FileKind::Pe32 | FileKind::Pe64 => Some("PE"),
+        _ => None,
+    }
+}
+
+// Check that the ARG file is an object of the format this build inspects, so
+// that a directory, or an object of the format another build inspects, is
+// reported the same way everywhere.
+fn check_format(arg: &str) -> std::io::Result<()> {
+    let mmap = match pathutils::map_file(&arg) {
+        Ok(mmap) => mmap,
+        // A Mach-O system library may exist only in the dyld shared cache,
+        // which the backend looks up.
+        Err(err) if cfg!(target_os = "macos") && err.kind() == ErrorKind::NotFound => {
+            return Ok(());
+        }
+        Err(err) => return Err(err),
+    };
+    check_object(&mmap)
+}
+
+fn check_object(data: &[u8]) -> std::io::Result<()> {
+    let (article, host) = host_format();
+    match object::FileKind::parse(data).ok().and_then(object_format) {
+        Some(format) if format == host => Ok(()),
+        Some(_) => Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("not {article} {host} object (this build inspects {host} objects only)"),
+        )),
+        None => Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("not {article} {host} object"),
+        )),
     }
 }
 
@@ -416,7 +490,7 @@ fn main() {
             continue;
         }
 
-        match resolve_binary(&mut ctx, arg) {
+        match check_format(arg).and_then(|()| resolve_binary(&mut ctx, arg)) {
             Ok(deptree) => {
                 // Mimic ldd, where --unused suppress both the dependency listing
                 // and the undefined symbols report.
@@ -549,6 +623,71 @@ mod tests {
         assert_eq!(
             split(&["--other", "a"]),
             (vec!["--other".into()], vec!["a".into()])
+        );
+    }
+
+    #[test]
+    fn file_errors() {
+        let error = |err| print_error("a", err);
+        assert_eq!(
+            error(Error::from(ErrorKind::NotFound)),
+            "a: no such file or directory"
+        );
+        assert_eq!(
+            error(Error::from(ErrorKind::IsADirectory)),
+            "a: is a directory"
+        );
+        assert_eq!(
+            error(Error::other("Invalid ELF64 object")),
+            "a: invalid ELF64 object"
+        );
+        assert_eq!(
+            error(Error::other("ELF object too small")),
+            "a: ELF object too small"
+        );
+        assert_eq!(error(Error::other("not a PE object")), "a: not a PE object");
+        assert_eq!(error(Error::other("")), "a: ");
+
+        let dir = std::env::temp_dir();
+        let dir = dir.to_str().unwrap();
+        assert_eq!(
+            check_format(dir).unwrap_err().kind(),
+            ErrorKind::IsADirectory
+        );
+    }
+
+    #[test]
+    fn object_formats() {
+        let mut elf = [0; 16];
+        elf[..5].copy_from_slice(b"\x7fELF\x02");
+        let mut macho = [0; 16];
+        macho[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+        // The DOS header, pointing to the NT headers right after it, which
+        // hold the PE32+ optional header magic.
+        let mut pe = [0; 0x40 + 248];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3c] = 0x40;
+        pe[0x40..0x44].copy_from_slice(b"PE\0\0");
+        pe[0x58..0x5a].copy_from_slice(&[0x0b, 0x02]);
+
+        let (article, host) = host_format();
+        for (data, format) in [(&elf[..], "ELF"), (&macho, "Mach-O"), (&pe, "PE")] {
+            match check_object(data) {
+                Ok(()) => assert_eq!(format, host),
+                Err(err) => {
+                    assert_ne!(format, host);
+                    assert_eq!(
+                        err.to_string(),
+                        format!(
+                            "not {article} {host} object (this build inspects {host} objects only)"
+                        )
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            check_object(b"text\n").unwrap_err().to_string(),
+            format!("not {article} {host} object")
         );
     }
 
