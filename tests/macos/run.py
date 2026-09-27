@@ -48,11 +48,29 @@ def die(message):
     sys.exit(2)
 
 def run(cmd):
+    """(status, stdout, stderr), the status being negative when a signal
+    killed the command, and None when it timed out."""
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=300)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
-        return -1, "", "timeout"
+        return None, "", "timeout"
+
+
+def crash(rc, err):
+    """Why rldd crashed (a panic, a signal such as the abort on a stack
+    overflow, or a timeout), or None."""
+    if rc is None:
+        return "timeout"
+    if "panicked at" in err:
+        return err.strip().split("\n")[-1][:200]
+    if rc < 0:
+        try:
+            name = signal.Signals(-rc).name
+        except ValueError:
+            name = "signal %d" % -rc
+        return "killed by %s: %s" % (name, err.strip().split("\n")[-1][:200])
+    return None
 
 
 def find_tool(name):
@@ -342,10 +360,11 @@ def main():
     if not dyld_info:
         die("dyld_info was not found (install the Xcode Command Line Tools)")
 
+    # Always build, which is a no-op when the binary is up to date, so the
+    # sweep never runs a stale one.
     rldd = os.path.join(REPO_ROOT, "target", "release", "rldd")
-    if not os.access(rldd, os.X_OK):
-        if subprocess.run(["cargo", "build", "--release"], cwd=REPO_ROOT).returncode != 0:
-            die("cargo build failed")
+    if subprocess.run(["cargo", "build", "--release"], cwd=REPO_ROOT).returncode != 0:
+        die("cargo build failed")
 
     CACHE.update(cache_images(dyld_info))
     roots = args.root or ["/bin", "/sbin", "/usr"]
@@ -369,8 +388,9 @@ def main():
         items = [(path, rldd, dyld_info) for path in objects]
         for path, (rc, out, err), (drc, dout, _) in pool.imap_unordered(run_tools, items, chunksize=4):
             done += 1
-            if "panicked at" in err or rc == -1:
-                panics.append("%s: %s" % (path, err.strip().split("\n")[-1][:200] if rc != -1 else "timeout"))
+            reason = crash(rc, err)
+            if reason:
+                panics.append("%s: %s" % (path, reason))
                 continue
             slices = collections.OrderedDict(
                 (name, s) for name, s in parse_dyld_info(dout).items() if s["linked"])
@@ -410,7 +430,8 @@ def main():
          "objects list other dependencies or attributes than dyld_info"),
         (paths, "every dependency resolves where its recorded load path leads",
          "dependencies resolve elsewhere than their recorded load path leads"),
-        (panics, "no object made rldd panic", "objects made rldd panic"),
+        (panics, "no object made rldd crash",
+         "objects made rldd crash (a panic, a signal, or a timeout)"),
     ):
         if not failures:
             write_pass(good)

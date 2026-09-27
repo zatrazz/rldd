@@ -26,7 +26,8 @@ The exit status is non-zero when any check fails.  Options:
 | `-j`, `--jobs N` | parallel workers (default: the processor count) |
 
 The prerequisites are the Xcode Command Line Tools, which provide `dyld_info`
-and the `python3`.
+and the `python3`.  The script first runs `cargo build --release`, a no-op
+when the binary is up to date, so it never sweeps with a stale one.
 
 ## What is checked
 
@@ -34,7 +35,7 @@ and the `python3`.
 | --- | --- |
 | dependency lists | the load paths are the ones `dyld_info -dependents` lists for the slice rldd selects, in the same order and with the same attributes (weak-link, re-export, upward, delay-init) |
 | resolved paths | each one is where dyld takes the recorded load path: the cache image with the literal path, the file on disk, the copy below Cryptexe path, or the realpath of an absolute load path; the `[dyld cache]` tag agrees; and a dependency is only reported as not found when no location provides any candidate |
-| panics | no object makes rldd panic |
+| crashes | no object makes rldd panic, die of a signal (the abort on a stack overflow, for instance), or time out |
 
 ## Differences that are not failures
 
