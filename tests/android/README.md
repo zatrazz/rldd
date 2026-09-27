@@ -91,8 +91,9 @@ With `-c` every executable the device can run is also listed that way, and the
 `name => path` pairs of rldd must be the same set: rldd reports the real path
 of each object the way the linker does (the runtime APEX libc.so rather than
 the `/system/lib64` symlink to it), and a library loaded on two namespaces is
-listed once per namespace.  An executable the linker fails to link because a
-library is missing compares as that library not found.  A library without
+listed once per namespace.  An executable the linker fails to link on a
+library it can not find or load (one the namespace can not access, say)
+compares as that library not found.  A library without
 `DT_SONAME`, which the linker lists with an empty name, is taken by its file
 name.
 

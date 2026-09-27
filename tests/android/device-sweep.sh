@@ -141,12 +141,14 @@ for f in $(printf '%s\n' $roots | sort -u); do
 
     device=$(LD_LIBRARY_PATH=$library_path LD_PRELOAD=$preload "$ldso" --list "$f" 2>&1)
     if [ $? -ne 0 ]; then
-        # The linker stops at the first library it can not find, which rldd
-        # should not find either.  Any other failure (an object for another
-        # architecture, say) is not comparable.
-        missing=$(printf '%s\n' "$device" | sed -n 's/.*library "\([^"]*\)" not found.*/\1/p' | head -1)
+        # The linker stops at the first library it can not find or load (one
+        # the namespace can not access, say), which rldd should not resolve
+        # either.  Any other failure (an executable for another architecture,
+        # or a file that is not an object for it) is not comparable.
+        missing=$(printf '%s\n' "$device" |
+            sed -n 's/^CANNOT LINK EXECUTABLE .*: library "\([^"]*\)".*/\1/p' | head -1)
         if [ -z "$missing" ]; then
-            echo "NOCMP $f $(printf '%s\n' "$device" | head -1)"
+            echo "NOCMP $f $(printf '%s\n' "$device" | grep -v ' => ' | head -1)"
         elif rldd_list "$out" | grep -Fqx "$missing => not found"; then
             same=$((same + 1))
         else
