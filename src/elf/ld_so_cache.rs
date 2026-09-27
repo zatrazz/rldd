@@ -113,8 +113,8 @@ unsafe impl Pod for cache_extension_section {}
 const _: () = assert!(std::mem::size_of::<cache_extension_section>() == 4 * 4);
 const CACHE_EXTENSION_SECTION_LEN: usize = size_of::<cache_extension_section>();
 
-// Check the ld.so.cache file_entry_new flags against a pre-defined value from glibc
-// dl-cache.h.
+// The ld.so.cache entry flags, from glibc ldconfig.h.
+const FLAG_ELF: i32 = 0x0001;
 const FLAG_ELF_LIBC6: i32 = 0x0003;
 const FLAG_SPARC_LIB64: i32 = 0x0100;
 const FLAG_IA64_LIB64: i32 = 0x0200;
@@ -135,79 +135,104 @@ const FLAG_RISCV_FLOAT_ABI_DOUBLE: i32 = 0x1000;
 const FLAG_LARCH_FLOAT_ABI_SOFT: i32 = 0x1100;
 const FLAG_LARCH_FLOAT_ABI_DOUBLE: i32 = 0x1200;
 
-fn check_file_entry_flags(
-    flags: i32,
-    ei_class: FileClass,
-    e_machine: Machine,
-    e_flags: FileFlags,
-) -> bool {
-    match e_machine {
-        EM_AARCH64 => match ei_class {
-            ELFCLASS64 => flags == FLAG_ELF_LIBC6 | FLAG_AARCH64_LIB64,
-            _ => false,
-        },
-        EM_ARM => {
-            if e_flags.contains(EF_ARM_VFP_FLOAT) {
-                (flags == FLAG_ARM_LIBHF | FLAG_ELF_LIBC6) || (flags == FLAG_ELF_LIBC6)
-            } else {
-                // Either EF_ARM_SOFT_FLOAT or no float ABI flag at all.
-                (flags == FLAG_ARM_LIBSF | FLAG_ELF_LIBC6) || (flags == FLAG_ELF_LIBC6)
-            }
-        }
-        EM_IA_64 => match ei_class {
-            ELFCLASS64 => flags == FLAG_ELF_LIBC6 | FLAG_IA64_LIB64,
-            _ => false,
-        },
-        EM_MIPS => match ei_class {
-            ELFCLASS32 => {
-                if e_flags & (EF_MIPS_NAN2008 | EF_MIPS_ABI2) == EF_MIPS_NAN2008 | EF_MIPS_ABI2 {
-                    flags == FLAG_MIPS64_LIBN32_NAN2008 | FLAG_ELF_LIBC6
-                } else if e_flags & EF_MIPS_NAN2008 == EF_MIPS_NAN2008 {
-                    flags == FLAG_MIPS_LIB32_NAN2008 | FLAG_ELF_LIBC6
-                } else if e_flags & EF_MIPS_ABI2 == EF_MIPS_ABI2 {
-                    flags == FLAG_MIPS64_LIBN32 | FLAG_ELF_LIBC6
+// The entry flags the loader built for an object ABI takes (the dl-cache.h
+// _dl_cache_check_flags of each ABI): its _DL_CACHE_DEFAULT_ID, whose entry
+// ends the search, and another value it takes as well, if any.
+#[derive(Clone, Copy, Debug)]
+struct CacheFlags {
+    default_id: i32,
+    other: Option<i32>,
+}
+
+impl CacheFlags {
+    // The flags for the object ABI, None for an ABI without a glibc loader.
+    fn new(ei_class: FileClass, e_machine: Machine, e_flags: FileFlags) -> Option<Self> {
+        let only = |default_id| CacheFlags {
+            default_id,
+            other: None,
+        };
+        // The generic check also takes FLAG_ELF, which ldconfig before glibc
+        // 2.37 wrote for the libraries without a libc dependency.
+        let generic = CacheFlags {
+            default_id: FLAG_ELF_LIBC6,
+            other: Some(FLAG_ELF),
+        };
+        Some(match e_machine {
+            EM_AARCH64 => match ei_class {
+                ELFCLASS64 => only(FLAG_ELF_LIBC6 | FLAG_AARCH64_LIB64),
+                _ => return None,
+            },
+            // The unmarked objects are compatible with either float ABI.
+            EM_ARM => CacheFlags {
+                default_id: FLAG_ELF_LIBC6,
+                other: Some(if e_flags.contains(EF_ARM_VFP_FLOAT) {
+                    FLAG_ARM_LIBHF | FLAG_ELF_LIBC6
                 } else {
-                    flags == FLAG_ELF_LIBC6
+                    // Either EF_ARM_SOFT_FLOAT or no float ABI flag at all.
+                    FLAG_ARM_LIBSF | FLAG_ELF_LIBC6
+                }),
+            },
+            EM_IA_64 => match ei_class {
+                ELFCLASS64 => only(FLAG_ELF_LIBC6 | FLAG_IA64_LIB64),
+                _ => return None,
+            },
+            // The legacy o32 ABI uses the generic check.
+            EM_MIPS => match ei_class {
+                ELFCLASS32 => {
+                    if e_flags & (EF_MIPS_NAN2008 | EF_MIPS_ABI2) == EF_MIPS_NAN2008 | EF_MIPS_ABI2
+                    {
+                        only(FLAG_MIPS64_LIBN32_NAN2008 | FLAG_ELF_LIBC6)
+                    } else if e_flags & EF_MIPS_NAN2008 == EF_MIPS_NAN2008 {
+                        only(FLAG_MIPS_LIB32_NAN2008 | FLAG_ELF_LIBC6)
+                    } else if e_flags & EF_MIPS_ABI2 == EF_MIPS_ABI2 {
+                        only(FLAG_MIPS64_LIBN32 | FLAG_ELF_LIBC6)
+                    } else {
+                        generic
+                    }
                 }
-            }
-            ELFCLASS64 => {
-                if e_flags & EF_MIPS_NAN2008 == EF_MIPS_NAN2008 {
-                    flags == FLAG_MIPS64_LIBN64_NAN2008 | FLAG_ELF_LIBC6
-                } else {
-                    flags == FLAG_MIPS64_LIBN64 | FLAG_ELF_LIBC6
+                ELFCLASS64 => {
+                    if e_flags & EF_MIPS_NAN2008 == EF_MIPS_NAN2008 {
+                        only(FLAG_MIPS64_LIBN64_NAN2008 | FLAG_ELF_LIBC6)
+                    } else {
+                        only(FLAG_MIPS64_LIBN64 | FLAG_ELF_LIBC6)
+                    }
                 }
-            }
-            _ => false,
-        },
-        EM_LOONGARCH => match e_flags & FileFlags(EF_LARCH_ABI_MODIFIER_MASK) {
-            EF_LARCH_ABI_DOUBLE_FLOAT => flags == FLAG_ELF_LIBC6 | FLAG_LARCH_FLOAT_ABI_DOUBLE,
-            EF_LARCH_ABI_SOFT_FLOAT => flags == FLAG_ELF_LIBC6 | FLAG_LARCH_FLOAT_ABI_SOFT,
-            _ => flags == FLAG_ELF_LIBC6,
-        },
-        EM_PPC64 => flags == FLAG_ELF_LIBC6 | FLAG_POWERPC_LIB64,
-        EM_RISCV => match e_flags & FileFlags(EF_RISCV_FLOAT_ABI) {
-            EF_RISCV_FLOAT_ABI_DOUBLE => flags == FLAG_ELF_LIBC6 | FLAG_RISCV_FLOAT_ABI_DOUBLE,
-            EF_RISCV_FLOAT_ABI_SOFT => flags == FLAG_ELF_LIBC6 | FLAG_RISCV_FLOAT_ABI_SOFT,
-            _ => flags == FLAG_ELF_LIBC6,
-        },
-        EM_S390 => match ei_class {
-            ELFCLASS32 => flags == FLAG_ELF_LIBC6,
-            ELFCLASS64 => flags == FLAG_ELF_LIBC6 | FLAG_S390_LIB64,
-            _ => false,
-        },
-        // The 64-bit objects use EM_SPARCV9, while the 32-bit ones might use
-        // either EM_SPARC or EM_SPARC32PLUS (v8+).
-        EM_SPARC | EM_SPARC32PLUS | EM_SPARCV9 => match ei_class {
-            ELFCLASS32 => flags == FLAG_ELF_LIBC6,
-            ELFCLASS64 => flags == FLAG_ELF_LIBC6 | FLAG_SPARC_LIB64,
-            _ => false,
-        },
-        EM_X86_64 => match ei_class {
-            ELFCLASS32 => flags == FLAG_ELF_LIBC6 | FLAG_X8664_LIBX32,
-            ELFCLASS64 => flags == FLAG_ELF_LIBC6 | FLAG_X8664_LIB64,
-            _ => false,
-        },
-        _ => flags == FLAG_ELF_LIBC6,
+                _ => return None,
+            },
+            EM_LOONGARCH => match e_flags & FileFlags(EF_LARCH_ABI_MODIFIER_MASK) {
+                EF_LARCH_ABI_DOUBLE_FLOAT => only(FLAG_ELF_LIBC6 | FLAG_LARCH_FLOAT_ABI_DOUBLE),
+                EF_LARCH_ABI_SOFT_FLOAT => only(FLAG_ELF_LIBC6 | FLAG_LARCH_FLOAT_ABI_SOFT),
+                _ => only(FLAG_ELF_LIBC6),
+            },
+            EM_PPC64 => only(FLAG_ELF_LIBC6 | FLAG_POWERPC_LIB64),
+            EM_RISCV => match e_flags & FileFlags(EF_RISCV_FLOAT_ABI) {
+                EF_RISCV_FLOAT_ABI_DOUBLE => only(FLAG_ELF_LIBC6 | FLAG_RISCV_FLOAT_ABI_DOUBLE),
+                EF_RISCV_FLOAT_ABI_SOFT => only(FLAG_ELF_LIBC6 | FLAG_RISCV_FLOAT_ABI_SOFT),
+                _ => only(FLAG_ELF_LIBC6),
+            },
+            EM_S390 => match ei_class {
+                ELFCLASS32 => generic,
+                ELFCLASS64 => only(FLAG_ELF_LIBC6 | FLAG_S390_LIB64),
+                _ => return None,
+            },
+            // The 64-bit objects use EM_SPARCV9, while the 32-bit ones might use
+            // either EM_SPARC or EM_SPARC32PLUS (v8+).
+            EM_SPARC | EM_SPARC32PLUS | EM_SPARCV9 => match ei_class {
+                ELFCLASS32 => generic,
+                ELFCLASS64 => only(FLAG_ELF_LIBC6 | FLAG_SPARC_LIB64),
+                _ => return None,
+            },
+            EM_X86_64 => match ei_class {
+                ELFCLASS32 => only(FLAG_ELF_LIBC6 | FLAG_X8664_LIBX32),
+                ELFCLASS64 => only(FLAG_ELF_LIBC6 | FLAG_X8664_LIB64),
+                _ => return None,
+            },
+            _ => generic,
+        })
+    }
+
+    fn check(&self, flags: i32) -> bool {
+        flags == self.default_id || Some(flags) == self.other
     }
 }
 
@@ -292,6 +317,8 @@ impl CacheEntry {
 struct CacheFile {
     entries: Vec<CacheEntry>,
     hwcaps: Vec<Option<Vec<u8>>>,
+    // Whether the entries are the new format ones, with the hwcap field.
+    new_format: bool,
 }
 
 // Whether DATA at OFFSET starts a new format header (glibc
@@ -339,6 +366,7 @@ fn parse_ld_so_cache_old(data: &[u8]) -> Result<CacheFile> {
     Ok(CacheFile {
         entries,
         hwcaps: Vec::new(),
+        new_format: false,
     })
 }
 
@@ -377,6 +405,7 @@ fn parse_ld_so_cache_new(data: &[u8], initial: usize) -> Result<CacheFile> {
     Ok(CacheFile {
         entries,
         hwcaps: parse_ld_so_cache_glibc_hwcap(data, hdr.extension_offset),
+        new_format: true,
     })
 }
 
@@ -510,7 +539,10 @@ struct Search<'a> {
 // search_cache.  The glibc-hwcaps entries of a name come first and the one
 // with the best priority wins, skipping the ones for a subdirectory the loader
 // does not search (for instance one the CPU does not support).  Otherwise the
-// first regular entry is taken.
+// first regular entry is taken on the new format, while the old format one
+// keeps searching for an entry with the loader default flags (the generic
+// FLAG_ELF_LIBC6 over FLAG_ELF, or the ARM unmarked entries over the float
+// ABI ones).
 fn select_entries(
     file: &CacheFile,
     ei_class: FileClass,
@@ -518,6 +550,9 @@ fn select_entries(
     e_flags: FileFlags,
     supported: &[&str],
 ) -> LdCache {
+    let Some(flags) = CacheFlags::new(ei_class, e_machine, e_flags) else {
+        return LdCache::new();
+    };
     let priorities = hwcaps_priorities(&file.hwcaps, supported);
 
     let mut searches = HashMap::<&str, Search>::new();
@@ -525,32 +560,35 @@ fn select_entries(
         let search = searches.entry(&entry.name).or_default();
         // Skip not supported entries for the binary architecture, for instance
         // x86_64/i686 with multilib support.
-        if search.done || !check_file_entry_flags(entry.flags, ei_class, e_machine, e_flags) {
+        if search.done || !flags.check(entry.flags) {
             continue;
         }
 
-        let named_hwcap = check_cache_hwcap_extension(entry.hwcap);
-        // The glibc-hwcaps entries are exhausted, so the best one found so
-        // far wins.
-        if !named_hwcap && search.best.is_some() {
-            search.done = true;
-            continue;
-        }
-        if named_hwcap {
-            let priority = priorities
-                .get(entry.hwcap as u32 as usize)
-                .copied()
-                .unwrap_or(0);
-            // Either not usable at all, or not a better match than the one
-            // already found.
-            if priority == 0 || (search.best.is_some() && priority >= search.priority) {
+        let mut named_hwcap = false;
+        if file.new_format {
+            named_hwcap = check_cache_hwcap_extension(entry.hwcap);
+            // The glibc-hwcaps entries are exhausted, so the best one found so
+            // far wins.
+            if !named_hwcap && search.best.is_some() {
+                search.done = true;
                 continue;
             }
-            search.priority = priority;
+            if named_hwcap {
+                let priority = priorities
+                    .get(entry.hwcap as u32 as usize)
+                    .copied()
+                    .unwrap_or(0);
+                // Either not usable at all, or not a better match than the one
+                // already found.
+                if priority == 0 || (search.best.is_some() && priority >= search.priority) {
+                    continue;
+                }
+                search.priority = priority;
+            }
         }
 
         search.best = Some(entry);
-        search.done = !named_hwcap;
+        search.done = !named_hwcap && entry.flags == flags.default_id;
     }
 
     // A path that is not valid UTF-8 resolves nothing, as if the loader failed
@@ -927,6 +965,75 @@ mod tests {
         let cache = select(&cache, &["x86-64-v3", "x86-64-v2"]);
         assert_eq!(cache["liblzma.so.5"], "/opt");
         assert_eq!(cache["libm.so.6"], "/usr/lib");
+    }
+
+    fn select_abi(
+        cache: &[u8],
+        ei_class: FileClass,
+        e_machine: Machine,
+        e_flags: FileFlags,
+    ) -> LdCache {
+        let file = parse_cache(cache).unwrap();
+        select_entries(&file, ei_class, e_machine, e_flags, &[])
+    }
+
+    #[test]
+    fn flag_elf_entries() {
+        // ldconfig before 2.37 marks a library without a libc dependency as
+        // FLAG_ELF, which the loaders with the generic check take (i386) and
+        // the others do not (x86-64).
+        let entries = [
+            (FLAG_ELF, "libnoneed.so.1", "/opt/libnoneed.so.1"),
+            (X86_64, "libnoneed.so.1", "/usr/lib64/libnoneed.so.1"),
+        ];
+        let new = build_cache(&entries.map(|(f, n, p)| (f, n, p, 0)), &[]);
+        for cache in [build_old(&entries), new] {
+            let i386 = select_abi(&cache, ELFCLASS32, EM_386, FileFlags(0));
+            assert_eq!(i386["libnoneed.so.1"], "/opt");
+            let x86_64 = select_abi(&cache, ELFCLASS64, EM_X86_64, FileFlags(0));
+            assert_eq!(x86_64["libnoneed.so.1"], "/usr/lib64");
+        }
+    }
+
+    #[test]
+    fn default_flags_on_the_old_format() {
+        // The new format takes the first entry the loader accepts, while the
+        // old one keeps searching for one with the loader default flags, and
+        // otherwise takes the last one.
+        let i386 = |cache: &[u8]| select_abi(cache, ELFCLASS32, EM_386, FileFlags(0));
+        let entries = [
+            (FLAG_ELF, "libfoo.so.1", "/opt/elf/libfoo.so.1"),
+            (FLAG_ELF, "libfoo.so.1", "/usr/elf/libfoo.so.1"),
+            (FLAG_ELF_LIBC6, "libfoo.so.1", "/usr/lib/libfoo.so.1"),
+            (FLAG_ELF, "libbar.so.1", "/opt/elf/libbar.so.1"),
+            (FLAG_ELF, "libbar.so.1", "/usr/elf/libbar.so.1"),
+        ];
+        let old = i386(&build_old(&entries));
+        assert_eq!(old["libfoo.so.1"], "/usr/lib");
+        assert_eq!(old["libbar.so.1"], "/usr/elf");
+        let new = i386(&build_cache(&entries.map(|(f, n, p)| (f, n, p, 0)), &[]));
+        assert_eq!(new["libfoo.so.1"], "/opt/elf");
+        assert_eq!(new["libbar.so.1"], "/opt/elf");
+
+        // The ARM loaders take the unmarked entries along with the ones of
+        // their float ABI, but only the former are the default ones.
+        let armhf = |cache: &[u8]| select_abi(cache, ELFCLASS32, EM_ARM, EF_ARM_VFP_FLOAT);
+        let entries = [
+            (
+                FLAG_ARM_LIBHF | FLAG_ELF_LIBC6,
+                "libm.so.6",
+                "/usr/lib/arm-linux-gnueabihf/libm.so.6",
+            ),
+            (
+                FLAG_ARM_LIBSF | FLAG_ELF_LIBC6,
+                "libm.so.6",
+                "/usr/lib/arm-linux-gnueabi/libm.so.6",
+            ),
+            (FLAG_ELF_LIBC6, "libm.so.6", "/usr/lib/libm.so.6"),
+        ];
+        assert_eq!(armhf(&build_old(&entries))["libm.so.6"], "/usr/lib");
+        let new = build_cache(&entries.map(|(f, n, p)| (f, n, p, 0)), &[]);
+        assert_eq!(armhf(&new)["libm.so.6"], "/usr/lib/arm-linux-gnueabihf");
     }
 
     #[test]
