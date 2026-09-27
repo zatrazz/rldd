@@ -70,10 +70,11 @@ The options common to every build are:
 * `-h`, `--help` prints the usage.
 
 The loader environment variables and the other loader inputs are mimicked with
-options, described on each system section: `--library-path`, `--preload`, and `--platform` on the ELF
-systems; `--library-path`, `--framework-path`, `--fallback-library-path`,
-`--fallback-framework-path`, `--preload`, `--image-suffix`, and `--arch` on
-macOS; and `--library-path` and `--no-safe-search` on Windows.  macOS and
+options, described on each system section: `--library-path`, `--preload`, and
+`--platform` on the ELF systems; `--library-path`, `--framework-path`,
+`--fallback-library-path`, `--fallback-framework-path`, `--preload`,
+`--image-suffix`, and `--arch` on macOS; and `--library-path` and
+`--no-safe-search` on Windows.  macOS and
 Windows also have `--depth` and `--ignore-prefix` to prune the tree.  The
 relocation checks (`-d`, `-r`, and `-u`) are only available on Linux, and the
 import checks (`-d` and `-r`) on Windows.
@@ -752,36 +753,103 @@ On Windows, the dependencies are tracked via `dumpbin /dependents`, where the
 DLL names recorded in the import and delay-load import directories are resolved
 according to the documented search order for unpackaged applications.  The
 delay-load dependencies are printed with the `delay-load` attribute, and the
-ones whose imports were bound at link time with the `bound` attribute.
+ones whose imports were bound at link time with the `bound` attribute.  The
+delay-load descriptors the Visual C++ 6 linker wrote, which hold virtual
+addresses instead of RVAs, are read as well.  An import descriptor without an
+import name table has its names read from the address table, like the loader
+does for the objects of the old Borland linkers, unless the object was bound,
+where that table holds addresses and the imports are left unread.
 
 The `api-ms-` and `ext-ms-` virtual names are resolved with the API set schema
 from `apisetschema.dll` and printed as `NAME -> HOST`, with the module that
 implements them.  A set that implements nothing on the running system is
 reported as not found.
 
-The KnownDLLs are always resolved from the system directory, regardless of the
-search order, and so are their dependencies.  For 32-bit images, the system
-directory is SysWOW64 instead of System32, and a candidate built for another
-machine is skipped so the search continues, as the loader does.
-
-An imported symbol that resolves to a forwarded export pulls in the module it
-points to, which no import directory records.  Those dependencies are printed
-with the `forwarded` attribute.
-
-The dependent assemblies declared on the manifest are resolved against the
-WinSxS store, which the loader searches before the loaded module list, so the
-same name may be loaded from more than one assembly (the version 5 and the
-version 6 common controls are the usual case).  The embedded RT_MANIFEST
-resource is used when present, and an external `.manifest` file otherwise.  If
-the publisher policy is not read, the highest installed build for the requested
-major and minor version is used.
-
-When a `.local` directory exists, the dependencies are taken from it, and when
-it is a plain file, they are taken from the application directory.
-
 The search order is the application directory, the `--library-path`
 directories, the system directory, the 16-bit system directory, the Windows
-directory, the current directory, and at last the PATH directories.
+directory, the current directory, and at last the PATH directories.  An import
+name with a path component is taken as it is when it is absolute, and
+otherwise searched below each directory of the order (`p\my.dll` is looked for
+as `app\p\my.dll`, even when it starts with `.\`), and it is printed as the
+alias of the module it resolves to.
+
+Only a missing file, or an image built for another machine, lets the search go
+on.  Any other candidate the loader cannot map (a file that is not an image, a
+truncated or an empty one, or a directory by that name) stops it, even with a
+valid copy further on the order, and the dependency is printed as not found
+with the `bad image` attribute (the `-v` option shows the reason on the
+searched location).
+
+The known DLLs are the sections smss creates at boot on the \KnownDlls object
+directory (\KnownDlls32 for the 32-bit images): the modules of the KnownDLLs
+registry key along with every module their static imports pull in, with the
+API sets resolved.  They are always resolved from the known DLLs directory
+(the system directory, or the expanded DllDirectory and DllDirectory32
+registry values), regardless of the search order, and printed as
+`[KnownDLLs]`.  A module a known DLL only pulls in through a delay load import
+or a forwarder is not a known DLL itself (unless it is on the registry list, or
+another known DLL statically imports it), so it follows the normal search order
+and an application copy of it is taken first, as with the loader.
+
+A 32-bit image sees the WOW64 view of the file system: every directory the
+search order reaches goes through the redirection, so System32 and everything
+below it stand for SysWOW64 (SysArm32 for a 32-bit ARM image), except the
+catroot, catroot2, driverstore, drivers\etc, logfiles, and spool directories,
+while Sysnative names the real System32.  On Windows on ARM, the SyChpe32
+directory, with the hybrid build of the core x86 modules, comes before
+SysWOW64 wherever the order reaches it.
+
+A candidate built for another machine is skipped so the search continues, as
+the loader does.  On ARM64, a native process loads the ARM64 and ARM64X
+modules, and an emulated one (an x86_64 or ARM64EC image) the x86_64, ARM64EC,
+and ARM64X ones, so the ARM64 and ARM64EC modules do not load each other.  An
+AMD64 header with CHPE metadata is an ARM64EC object, unless it holds ARM64X
+relocations, which make it an ARM64X one (an ARM64 header with the metadata is
+always ARM64X).
+
+A .NET image gets a `mscoree.dll` dependency with the `clr` attribute when its
+imports do not record one, since the loader maps it for any .NET image (an IL
+only one built for x86_64 or ARM64 imports nothing).  An IL only image built
+for any CPU (a PE32 image recording i386 whose CLR header does not ask for a
+32-bit process) runs as a native process, so as the input its dependencies are
+resolved for the machine of the system (x86_64, or ARM64 on Windows on ARM).
+
+An imported symbol that resolves to a forwarded export pulls in the module it
+points to, which no import directory records, unless the forwarding module
+statically imports it (a delay load import does not load it at startup, while
+the forwarder does).  Those dependencies are printed with the `forwarded`
+attribute, and a chain of forwarders is followed to its end.  The exports are
+read entry by entry, so a malformed entry only drops itself.
+
+The dependent assemblies declared on the manifest the loader activates are
+resolved against the WinSxS store, which the loader searches before the loaded
+module list, so the same name may be loaded from more than one assembly (the
+version 5 and the version 6 common controls are the usual case).  An
+executable given as input starts the process with its RT_MANIFEST resource 1,
+or else the external `<name>.exe.manifest` file, or else its resource 2, and
+only one of them is activated (the PreferExternalManifest registry value puts
+the external file first).  Any other module only has its resource 2 activated,
+never an external file, and the resource 3 is never read.  The manifests are
+parsed as XML: the comments and the CDATA sections are skipped, the namespace
+prefixes dropped, the entities expanded, and UTF-8 and UTF-16 are read with or
+without a byte order mark.  The WinSxS directory names the store shortens (a
+name over 40 characters kept as its first and last 19 around a `..`, and a
+language over 8 as its first and last 3) are matched.  If the publisher policy
+is not read, the highest installed build for the requested major and minor
+version is used.  The side-by-side redirection does not apply to an import
+name with a path.
+
+When a `.local` directory exists, the dependencies are taken from it, and when
+it is a plain file, they are taken from the application directory.  The
+redirection is ignored when the process starts with a manifest (the resource 1
+or the external file), unless the DevOverrideEnable value of the Image File
+Execution Options key is set, and it applies to the base name of an import
+name with a path as well.
+
+The system default activation context (the loader maps comctl32 and gdiplus
+from WinSxS even for an executable without a manifest), the API set schema
+extensions, the application compatibility shims, and the ExcludeFromKnownDlls
+registry value are not supported.
 
 Since the recursive listing of a system binary expands to most of the system
 directory, only the direct dependencies are printed by default, and the tree
@@ -791,21 +859,26 @@ can be pruned with:
   (the default is 1, the direct dependencies).
 * `--ignore-prefix PREFIX` skips dependencies whose resolved path starts with
   the prefix (for instance `--ignore-prefix C:\Windows` to hide the system
-  libraries). The option may be used multiple times, and the comparison ignores
-  case.
+  libraries).  The option may be used multiple times, and the comparison ignores
+  case and takes either separator.
 
 The remaining loader inputs are mimicked with options:
 
 * `--library-path LIST` searches the semicolon-separated directories right after
-  the application one, as SetDllDirectory and AddDllDirectory.
+  the application one, as SetDllDirectory does, which also removes the current
+  directory from the search order.  AddDllDirectory is not mimicked: it only
+  applies with LOAD_LIBRARY_SEARCH_USER_DIRS, which also drops the PATH, the
+  current, and the Windows directories.
 * `--no-safe-search` searches the current directory immediately after the
   application directory, because the SafeDllSearchMode registry value is set to
-  0.
+  0 (it has no effect along with `--library-path`).
 
-The `-v` option also prints the object information: the machine, the subsystem,
-the image base, the API set schema and KnownDLLs status, the dependent
-assemblies with the directory they resolved to, and the search path list used
-for the resolution.
+The `-v` option also prints the object information: the machine (marked as IL
+only, any CPU, for such a .NET image), the subsystem, the image base, the image
+type, the API set schema status, the number of known DLL sections for the
+architecture of the image, the number of WinSxS assemblies, the safe search
+mode, the dependent assemblies with the directory they resolved to, and the
+search path list used for the resolution.
 
 ## Import checks (Windows only)
 
@@ -816,6 +889,10 @@ imported symbol is exported by the module it is imported from:
   exports.
 * `-r` also checks the delayed-load imports, which the loader only binds on the
   first call.
+
+An imported symbol is bound through the forwarders the way the loader binds
+it, so a missing one is reported as the symbol and the module the chain ends
+on (`undefined symbol: NAME, from MODULE`, followed by the importing object).
 
 There is no `-u` option: an import directory only records a module when a
 symbol is imported from it, so a PE object has no unused dependency to report.
@@ -874,9 +951,10 @@ which needs the nightly toolchain) without failing the workflow when nightly
 breaks.
 
 The suites below compare rldd with the reference tool of each system on a real
-installation.  The Android, macOS, Linux, and BSD ones always build rldd before
-the run (a no-op when it is up to date), so a stale binary is never tested, and
-report a crash (a panic, or rldd killed by a signal) as a failure.
+installation.  Each one always builds rldd before the run (a no-op when it is
+up to date), so a stale binary is never tested.  The Android, macOS, Linux, and
+BSD ones report a crash (a panic, or rldd killed by a signal) as a failure, and
+the Windows one a panic, or an error on an object dumpbin reads.
 
 Its configuration parser aside, the Android backend is only compiled when cross
 building and needs a real system image to be exercised.  The device test suite
@@ -904,10 +982,17 @@ The PE backend reads the dependency names out of the import and the delay load
 import directories, which the unit tests cannot check against a real
 installation, so it has a suite of its own under
 [tests/windows](tests/windows).  It runs rldd over the binaries of a system
-directory and compares the dependency names with `dumpbin /dependents`:
+directory and compares the dependency names with `dumpbin /dependents`.  With
+`-Paths` it also starts every executable of the sweep under the debugger, up to
+the initial loader breakpoint, and compares the modules the loader maps with
+the paths rldd resolves the static dependencies to, each run bounded by
+`-Timeout`.  What rldd does not model (the modules the loader maps on its own,
+the compatibility shims, and the system default activation context) is counted
+apart, and `-Verbose` lists every failure:
 
 ```
 tests\windows\run.ps1
+tests\windows\run.ps1 -Paths
 ```
 
 The Mach-O backend takes the recorded load paths to the dyld shared cache, the
