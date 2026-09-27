@@ -329,8 +329,10 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
             Some(Token::PropertyAppend(name, value)) => {
                 properties.append(lossy(name), lossy(value));
             }
-            Some(Token::Section(_) | Token::Error) => break,
-            None => continue,
+            Some(Token::Section(_)) => break,
+            // The loader warns about an invalid line and ignores it, the
+            // rest of the section still applies.
+            Some(Token::Error) | None => continue,
         }
     }
 
@@ -975,6 +977,26 @@ mod tests {
             )
             .map_err(Error::other)?;
         assert_eq!(search_paths(&ldcache, "default"), vec![fixture.path("lib")]);
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_line() -> Result<(), Error> {
+        let fixture = Fixture::new()?;
+        let ldcache = fixture
+            .parse(
+                "dir.test = {base}/bin\n\
+                 [test]\n\
+                 additional.namespaces = other\n\
+                 this line is not a property\n\
+                 namespace.default.search.paths = {base}/lib\n\
+                 namespace.other.search.paths = {base}/lib64\n\
+                 [next]\n\
+                 namespace.default.search.paths = {base}/lib64\n",
+            )
+            .map_err(Error::other)?;
+        assert_eq!(search_paths(&ldcache, "default"), vec![fixture.path("lib")]);
+        assert_eq!(search_paths(&ldcache, "other"), vec![fixture.path("lib64")]);
         Ok(())
     }
 
