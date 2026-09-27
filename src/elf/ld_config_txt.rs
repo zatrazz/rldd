@@ -5,6 +5,7 @@ use std::path::Path;
 
 use crate::elf::android::*;
 use crate::search_path;
+use crate::search_path::SearchPathVecExt;
 
 use object::elf::{FileClass, Machine};
 
@@ -168,25 +169,72 @@ impl Properties {
             .to_string()
     }
 
+    // The bionic Properties::get_paths: the ':' separated list, with the
+    // variables replaced on each entry.  An unset or empty property is an
+    // empty list.
     fn get_paths<S: AsRef<str>>(
         &self,
         name: S,
         ei_class: FileClass,
         props: &SystemProperties,
-    ) -> search_path::SearchPathVec {
-        let mut path = self.get_string(name);
-
-        path = path.replace("${SDK_VER}", self.target_sdk_version.as_str());
+    ) -> Vec<String> {
+        let paths = self.get_string(name);
+        if paths.is_empty() {
+            return Vec::new();
+        }
 
         // The VNDK APEX uses a different delimiter than the VNDK version
         // itself ('v30' against '-30').
-        path = path.replace("${VNDK_VER}", props.vndk_version_string('-').as_str());
-        path = path.replace("${VNDK_APEX_VER}", props.vndk_version_string('v').as_str());
+        let vndk_ver = props.vndk_version_string('-');
+        let vndk_apex_ver = props.vndk_version_string('v');
+        let params = [
+            ("LIB", libpath(ei_class)),
+            ("SDK_VER", self.target_sdk_version.as_str()),
+            ("VNDK_VER", vndk_ver.as_str()),
+            ("VNDK_APEX_VER", vndk_apex_ver.as_str()),
+        ];
 
-        path = path.replace("${LIB}", libpath(ei_class));
-
-        search_path::from_string(path, &[':'])
+        paths
+            .split(':')
+            .map(|path| format_string(path, &params))
+            .collect()
     }
+}
+
+// The bionic format_string: each '$NAME' or '${NAME}' of a variable in PARAMS
+// is replaced, the variables tried in order with NAME matched as a prefix of
+// what follows the '$' (so '$LIBFOO' is 'lib64FOO').  A replacement is not
+// scanned again, and any other '$' is kept as is.
+fn format_string(s: &str, params: &[(&str, &str)]) -> String {
+    let mut r = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(pos) = rest.find('$') {
+        r.push_str(&rest[..pos]);
+        let after = &rest[pos + 1..];
+        let replaced = params.iter().find_map(|(name, replacement)| {
+            after
+                .strip_prefix(name)
+                .or_else(|| {
+                    after
+                        .strip_prefix('{')
+                        .and_then(|braced| braced.strip_prefix(name))
+                        .and_then(|braced| braced.strip_prefix('}'))
+                })
+                .map(|tail| (replacement, tail))
+        });
+        match replaced {
+            Some((replacement, tail)) => {
+                r.push_str(replacement);
+                rest = tail;
+            }
+            None => {
+                r.push('$');
+                rest = after;
+            }
+        }
+    }
+    r.push_str(rest);
+    r
 }
 
 // A configuration line: a 'name = value' assignment, a 'name += value'
@@ -442,11 +490,14 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
             property_name_prefix.push_str(".hwasan");
         }
 
-        ns.search_paths = properties.get_paths(
+        ns.search_paths = search_path::SearchPathVec::new();
+        for path in properties.get_paths(
             format!("{property_name_prefix}.search.paths"),
             ei_class,
             props,
-        );
+        ) {
+            ns.search_paths.add_path(&path);
+        }
 
         // Skip the permitted.paths, since it is not required for program loading.
     }
@@ -987,6 +1038,51 @@ mod tests {
         );
         assert_eq!(next_token(b"not a property"), Some(Token::Error));
         assert_eq!(next_token(b"[section"), Some(Token::Error));
+    }
+
+    #[test]
+    fn variables() {
+        let params = [
+            ("LIB", "lib64"),
+            ("SDK_VER", "10000"),
+            ("VNDK_VER", "-31"),
+            ("VNDK_APEX_VER", "v31"),
+        ];
+        let format = |s| format_string(s, &params);
+
+        assert_eq!(format("/system/${LIB}/x"), "/system/lib64/x");
+        assert_eq!(format("/system/$LIB/x"), "/system/lib64/x");
+        assert_eq!(
+            format("/a${SDK_VER}/b$VNDK_VER/c${VNDK_APEX_VER}"),
+            "/a10000/b-31/cv31"
+        );
+        // The name is a prefix match for the unbraced form only.
+        assert_eq!(format("/$LIBFOO"), "/lib64FOO");
+        assert_eq!(format("/${LIBFOO}"), "/${LIBFOO}");
+        // Unknown variables, a lone '$', and an unterminated brace are kept.
+        assert_eq!(format("$ORIGIN/${PLATFORM}"), "$ORIGIN/${PLATFORM}");
+        assert_eq!(format("/a$/b$"), "/a$/b$");
+        assert_eq!(format("/${LIB"), "/${LIB");
+        assert_eq!(format("$$LIB"), "$lib64");
+        // A replacement is not expanded again.
+        assert_eq!(format_string("$A$B", &[("A", "$B"), ("B", "x")]), "$Bx");
+    }
+
+    #[test]
+    fn unbraced_variables() -> Result<(), Error> {
+        let fixture = Fixture::new()?;
+        let ldcache = fixture
+            .parse(
+                "dir.test = {base}/bin\n\
+                 [test]\n\
+                 namespace.default.search.paths = {base}/$LIB\n",
+            )
+            .map_err(Error::other)?;
+        assert_eq!(
+            search_paths(&ldcache, "default"),
+            vec![fixture.path("lib64")]
+        );
+        Ok(())
     }
 
     #[test]
