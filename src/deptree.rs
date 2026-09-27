@@ -90,17 +90,12 @@ impl DepNode {
 impl DepMode {
     // Dependencies resolved through a search path list are recorded with
     // the location they were found at, so they are matched by the leaf
-    // name (the same leaf always resolves to the same object).
+    // name (the same leaf always resolves to the same object).  The Mach-O
+    // backend matches the loaded images itself (by path, install name, and
+    // file), so only the ELF modes are listed.
     #[cfg(unix)]
     fn matched_by_leaf(self) -> bool {
-        matches!(
-            self,
-            DepMode::Preload
-                | DepMode::LdLibraryPath
-                | DepMode::LdFrameworkPath
-                | DepMode::LdFallbackLibraryPath
-                | DepMode::LdFallbackFrameworkPath
-        )
+        matches!(self, DepMode::Preload | DepMode::LdLibraryPath)
     }
 }
 
