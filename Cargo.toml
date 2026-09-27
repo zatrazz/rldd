@@ -3,6 +3,9 @@ name = "rldd"
 version = "0.5.0"
 authors = [ "Adhemerval Zanella <zatrazz@gmail.com>" ]
 edition = "2021"
+# The dependencies need 1.85 (object), and the PE backend 1.88
+# (slice::as_chunks).
+rust-version = "1.88"
 license = "MIT"
 description = """
 A program to print shared object dependencies
