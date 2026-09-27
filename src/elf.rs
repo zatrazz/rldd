@@ -1277,10 +1277,11 @@ fn resolve_dependencies(
         // specific: the glibc loader searches the object own DT_RPATH and
         // then walks up the chain of loading objects (up to the
         // executable), the FreeBSD and OpenBSD loaders search the object
-        // own DT_RPATH and then the main object one, while the NetBSD
-        // loader only searches the requesting object DT_RPATH.  In all
-        // cases an object DT_RPATH is ignored if the object also defines
-        // DT_RUNPATH, without affecting the inherited part
+        // own DT_RPATH and then the main object one (neither when the
+        // object has DT_RUNPATH), while the NetBSD loader only searches the
+        // requesting object DT_RPATH.  In all cases an object DT_RPATH is
+        // ignored if the object also defines DT_RUNPATH, without affecting
+        // the inherited part
         if dep.elc.has_runpath {
             dep.elc.rpath.clear();
         }
@@ -1441,9 +1442,9 @@ fn resolve_dependency_1<'a>(
             // The rpath field holds the object own DT_RPATH along with any
             // inherited part.  The glibc loader skips the whole search
             // (including the inherited chain) if the object issuing the load
-            // has a DT_RUNPATH, while the BSD loaders still search the main
-            // object DT_RPATH (the object own rpath is already cleared on
-            // DT_RUNPATH presence).
+            // has a DT_RUNPATH, and so do the FreeBSD and OpenBSD loaders
+            // for the main program DT_RPATH they add (find_library,
+            // _dl_load_shlib).
             SearchStep::Rpath if Rtld::rpath_search(elc) => search(&elc.rpath, DepMode::DtRpath),
             SearchStep::Rpath => None,
             SearchStep::LibraryPath => search(&config.ld_library_path, DepMode::LdLibraryPath),
