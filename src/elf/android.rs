@@ -226,6 +226,25 @@ pub fn runpath_list(
         .collect()
 }
 
+// The bionic fix_dt_needed: a 32-bit linker takes the file name of a
+// DT_NEEDED entry NAME with a path when the TARGET_SDK_VERSION of the binary
+// is below 23 (a workaround for old applications, b/21364029).  For an
+// executable, only a '.version' file its configuration section opts in sets
+// it that low; without a configuration it is the linker own API level.
+pub fn fix_dt_needed(
+    name: &str,
+    ei_class: FileClass,
+    target_sdk_version: Option<i64>,
+) -> std::borrow::Cow<'_, str> {
+    if ei_class == ELFCLASS32
+        && target_sdk_version.is_some_and(|version| version < 23)
+        && name.contains('/')
+    {
+        return pathutils::get_name(&std::path::Path::new(name)).into();
+    }
+    name.into()
+}
+
 // The namespace an ld.config.txt link names, None for the default one (the
 // key the objects are recorded with).
 pub fn namespace_key(name: &str) -> Option<String> {
@@ -435,6 +454,24 @@ mod tests {
         assert_eq!(file(&art, (1, 2), true), Some(1));
         assert_eq!(file(&art, (1, 7), false), Some(6));
         Ok(())
+    }
+
+    #[test]
+    fn dt_needed_paths() {
+        let fix = |name, ei_class, version| fix_dt_needed(name, ei_class, version).into_owned();
+        // Only a 32-bit binary targeting an API level below 23.
+        assert_eq!(fix("/a/b/libfoo.so", ELFCLASS32, Some(22)), "libfoo.so");
+        assert_eq!(fix("b/libfoo.so", ELFCLASS32, Some(22)), "libfoo.so");
+        assert_eq!(
+            fix("/a/b/libfoo.so", ELFCLASS32, Some(23)),
+            "/a/b/libfoo.so"
+        );
+        assert_eq!(
+            fix("/a/b/libfoo.so", ELFCLASS64, Some(22)),
+            "/a/b/libfoo.so"
+        );
+        assert_eq!(fix("/a/b/libfoo.so", ELFCLASS32, None), "/a/b/libfoo.so");
+        assert_eq!(fix("libfoo.so", ELFCLASS32, Some(22)), "libfoo.so");
     }
 
     #[test]

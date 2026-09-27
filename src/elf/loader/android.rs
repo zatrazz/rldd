@@ -388,23 +388,35 @@ impl Android {
 
     // The bionic find_library_internal for NAME, a dependency of the ELC
     // object at NEEDED_BY loaded on NAMESPACE (the executable and the preload
-    // entries are on the default one).  An object already loaded with NAME
-    // as soname on the namespace, or on a linked one that shares it, is
-    // taken.  Otherwise the name is searched on the namespace, and then on
-    // each linked namespace whose link shares it, where the object would be
-    // loaded.
+    // entries are on the default one), a DT_NEEDED entry unless it is a
+    // preload entry.  An object already loaded with NAME as soname on the
+    // namespace, or on a linked one that shares it, is taken.  Otherwise the
+    // name is searched on the namespace, and then on each linked namespace
+    // whose link shares it, where the object would be loaded.
     pub(in crate::elf) fn find_library<'a>(
         config: &'a Config,
         loaded: &bionic::LoadedObjects,
         elc: &'a ElfInfo,
         needed_by: &str,
         namespace: &Option<String>,
-        name: &'a String,
+        name: &str,
+        dt_needed: bool,
     ) -> Lookup<'a> {
         let cache = config.ld_cache.as_ref();
         let Some(ns) = Namespace::get(config, namespace.clone()) else {
             return Lookup::Search(Box::new(None));
         };
+
+        let name = if dt_needed {
+            bionic::fix_dt_needed(
+                name,
+                elc.ei_class,
+                cache.map(|cache| cache.target_sdk_version()),
+            )
+        } else {
+            Cow::Borrowed(name)
+        };
+        let name = name.as_ref();
 
         if let Some(node) = loaded.find_by_soname(cache, &ns.key, name, true) {
             return Lookup::Loaded(node);
@@ -427,7 +439,7 @@ impl Android {
             // soname of the object loaded there, or else the file name.
             let candidate = loaded.find_by_soname(cache, &linked.key, name, false);
             let soname = match candidate {
-                Some(_) => name.clone(),
+                Some(_) => name.to_string(),
                 None => pathutils::get_name(&Path::new(name)),
             };
             if !link.is_accessible(&soname) {
@@ -456,7 +468,7 @@ fn load_library<'a>(
     elc: &'a ElfInfo,
     needed_by: &str,
     ns: &Namespace<'a>,
-    name: &'a String,
+    name: &str,
     search_linked: bool,
 ) -> Load<'a> {
     use std::os::unix::fs::MetadataExt;
@@ -484,7 +496,7 @@ fn load_library<'a>(
     match open_dependency(&path, elc, config.platform) {
         Ok(delc) => Load::Done(Lookup::Search(Box::new(Some(Ok(ResolvedDependency {
             elc: delc,
-            path: dir.into(),
+            path: dir,
             filename: pathutils::get_name(&path),
             mode,
             namespace: ns.key.clone(),
@@ -505,19 +517,19 @@ fn open_library<'a>(
     config: &'a Config,
     elc: &'a ElfInfo,
     ns: &Namespace<'a>,
-    name: &'a String,
-) -> Option<(&'a String, DepMode, PathBuf)> {
+    name: &str,
+) -> Option<(Cow<'a, str>, DepMode, PathBuf)> {
     let candidate = |path: &PathBuf| fs::File::open(path).is_ok();
 
     if name.contains('/') {
         let path = PathBuf::from(name);
-        return candidate(&path).then_some((name, DepMode::Direct, path));
+        return candidate(&path).then(|| (name.to_string().into(), DepMode::Direct, path));
     }
 
     let first = |dirs: &'a search_path::SearchPathVec, mode: DepMode| {
         dirs.iter().find_map(|dir| {
             let path = Android::dependency_path(&dir.path, name);
-            candidate(&path).then_some((&dir.path, mode, path))
+            candidate(&path).then(|| (dir.path.as_str().into(), mode, path))
         })
     };
     ns.ld_library_paths(config)

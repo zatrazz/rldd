@@ -1184,11 +1184,18 @@ fn resolve_dependencies(
         // The Android linker looks the objects up and searches the name on
         // the namespaces the requesting object sees (loader/android.rs).
         #[cfg(target_os = "android")]
-        let (loaded, resolved) =
-            match Rtld::find_library(config, &namespaces, elc, refpath, namespace, dependency) {
-                loader::Lookup::Loaded(node) => (Some(node), None),
-                loader::Lookup::Search(resolved) => (None, *resolved),
-            };
+        let (loaded, resolved) = match Rtld::find_library(
+            config,
+            &namespaces,
+            elc,
+            refpath,
+            namespace,
+            dependency,
+            !(item.preload && item.parent == 0),
+        ) {
+            loader::Lookup::Loaded(node) => (Some(node), None),
+            loader::Lookup::Search(resolved) => (None, *resolved),
+        };
         if let Some(node) = loaded {
             let entry = deptree.arena[node].val.clone();
             deptree.add_repeated(
