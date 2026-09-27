@@ -26,8 +26,10 @@ impl Loader for FreeBsd {
         canonical_origin_directory(filename)
     }
 
-    fn check_elf_header(elc: &ElfInfo) -> bool {
-        elc.ei_osabi == ELFOSABI_FREEBSD
+    // The rtld check_elf_headers only checks the class, data encoding, version,
+    // type and machine, and not the EI_OSABI field.
+    fn check_elf_header(_elc: &ElfInfo) -> bool {
+        true
     }
 
     // Remap the dependency name using the libmap.conf mappings for the referencing
