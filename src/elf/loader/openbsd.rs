@@ -34,7 +34,7 @@ impl Loader for OpenBsd {
         ld_cache.is_none()
     }
 
-    fn origin_directory<P: AsRef<Path>>(filename: &P, _melc: Option<&ElfInfo>) -> String {
+    fn origin_directory<P: AsRef<Path>>(filename: &P, _melc: Option<&ElfInfo>) -> Option<String> {
         canonical_origin_directory(filename)
     }
 

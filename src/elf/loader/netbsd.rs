@@ -38,15 +38,14 @@ impl Loader for NetBsd {
 
     // The NetBSD loader expands the $ORIGIN token to the executable directory for
     // every object, so the requesting object value is propagated.
-    fn origin_directory<P: AsRef<Path>>(filename: &P, melc: Option<&ElfInfo>) -> String {
+    fn origin_directory<P: AsRef<Path>>(filename: &P, melc: Option<&ElfInfo>) -> Option<String> {
         match melc {
             Some(melc) => melc.origin.clone(),
             None => filename
                 .as_ref()
                 .parent()
                 .and_then(Path::to_str)
-                .unwrap_or("")
-                .to_string(),
+                .map(str::to_string),
         }
     }
 

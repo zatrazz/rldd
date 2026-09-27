@@ -8,8 +8,9 @@ use object::elf::*;
 
 // For some architectures the kernel exports the AT_PLATFORM from a pre-defined value, while
 // for other it depends either on the kernel configuration and/or the CPU.  For the later the
-// function returns a common value.
-pub fn get(e_machine: Machine, ei_endian: DataEncoding) -> String {
+// function returns a common value.  It returns None for the architectures where the kernel
+// does not provide one, where the glibc loader has no $PLATFORM value.
+pub fn get(e_machine: Machine, ei_endian: DataEncoding) -> Option<&'static str> {
     let r = match e_machine {
         // Alpha returns either "ev4", "ev5", "ev56", "ev6", or "ev67" depending of the CPU,
         // asssume the latest one.
@@ -70,5 +71,5 @@ pub fn get(e_machine: Machine, ei_endian: DataEncoding) -> String {
         _ => "",
     };
 
-    r.to_string()
+    Some(r).filter(|r| !r.is_empty())
 }

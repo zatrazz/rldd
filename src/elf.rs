@@ -61,6 +61,11 @@ type DepsVec = Vec<String>;
 // - rpath: DT_RPATH search list paths, if present.
 // - runpatch: DT_RUNPATH search list paths, if present.
 // - nodeflibs: set if DF_1_NODEFLIB from DT_FLAGS_1 is set.
+//
+// The dynamic string tokens depend on the loader of the object, so the
+// search lists and the dependencies are only filled from the entries as
+// written (dt_rpath, dt_runpath, and needed) once it is known: when the
+// object is opened for a dependency, or by the caller for the input object.
 #[derive(Debug)]
 struct ElfInfo {
     ei_class: FileClass,
@@ -78,6 +83,12 @@ struct ElfInfo {
     // Read by the glibc and the FreeBSD rules only.
     #[cfg_attr(not(any(target_os = "linux", target_os = "freebsd")), allow(dead_code))]
     soname: Option<String>,
+    dt_rpath: Option<String>,
+    dt_runpath: Option<String>,
+    // The DT_NEEDED, DT_AUXILIARY and DT_FILTER entries, along with whether
+    // each one is a filter.  A name that is not valid UTF-8 is kept with the
+    // invalid sequences replaced, so it is reported as not found.
+    needed: Vec<(String, bool)>,
     rpath: search_path::SearchPathVec,
     runpath: search_path::SearchPathVec,
     // Whether DT_RUNPATH is present.  It can not be derived from the runpath field,
@@ -94,30 +105,29 @@ struct ElfInfo {
     filters: DepsVec,
     nodeflibs: bool,
     is_musl: bool,
-    // NetBSD loader expands the token to the executable directory for every object.
-    #[cfg_attr(not(target_os = "netbsd"), allow(dead_code))]
-    origin: String,
+    // The $ORIGIN expansion, None when the directory is not valid UTF-8.
+    origin: Option<String>,
+    // The search list entries and the dependencies dropped because of a
+    // dynamic string token without a value, shown on the search path
+    // information.
+    unexpanded: Vec<String>,
 
     deps: DepsVec,
 }
 
 // ELF Parsing routines.
 
-fn parse_object(
-    data: &[u8],
-    origin: &str,
-    platform: Option<&String>,
-) -> Result<ElfInfo, &'static str> {
+fn parse_object(data: &[u8]) -> Result<ElfInfo, &'static str> {
     match object::FileKind::parse(data).map_err(|_| "Failed to parse file")? {
         object::FileKind::Elf32 => {
             let elf =
                 FileHeader32::<Endianness>::parse(data).map_err(|_| "Invalid ELF32 object")?;
-            parse_elf(elf, data, origin, platform)
+            parse_elf(elf, data)
         }
         object::FileKind::Elf64 => {
             let elf =
                 FileHeader64::<Endianness>::parse(data).map_err(|_| "Invalid ELF64 object")?;
-            parse_elf(elf, data, origin, platform)
+            parse_elf(elf, data)
         }
         _ => Err("Invalid object"),
     }
@@ -126,8 +136,6 @@ fn parse_object(
 fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
     elf: &Elf,
     data: &[u8],
-    origin: &str,
-    platform: Option<&String>,
 ) -> Result<ElfInfo, &'static str> {
     let endian = elf.endian().map_err(|_| "invalid endianess")?;
     match elf.e_type(endian) {
@@ -137,7 +145,7 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
     let segments = elf
         .program_headers(endian, data)
         .map_err(|_| "invalid segment")?;
-    parse_elf_program_headers(endian, data, elf, segments, origin, platform)
+    parse_elf_program_headers(endian, data, elf, segments)
 }
 
 #[cfg(target_os = "linux")]
@@ -153,18 +161,10 @@ fn parse_elf_program_headers<Elf: FileHeader>(
     data: &[u8],
     elf: &Elf,
     headers: &[Elf::ProgramHeader],
-    origin: &str,
-    platform: Option<&String>,
 ) -> Result<ElfInfo, &'static str> {
-    match parse_elf_dynamic_program_header(endian, data, elf, headers, origin, platform) {
-        Ok(mut elc) => {
-            elc.interp = parse_elf_interp::<Elf>(endian, data, headers);
-            Rtld::handle_loader(&mut elc);
-            Rtld::handle_search_paths(&mut elc);
-            Ok(elc)
-        }
-        Err(e) => Err(e),
-    }
+    let mut elc = parse_elf_dynamic_program_header(endian, data, elf, headers)?;
+    elc.interp = parse_elf_interp::<Elf>(endian, data, headers);
+    Ok(elc)
 }
 
 fn parse_elf_interp<Elf: FileHeader>(
@@ -189,14 +189,12 @@ fn parse_elf_dynamic_program_header<Elf: FileHeader>(
     data: &[u8],
     elf: &Elf,
     headers: &[Elf::ProgramHeader],
-    origin: &str,
-    platform: Option<&String>,
 ) -> Result<ElfInfo, &'static str> {
     match headers
         .iter()
         .find(|&&hdr| hdr.p_type(endian) == PT_DYNAMIC)
     {
-        Some(hdr) => parse_elf_segment_dynamic(endian, data, elf, headers, hdr, origin, platform),
+        Some(hdr) => parse_elf_segment_dynamic(endian, data, elf, headers, hdr),
         None => Err("No dynamic segments found"),
     }
 }
@@ -207,8 +205,6 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
     elf: &Elf,
     segments: &[Elf::ProgramHeader],
     segment: &Elf::ProgramHeader,
-    origin: &str,
-    platform: Option<&String>,
 ) -> Result<ElfInfo, &'static str> {
     if let Some(dynamic) = dynamic_entries::<Elf>(endian, data, segment) {
         // The loader rejects an object whose dynamic section has no entries (for instance the
@@ -242,29 +238,31 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
         let tags = DynamicTags::parse::<Elf>(endian, dynamic, dynstr);
         let nodeflibs = DynamicFlags1(tags.flags_1).contains(DF_1_NODEFLIB);
 
-        return match parse_elf_dtneeded::<Elf>(endian, elf, dynamic, dynstr, origin, platform) {
-            Ok((dtneeded, filters, has_needed)) => Ok(ElfInfo {
-                ei_class: elf.e_ident().class,
-                ei_data: elf.e_ident().data,
-                ei_osabi: elf.e_ident().os_abi,
-                ei_abiver: elf.e_ident().abi_version,
-                e_machine: elf.e_machine(endian),
-                e_flags: elf.e_flags(endian),
-                interp: None,
-                rpath: parse_elf_dyn_searchpath(endian, elf, &tags.rpath, origin, platform),
-                runpath: parse_elf_dyn_searchpath(endian, elf, &tags.runpath, origin, platform),
-                has_runpath: tags.has_runpath,
-                runpath_last: tags.runpath_last,
-                soname: tags.soname,
-                nodeflibs,
-                deps: dtneeded,
-                has_needed,
-                filters,
-                is_musl: false,
-                origin: origin.to_string(),
-            }),
-            Err(e) => Err(e),
-        };
+        let (needed, has_needed) = parse_elf_dtneeded::<Elf>(endian, dynamic, dynstr);
+        return Ok(ElfInfo {
+            ei_class: elf.e_ident().class,
+            ei_data: elf.e_ident().data,
+            ei_osabi: elf.e_ident().os_abi,
+            ei_abiver: elf.e_ident().abi_version,
+            e_machine: elf.e_machine(endian),
+            e_flags: elf.e_flags(endian),
+            interp: None,
+            dt_rpath: tags.rpath,
+            dt_runpath: tags.runpath,
+            needed,
+            rpath: search_path::SearchPathVec::new(),
+            runpath: search_path::SearchPathVec::new(),
+            has_runpath: tags.has_runpath,
+            runpath_last: tags.runpath_last,
+            soname: tags.soname,
+            nodeflibs,
+            deps: DepsVec::new(),
+            has_needed,
+            filters: DepsVec::new(),
+            is_musl: false,
+            origin: None,
+            unexpanded: Vec::new(),
+        });
     }
     Err("Failure to parse dynamic segment")
 }
@@ -361,57 +359,12 @@ fn parse_elf_stringtable<'a, Elf: FileHeader>(
     None
 }
 
-fn replace_dyn_str(dynstr: &str, token: &str, value: &str) -> String {
-    let newdynstr = dynstr.replace(&format!("${token}"), value);
-    // Also handle ${token}
-    newdynstr.replace(&format!("${{{token}}}"), value)
-}
-
-fn parse_elf_dyn_searchpath<Elf: FileHeader>(
-    endian: Elf::Endian,
-    elf: &Elf,
-    dynstr: &Option<String>,
-    origin: &str,
-    platform: Option<&String>,
-) -> search_path::SearchPathVec {
-    if let Some(dynstr) = dynstr {
-        return search_path::from_string(
-            expand_dst::<Elf>(endian, elf, dynstr, origin, platform),
-            &[':'],
-        );
-    }
-    search_path::SearchPathVec::new()
-}
-
-// Expand the $ORIGIN, $LIB, and $PLATFORM dynamic string tokens.
-fn expand_dst<Elf: FileHeader>(
-    endian: Elf::Endian,
-    elf: &Elf,
-    dynstr: &str,
-    origin: &str,
-    platform: Option<&String>,
-) -> String {
-    let mut newdynstr = replace_dyn_str(dynstr, "ORIGIN", origin);
-
-    Rtld::parse_elf_dyn_searchpath_lib(endian, elf, &mut newdynstr);
-
-    let platform = match platform {
-        Some(platform) => platform.to_string(),
-        None => platform::get(elf.e_machine(endian), elf.e_ident().data),
-    };
-    replace_dyn_str(&newdynstr, "PLATFORM", platform.as_str())
-}
-
 fn parse_elf_dtneeded<Elf: FileHeader>(
     endian: Elf::Endian,
-    elf: &Elf,
     dynamic: &[Elf::Dyn],
     dynstr: StringTable,
-    origin: &str,
-    platform: Option<&String>,
-) -> Result<(DepsVec, DepsVec, bool), &'static str> {
-    let mut dtneeded = DepsVec::new();
-    let mut filters = DepsVec::new();
+) -> (Vec<(String, bool)>, bool) {
+    let mut needed = Vec::new();
     let mut has_needed = false;
     for d in dynamic {
         let tag = d.d_tag(endian);
@@ -426,24 +379,60 @@ fn parse_elf_dtneeded<Elf: FileHeader>(
         }
         has_needed |= tag == DT_NEEDED;
 
-        match d.string(endian, dynstr) {
-            Err(_) => continue,
-            Ok(s) => {
-                if let Ok(s) = str::from_utf8(s) {
-                    let name = if s.contains('$') {
-                        expand_dst::<Elf>(endian, elf, s, origin, platform)
-                    } else {
-                        s.to_string()
-                    };
-                    if tag != DT_NEEDED {
-                        filters.push(name.clone());
-                    }
-                    dtneeded.push(name);
-                }
-            }
+        if let Ok(s) = d.string(endian, dynstr) {
+            needed.push((String::from_utf8_lossy(s).into_owned(), tag != DT_NEEDED));
         }
     }
-    Ok((dtneeded, filters, has_needed))
+    (needed, has_needed)
+}
+
+// Fill the ELC object search lists and dependencies, expanding the dynamic
+// string tokens the way its loader does, and apply the loader rules to the
+// search lists.
+fn expand_object(elc: &mut ElfInfo, platform: Option<&String>) {
+    use search_path::SearchPathVecExt;
+
+    let mut unexpanded = Vec::new();
+    let mut search_list = |list: &Option<String>| {
+        let mut r = search_path::SearchPathVec::new();
+        let entries = list
+            .iter()
+            .flat_map(|list| Rtld::search_list(list, TokenSite::SearchPath, elc, platform));
+        for entry in entries {
+            match entry {
+                Ok(dir) => {
+                    r.add_path(&dir);
+                }
+                Err(entry) => unexpanded.push(entry),
+            }
+        }
+        r
+    };
+    let rpath = search_list(&elc.dt_rpath);
+    let runpath = search_list(&elc.dt_runpath);
+
+    // A dependency whose expansion fails is not loaded at all (the glibc
+    // expand_dst in _dl_map_object_deps).
+    let mut deps = DepsVec::new();
+    let mut filters = DepsVec::new();
+    for (name, filter) in &elc.needed {
+        match Rtld::expand_tokens(name, TokenSite::Needed, elc, platform) {
+            Some(name) => {
+                if *filter {
+                    filters.push(name.clone());
+                }
+                deps.push(name);
+            }
+            None => unexpanded.push(name.clone()),
+        }
+    }
+
+    elc.rpath = rpath;
+    elc.runpath = runpath;
+    elc.deps = deps;
+    elc.filters = filters;
+    elc.unexpanded = unexpanded;
+    Rtld::handle_search_paths(elc);
 }
 
 fn open_elf_file<P: AsRef<Path>>(
@@ -455,20 +444,22 @@ fn open_elf_file<P: AsRef<Path>>(
     let file = fs::File::open(filename).map_err(|_| Error::other("Failed to open file"))?;
     let mmap = pathutils::map(&file)?;
 
-    let origin = Rtld::origin_directory(filename, melc);
-
-    match parse_object(&mmap, &origin, platform) {
-        Ok(elc) => {
-            if let Some(melc) = melc {
-                // Skip DT_NEEDED and SONAME checks for preload objects.
-                if !preload && !match_elf_name(melc, &elc) {
-                    return Err(Error::other("Error parsing ELF object"));
-                }
-            }
-            Ok(elc)
+    let mut elc = parse_object(&mmap).map_err(Error::other)?;
+    if let Some(melc) = melc {
+        // Skip DT_NEEDED and SONAME checks for preload objects.
+        if !preload && !match_elf_name(melc, &elc) {
+            return Err(Error::other("Error parsing ELF object"));
         }
-        Err(e) => Err(Error::other(e)),
     }
+
+    elc.origin = Rtld::origin_directory(filename, melc);
+    Rtld::handle_loader(&mut elc);
+    // The tokens of the input object are expanded by the caller, once its
+    // loader is known.
+    if melc.is_some() {
+        expand_object(&mut elc, platform);
+    }
+    Ok(elc)
 }
 
 // The loaders do not check the DT_SONAME of the file they open against the
@@ -557,6 +548,16 @@ enum SearchStep {
     SystemDirs,
 }
 
+// Where a dynamic string token is expanded, since the loaders expand them
+// on different entries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TokenSite {
+    // A DT_RPATH or DT_RUNPATH entry.
+    SearchPath,
+    // A DT_NEEDED, DT_AUXILIARY or DT_FILTER entry.
+    Needed,
+}
+
 fn print_search_path_information<P: AsRef<Path>>(filename: &P, config: &Config, elc: &ElfInfo) {
     outln!(
         "{}: search path information\n\
@@ -578,6 +579,15 @@ fn print_search_path_information<P: AsRef<Path>>(filename: &P, config: &Config, 
             .map_or(search_path::EMPTY_LIST.to_string(), |cache| cache.summary()),
         search_path::format_list(&config.system_dirs),
     );
+    // The entries the loader drops because a token has no value (a $PLATFORM
+    // the kernel does not provide, or a directory that is not valid UTF-8
+    // for $ORIGIN).
+    if !elc.unexpanded.is_empty() {
+        outln!(
+            "  unexpanded: {}",
+            search_path::format_entries(elc.unexpanded.iter().map(String::as_str))
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -631,23 +641,6 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
     // The loader might inspect another file than the one given.
     let (filename, mut elc) = Rtld::redirect_root(filename, elc, ctx.platform.as_ref());
 
-    // The trace reports an object without any DT_NEEDED entry as statically
-    // linked, and does not list the filtees of the root object (it lists the ones of
-    // a dependency).
-    if !elc.has_needed {
-        elc.deps.clear();
-    } else if !elc.filters.is_empty() {
-        // By name: the trace drops a filtee of the root object even when a
-        // DT_NEEDED entry names it too.
-        elc.deps.retain(|dep| !elc.filters.contains(dep));
-    }
-
-    // DT_RPATH is ignored if the object also defines DT_RUNPATH (the latter only
-    // applies to the object own dependencies, so it is not propagated).
-    if elc.has_runpath {
-        elc.rpath.clear();
-    }
-
     // The cache/hints/config file is usually an optional file and failing to open it
     // does not incur on a resolution failure.
     Rtld::load_so_cache(&mut ctx.ld_cache, &filename, &elc);
@@ -676,6 +669,25 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
     } else {
         search_path::SearchPathVec::new()
     };
+
+    expand_object(&mut elc, ctx.platform.as_ref());
+
+    // The trace reports an object without any DT_NEEDED entry as statically
+    // linked, and does not list the filtees of the root object (it lists the ones of
+    // a dependency).
+    if !elc.has_needed {
+        elc.deps.clear();
+    } else if !elc.filters.is_empty() {
+        // By name: the trace drops a filtee of the root object even when a
+        // DT_NEEDED entry names it too.
+        elc.deps.retain(|dep| !elc.filters.contains(dep));
+    }
+
+    // DT_RPATH is ignored if the object also defines DT_RUNPATH (the latter only
+    // applies to the object own dependencies, so it is not propagated).
+    if elc.has_runpath {
+        elc.rpath.clear();
+    }
 
     let config = Config {
         ld_preload: &preload,
@@ -1205,7 +1217,9 @@ fn build_symbol_scope(deptree: &DepTree) -> Vec<(String, symbols::ObjectSymbols)
 fn open_root_elf(deptree: &DepTree) -> Option<ElfInfo> {
     let root = deptree.arena.first()?;
     let path = deptree_node_path(&root.val)?;
-    open_elf_file(&path, None, None, false).ok()
+    let mut elc = open_elf_file(&path, None, None, false).ok()?;
+    expand_object(&mut elc, None);
+    Some(elc)
 }
 
 // The dynamic loader is part of the global scope (libc binds to symbols the

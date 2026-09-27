@@ -22,7 +22,7 @@ impl Loader for FreeBsd {
         *ld_cache = ld_hints_freebsd::parse_ld_so_hints(&Path::new(hints)).ok();
     }
 
-    fn origin_directory<P: AsRef<Path>>(filename: &P, _melc: Option<&ElfInfo>) -> String {
+    fn origin_directory<P: AsRef<Path>>(filename: &P, _melc: Option<&ElfInfo>) -> Option<String> {
         canonical_origin_directory(filename)
     }
 

@@ -5,8 +5,6 @@
 use std::io::Error;
 use std::path::{Path, PathBuf};
 
-use object::read::elf::FileHeader;
-
 use super::*;
 
 #[cfg(target_os = "android")]
@@ -78,24 +76,55 @@ pub(super) trait Loader {
     // Adjust the DT_RPATH and DT_RUNPATH of the parsed object.
     fn handle_search_paths(_elc: &mut ElfInfo) {}
 
-    // Expand the $LIB token of a DT_RPATH/DT_RUNPATH entry.
-    fn parse_elf_dyn_searchpath_lib<Elf: FileHeader>(
-        _endian: Elf::Endian,
-        _elf: &Elf,
-        _dynstr: &mut String,
-    ) {
+    // The entries of LIST, a search list of the SITE kind for the ELC object,
+    // with the dynamic string tokens expanded: each directory, or the entry as
+    // written when the loader drops it because of a token without a value.
+    // Most loaders split the list on colons and skip the empty entries.
+    fn search_list(
+        list: &str,
+        site: TokenSite,
+        elc: &ElfInfo,
+        platform: Option<&String>,
+    ) -> Vec<Result<String, String>> {
+        list.split(':')
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                Self::expand_tokens(entry, site, elc, platform).ok_or_else(|| entry.to_string())
+            })
+            .collect()
     }
 
-    // The directory the $ORIGIN token expands to for the object being opened.
-    // The glibc loader uses the directory of the path the object was loaded
-    // through (the executable one is canonicalized beforehand).
-    fn origin_directory<P: AsRef<Path>>(filename: &P, _melc: Option<&ElfInfo>) -> String {
+    // Expand the dynamic string tokens of INPUT, an entry of the SITE kind
+    // for the ELC object, or None when the loader drops the entry because a
+    // token has no value.  Most loaders replace $ORIGIN and $PLATFORM, with
+    // or without braces, wherever they appear.
+    fn expand_tokens(
+        input: &str,
+        _site: TokenSite,
+        elc: &ElfInfo,
+        platform: Option<&String>,
+    ) -> Option<String> {
+        let mut r = input.to_string();
+        if r.contains("$ORIGIN") || r.contains("${ORIGIN}") {
+            r = replace_token(&r, "ORIGIN", elc.origin.as_deref()?);
+        }
+        let platform = platform
+            .map(String::as_str)
+            .or_else(|| platform::get(elc.e_machine, elc.ei_data))
+            .unwrap_or("");
+        Some(replace_token(&r, "PLATFORM", platform))
+    }
+
+    // The directory the $ORIGIN token expands to for the object being opened,
+    // None when it is not valid UTF-8.  The glibc loader uses the directory of
+    // the path the object was loaded through (the executable one is
+    // canonicalized beforehand).
+    fn origin_directory<P: AsRef<Path>>(filename: &P, _melc: Option<&ElfInfo>) -> Option<String> {
         filename
             .as_ref()
             .parent()
             .and_then(Path::to_str)
-            .unwrap_or("")
-            .to_string()
+            .map(str::to_string)
     }
 
     // Check the ELF header OS ABI fields, which for the GNU loaders (glibc and
@@ -221,6 +250,13 @@ impl SearchCache for search_path::SearchPathVec {
     }
 }
 
+// Replace the $TOKEN and ${TOKEN} occurrences of INPUT with VALUE.
+fn replace_token(input: &str, token: &str, value: &str) -> String {
+    input
+        .replace(&format!("${token}"), value)
+        .replace(&format!("${{{token}}}"), value)
+}
+
 // The FreeBSD and OpenBSD loaders canonicalize the object path first
 // (realpath), so a symlink or a '..' component on a search path does not leak
 // into the $ORIGIN expansion.
@@ -229,10 +265,7 @@ impl SearchCache for search_path::SearchPathVec {
     target_os = "openbsd",
     all(test, target_os = "linux")
 ))]
-fn canonical_origin_directory<P: AsRef<Path>>(filename: &P) -> String {
+fn canonical_origin_directory<P: AsRef<Path>>(filename: &P) -> Option<String> {
     let path = fs::canonicalize(filename).unwrap_or_else(|_| filename.as_ref().to_path_buf());
-    path.parent()
-        .and_then(Path::to_str)
-        .unwrap_or("")
-        .to_string()
+    path.parent().and_then(Path::to_str).map(str::to_string)
 }
