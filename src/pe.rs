@@ -105,6 +105,8 @@ struct PeInfo {
     // The RT_MANIFEST resource the process starts with, when the object is
     // the executable.
     process_manifest: Option<Vec<sxs::Assembly>>,
+    // Whether the object is an IL only .NET image that runs on any CPU.
+    any_cpu: bool,
 }
 
 // The RT_MANIFEST resource IDs the loader reads, from winuser.h.  Resource 3
@@ -134,6 +136,8 @@ pub struct PeContext {
     // The DevOverrideEnable value, which keeps the '.local' redirection for
     // an executable with a manifest.
     dev_override: bool,
+    // The machine the native processes run as.
+    native_machine: pe::Machine,
     dll_directory: search_path::SearchPathVec,
     all: bool,
     verbose: bool,
@@ -157,6 +161,7 @@ impl PeContext {
     fn new(safe_search: bool) -> Self {
         let windows_dir = search_dirs::windows_dir();
         let apiset = apiset::load(&search_dirs::system_dir(&windows_dir, false));
+        let native_machine = native_machine(&windows_dir);
         Self {
             apiset,
             knowndlls: knowndlls::load(),
@@ -168,6 +173,7 @@ impl PeContext {
                 .is_some_and(|value| value != 0),
             dev_override: registry::dword(IMAGE_FILE_EXECUTION_OPTIONS_KEY, "DevOverrideEnable")
                 .is_some_and(|value| value != 0),
+            native_machine,
             dll_directory: search_path::SearchPathVec::new(),
             all: false,
             verbose: false,
@@ -275,7 +281,15 @@ fn print_object_information(
     dirs: &search_dirs::SearchDirs,
 ) {
     let mut lines = vec![format!("{}: object information", filename.display())];
-    lines.push(format!("  machine: {}", machine::name(pei.machine)));
+    lines.push(format!(
+        "  machine: {}{}",
+        machine::name(pei.machine),
+        if pei.any_cpu {
+            " (IL only, any CPU)"
+        } else {
+            ""
+        }
+    ));
     lines.push(format!(
         "  subsystem: {}",
         machine::subsystem_name(pei.subsystem)
@@ -757,7 +771,27 @@ fn open_object<P: AsRef<Path>>(
     if root && !pei.is_dll {
         process_manifest(ctx, filename.as_ref(), &mut pei);
     }
+    // The system loads an IL only image that does not ask for a 32 bit
+    // process as a native one, converting its PE32 header on the fly
+    // (mageui.exe runs as a 64 bit process and maps System32\mscoree.dll).
+    if root && pei.any_cpu {
+        pei.machine = ctx.native_machine;
+    }
     Ok(pei)
+}
+
+// The machine of the system ntdll, which is the one a native process runs as:
+// ARM64 on Windows on ARM, even when rldd itself runs emulated there.
+fn native_machine(windows_dir: &str) -> pe::Machine {
+    let ntdll = Path::new(&search_dirs::system_dir(windows_dir, false)).join("ntdll.dll");
+    let machine = pathutils::map_file(&ntdll).ok().and_then(|mmap| {
+        let file = PeFile::<pe::ImageNtHeaders64>::parse(&*mmap).ok()?;
+        Some(file.nt_headers().file_header().machine.get(LE))
+    });
+    machine.unwrap_or(match cfg!(target_arch = "aarch64") {
+        true => pe::IMAGE_FILE_MACHINE_ARM64,
+        false => pe::IMAGE_FILE_MACHINE_AMD64,
+    })
 }
 
 // The manifest of the process an executable starts, which replaces the module
@@ -841,6 +875,9 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
         assemblies: Vec::new(),
         manifest: false,
         process_manifest: None,
+        any_cpu: !headers.is_type_64()
+            && headers.file_header().machine.get(LE) == pe::IMAGE_FILE_MACHINE_I386
+            && il_any_cpu(&file),
     };
 
     if let Ok(Some(table)) = file.import_table() {
@@ -900,6 +937,27 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
     }
 
     Ok(pei)
+}
+
+// Whether the CLR header flags an IL only image that does not ask for a 32 bit
+// process: the 'Any CPU' platform target of a .NET program, without 'Prefer
+// 32-bit', whose PE32 header records i386 all the same.
+fn il_any_cpu<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> bool {
+    let Some(directory) = file
+        .data_directories()
+        .get(pe::IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR)
+    else {
+        return false;
+    };
+    let Ok(data) = directory.data(file.data(), &file.section_table()) else {
+        return false;
+    };
+    let Ok((header, _)) = object::pod::from_bytes::<pe::ImageCor20Header>(data) else {
+        return false;
+    };
+    let flags = header.flags.get(LE).0;
+    let wants_32bit = pe::COMIMAGE_FLAGS_32BITREQUIRED.0 | pe::COMIMAGE_FLAGS_32BITPREFERRED.0;
+    flags & pe::COMIMAGE_FLAGS_ILONLY.0 != 0 && flags & wants_32bit == 0
 }
 
 // An ARM64X object holds an ARM64 and an x86_64 view at once, and the file
@@ -1346,6 +1404,55 @@ mod tests {
         ctx.dev_override = true;
         assert!(redirected(&ctx, &[(1, &plain)], false));
         assert!(redirected(&ctx, &[], true));
+    }
+
+    // A PE32 executable with a CLR header carrying FLAGS.
+    fn clr_image(machine: pe::Machine, flags: u32) -> testimage::Image {
+        let mut image = testimage::Image::exe(machine, false);
+        let size = std::mem::size_of::<pe::ImageCor20Header>();
+        let mut header = vec![0u8; size];
+        header[..4].copy_from_slice(&(size as u32).to_le_bytes());
+        header[16..20].copy_from_slice(&flags.to_le_bytes());
+        image.directory(pe::IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR, &header);
+        image
+    }
+
+    // Only an IL only image that asks for no 32 bit process runs as a native
+    // one, and the others keep the machine their header records.
+    #[test]
+    fn clr_any_cpu() {
+        let ctx = PeContext::new(true);
+        let dir = crate::tempdir::TempDir::new().unwrap();
+        let path = dir.path().join("app.exe");
+        let machine = |image: testimage::Image| {
+            fs::write(&path, image.build()).unwrap();
+            open_object(&ctx, &path, true).unwrap().machine
+        };
+        let ilonly = pe::COMIMAGE_FLAGS_ILONLY.0;
+        let required = pe::COMIMAGE_FLAGS_32BITREQUIRED.0;
+        let preferred = pe::COMIMAGE_FLAGS_32BITPREFERRED.0;
+        let i386 = pe::IMAGE_FILE_MACHINE_I386;
+
+        assert_eq!(machine(clr_image(i386, ilonly)), ctx.native_machine);
+        assert!(!machine::is_32bit(ctx.native_machine));
+        assert_eq!(machine(clr_image(i386, ilonly | required)), i386);
+        assert_eq!(
+            machine(clr_image(i386, ilonly | required | preferred)),
+            i386
+        );
+        assert_eq!(machine(clr_image(i386, ilonly | preferred)), i386);
+        // A mixed mode image holds native code for its machine.
+        assert_eq!(machine(clr_image(i386, 0)), i386);
+        assert_eq!(
+            machine(testimage::Image::exe(i386, false)),
+            i386,
+            "no CLR header"
+        );
+
+        // A dependency is not converted, only the object that starts the
+        // process.
+        fs::write(&path, clr_image(i386, ilonly).build()).unwrap();
+        assert_eq!(open_pe_file(&path).unwrap().machine, i386);
     }
 
     #[test]
