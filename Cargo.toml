@@ -16,6 +16,9 @@ readme = "README.md"
 keywords = ["elf", "mach-o", "pe", "cli", ]
 categories = ["command-line-utilities"]
 exclude = [
+    ".github",
+    ".gitattributes",
+    ".gitignore",
     "TODO.md",
     "doc/screenshot.png",
     "tests",
