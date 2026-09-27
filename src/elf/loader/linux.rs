@@ -125,8 +125,7 @@ impl Loader for Linux {
         // resolves).  The object search paths do not apply, since the loader is
         // not subject to the dependency search.
         for name in interp::glibc_names() {
-            let dtneeded = name.to_string();
-            if let Some(dep) = resolve_loader(config, elc, &dtneeded) {
+            if let Some(dep) = resolve_loader(config, elc, name) {
                 deptree.addnode(
                     DepNode::new(Some(dep.path.to_string()), dep.filename.clone(), dep.mode),
                     root_depp,
@@ -150,7 +149,7 @@ impl SearchCache for ld_so_cache::LdCache {
 
     fn resolve<'a>(
         &'a self,
-        dtneeded: &'a String,
+        dtneeded: &str,
         platform: Option<&String>,
         elc: &'a ElfInfo,
         _namespace: &NoNamespace,

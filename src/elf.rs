@@ -360,7 +360,7 @@ fn parse_elf_dyn_searchpath<Elf: FileHeader>(
 ) -> search_path::SearchPathVec {
     if let Some(dynstr) = dynstr {
         return search_path::from_string(
-            expand_dst::<Elf>(endian, elf, &dynstr, origin, platform),
+            expand_dst::<Elf>(endian, elf, dynstr, origin, platform),
             &[':'],
         );
     }
@@ -997,7 +997,7 @@ fn resolve_dependencies(
 fn resolve_loader<'a>(
     config: &'a Config,
     elc: &'a ElfInfo,
-    dtneeded: &'a String,
+    dtneeded: &str,
 ) -> Option<ResolvedDependency<'a>> {
     if let Some(ld_cache) = config.ld_cache {
         if let Some(dep) = ld_cache.resolve(dtneeded, config.platform, elc, &Default::default()) {

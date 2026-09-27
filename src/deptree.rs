@@ -139,7 +139,7 @@ impl DepTree {
 #[allow(dead_code)]
 pub enum DepMode {
     Preload,                 // Preload library.
-    Direct,                  // DT_SONAME refers to an aboslute path.
+    Direct,                  // DT_NEEDED refers to an absolute path.
     DtRpath,                 // DT_RPATH.
     LdLibraryPath,           // LD_LIBRARY_PATH, DYLD_LIBRARY_PATH, or SetDllDirectory.
     LdFrameworkPath,         // DYLD_FRAMEWORK_PATH (Mach-O only).
@@ -149,7 +149,7 @@ pub enum DepMode {
     LdCache,                 // Loader cache (ld.so.cache, KnownDLLs, etc.).
     SystemDirs,              // Default system directory (i.e '/lib64').
     #[cfg(windows)]
-    ApiSet, // API set schema redirectio.
+    ApiSet, // API set schema redirection.
     #[cfg(windows)]
     SideBySide, // Side-by-side assembly.
     #[cfg(windows)]

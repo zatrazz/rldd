@@ -64,7 +64,7 @@ impl SearchCache for ld_config_txt::LdCache {
 
     fn resolve<'a>(
         &'a self,
-        dtneeded: &'a String,
+        dtneeded: &str,
         platform: Option<&String>,
         elc: &'a ElfInfo,
         namespace: &Option<String>,

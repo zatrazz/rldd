@@ -183,7 +183,7 @@ pub(super) trait SearchCache {
     // Resolve DTNEEDED through the cache.
     fn resolve<'a>(
         &'a self,
-        dtneeded: &'a String,
+        dtneeded: &str,
         platform: Option<&String>,
         elc: &'a ElfInfo,
         namespace: &Self::Namespace,
@@ -205,7 +205,7 @@ impl SearchCache for search_path::SearchPathVec {
 
     fn resolve<'a>(
         &'a self,
-        dtneeded: &'a String,
+        dtneeded: &str,
         platform: Option<&String>,
         elc: &'a ElfInfo,
         _namespace: &NoNamespace,
