@@ -134,7 +134,9 @@ pub fn add(dirs: &mut SearchDirs, entry: &str, mode: DepMode) {
 // 6. the current directory.
 // 7. the PATH directories.
 // With the safe search mode disabled the current directory comes right after the
-// application one.
+// application one.  SetDllDirectory removes the current directory from the
+// order altogether, as its documentation describes (and LoadLibrary no longer
+// finds a module only the current directory holds after the call).
 pub fn build(
     application: Option<&str>,
     user: &SearchPathVec,
@@ -168,6 +170,7 @@ pub fn build(
 
     let current = std::env::current_dir()
         .ok()
+        .filter(|_| user.is_empty())
         .map(|path| path.to_string_lossy().into_owned());
     if !safe_search {
         if let Some(current) = &current {
@@ -305,6 +308,20 @@ mod tests {
             position(&unsafe_search, DepMode::CurrentDir)
                 < position(&unsafe_search, DepMode::SystemDirs)
         );
+    }
+
+    // SetDllDirectory removes the current directory, whatever the safe
+    // search mode.
+    #[test]
+    fn dll_directory_drops_the_current_directory() {
+        let windows = windows_dir();
+        let mut user = SearchPathVec::new();
+        user.add_path(&windows);
+        for safe_search in [true, false] {
+            let dirs = build(None, &user, &windows, Wow64::Native, safe_search);
+            assert!(!dirs.iter().any(|(_, mode)| *mode == DepMode::CurrentDir));
+            assert_eq!(dirs[0].1, DepMode::LdLibraryPath);
+        }
     }
 
     // A directory reached twice keeps the mode it was first added with.
