@@ -579,4 +579,139 @@ mod tests {
         assert_eq!(expand("/$PLATFORM"), None);
         assert_eq!(musl_expand("$ORIGIN/lib", None), None);
     }
+
+    fn glibc_object() -> ElfInfo {
+        ElfInfo::for_test(EM_X86_64, FileFlags(0))
+    }
+
+    fn musl_object() -> ElfInfo {
+        let mut elc = glibc_object();
+        elc.is_musl = true;
+        elc
+    }
+
+    fn entries(list: &[Result<String, String>]) -> Vec<String> {
+        list.iter()
+            .map(|entry| match entry {
+                Ok(dir) => dir.clone(),
+                Err(entry) => format!("dropped {entry}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn search_lists() {
+        let glibc = |list, site| entries(&Linux::search_list(list, site, &glibc_object(), None));
+        let musl = |list, site| entries(&Linux::search_list(list, site, &musl_object(), None));
+        let site = TokenSite::SearchPath;
+        // An empty entry is the current directory for glibc, but a list
+        // without entries is ignored.
+        assert_eq!(glibc("/a::$ORIGIN/$LIB", site), ["/a", ".", "/o/lib64"]);
+        assert_eq!(glibc("/a:", site), ["/a", "."]);
+        assert!(glibc("", site).is_empty());
+        assert_eq!(glibc("/a;/b", site), ["/a;/b"]);
+        assert_eq!(glibc("/a;/b:", TokenSite::LibraryPath), ["/a", "/b", "."]);
+        // No $PLATFORM value (RISC-V) drops the entry.
+        let riscv = ElfInfo::for_test(EM_RISCV, FileFlags(0));
+        assert_eq!(
+            entries(&Linux::search_list("/$PLATFORM:/b", site, &riscv, None)),
+            ["dropped /$PLATFORM", "/b"]
+        );
+        // musl skips the empty entries, splits on newlines too, and ignores
+        // a DT_RPATH with any other token than $ORIGIN.
+        assert_eq!(musl("/a::\n$ORIGIN/b", site), ["/a", "/o/b"]);
+        assert_eq!(musl("$ORIGIN/a:/$LIB", site), ["dropped $ORIGIN/a:/$LIB"]);
+        assert_eq!(musl("$ORIGIN/a", TokenSite::LibraryPath), ["$ORIGIN/a"]);
+    }
+
+    #[test]
+    fn preload_entries() {
+        let glibc = glibc_object();
+        let expand = |input, elc| Linux::expand_tokens(input, TokenSite::Preload, elc, None);
+        assert_eq!(
+            expand("$ORIGIN/libfoo.so", &glibc).as_deref(),
+            Some("/o/libfoo.so")
+        );
+        // A bare name is searched as is.
+        assert_eq!(expand("lib$LIB.so", &glibc).as_deref(), Some("lib$LIB.so"));
+        assert_eq!(
+            expand("$ORIGIN/x.so", &musl_object()).as_deref(),
+            Some("$ORIGIN/x.so")
+        );
+
+        // glibc splits on spaces and colons only, and skips an entry that
+        // does not fit a path.
+        let long = "x".repeat(4096);
+        assert_eq!(
+            Linux::preload_list(&format!("a b::c\td {long} e"), &glibc),
+            ["a", "b", "c\td", "e"]
+        );
+        assert_eq!(
+            Linux::preload_list("a\tb\x0bc:d", &musl_object()),
+            ["a", "b", "c", "d"]
+        );
+    }
+
+    #[test]
+    fn search_rules() {
+        let glibc = glibc_object();
+        let musl = musl_object();
+        assert_eq!(
+            Linux::nodeflib_rule(SearchStep::Cache, &glibc),
+            NodeflibRule::OutsideSystemDirs
+        );
+        assert_eq!(
+            Linux::nodeflib_rule(SearchStep::SystemDirs, &glibc),
+            NodeflibRule::Skip
+        );
+        assert_eq!(
+            Linux::nodeflib_rule(SearchStep::Rpath, &glibc),
+            NodeflibRule::Search
+        );
+        assert_eq!(
+            Linux::nodeflib_rule(SearchStep::SystemDirs, &musl),
+            NodeflibRule::Search
+        );
+
+        let order = |elc, preload| {
+            Linux::search_order(elc, preload)
+                .iter()
+                .map(|step| format!("{step:?}"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            order(&glibc, true),
+            ["Rpath", "LibraryPath", "Runpath", "Cache", "SystemDirs"]
+        );
+        assert_eq!(order(&musl, false), ["LibraryPath", "Rpath", "SystemDirs"]);
+        assert_eq!(order(&musl, true), ["LibraryPath", "SystemDirs"]);
+    }
+
+    #[test]
+    fn machine_variants() {
+        let matches = |machine, loader_flags: u32, e_machine, e_flags: u32| {
+            let elc = ElfInfo::for_test(machine, FileFlags(loader_flags));
+            machine_matches_host(&elc, e_machine, FileFlags(e_flags))
+        };
+        let double = EF_RISCV_FLOAT_ABI_DOUBLE.0;
+        assert!(matches(EM_RISCV, double, EM_RISCV, double));
+        assert!(!matches(EM_RISCV, double, EM_RISCV, 0));
+        assert!(!matches(EM_RISCV, 0, EM_RISCV, double));
+        assert!(matches(EM_PPC64, 2, EM_PPC64, 0));
+        assert!(!matches(EM_PPC64, 2, EM_PPC64, 1));
+        assert!(!matches(EM_X86_64, 0, EM_AARCH64, 0));
+        let nan2008 = EF_MIPS_NAN2008.0;
+        assert!(!matches(EM_MIPS, nan2008, EM_MIPS, 0));
+        assert!(matches(EM_MIPS, nan2008, EM_MIPS_RS3_LE, nan2008));
+
+        let hard = EF_ARM_EABI_VER5.0 | EF_ARM_ABI_FLOAT_HARD;
+        let soft = EF_ARM_EABI_VER5.0 | EF_ARM_ABI_FLOAT_SOFT;
+        assert!(arm_float_abi_valid(FileFlags(hard), FileFlags(hard)));
+        assert!(!arm_float_abi_valid(FileFlags(hard), FileFlags(soft)));
+        assert!(!arm_float_abi_valid(FileFlags(soft), FileFlags(hard)));
+        assert!(arm_float_abi_valid(
+            FileFlags(hard),
+            FileFlags(EF_ARM_ABI_FLOAT_SOFT)
+        ));
+    }
 }

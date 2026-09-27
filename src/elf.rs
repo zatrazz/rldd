@@ -126,6 +126,42 @@ struct ElfInfo {
     deps: DepsVec,
 }
 
+#[cfg(test)]
+impl ElfInfo {
+    // A 64-bit little-endian object of the E_MACHINE machine and E_FLAGS
+    // flags, without any dynamic entry, with its origin in /o.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn for_test(e_machine: Machine, e_flags: FileFlags) -> Self {
+        ElfInfo {
+            ei_class: ELFCLASS64,
+            ei_data: ELFDATA2LSB,
+            ei_osabi: ELFOSABI_SYSV,
+            ei_abiver: 0,
+            e_machine,
+            e_flags,
+            interp: None,
+            soname: None,
+            dt_rpath: None,
+            dt_runpath: None,
+            needed: Vec::new(),
+            rpath: search_path::SearchPathVec::new(),
+            runpath: search_path::SearchPathVec::new(),
+            has_runpath: false,
+            runpath_last: false,
+            has_needed: false,
+            filters: DepsVec::new(),
+            nodeflibs: false,
+            is_musl: false,
+            dst_lib: Some("lib64".to_string()),
+            loader_flags: e_flags,
+            pie: false,
+            origin: Some("/o".to_string()),
+            unexpanded: Vec::new(),
+            deps: DepsVec::new(),
+        }
+    }
+}
+
 // ELF Parsing routines.
 
 fn parse_object(data: &[u8]) -> Result<ElfInfo, &'static str> {
@@ -591,7 +627,7 @@ fn searched_locations(
 }
 
 // The search order for a dependency name, following each loader semantics.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[allow(dead_code)]
 enum SearchStep {
     Rpath,

@@ -2,7 +2,9 @@
 
 This runs rldd over the ELF objects of the system directories and compares each
 dependency list with the one `ldd` reports, which is what the glibc loader
-lists in trace mode along with the file each dependency resolved to.
+lists in trace mode along with the file each dependency resolved to.  The
+system objects only exercise the common search rules, so `cases.sh` (see
+[below](#crafted-cases)) builds small objects for the other ones.
 
 The machine under test is the local one or any host reached through ssh,
 rldd is  cross built for its architecture and copied over along with the
@@ -27,10 +29,12 @@ Options:
 | `-j`, `--jobs N` | parallel workers (default: the processor count of the machine under test) |
 | `-k`, `--keep` | leave the files copied to the hosts, below `~/rldd-tests` on a remote one and a temporary directory on the local one |
 
-The sweep runs a copy of the binary, so a build replacing it meanwhile (a
-checkout shared over NFS, built from another machine) does not pull it away;
-a binary that does not run on the machine, built on another one, is reported
-before the sweep.
+The local machine is swept with a release build of the checkout, which the
+script always builds (a no-op when it is up to date), in `$CARGO_TARGET_DIR`
+when it is set.  The sweep runs a copy of the binary, so a build replacing it
+meanwhile (a checkout shared over NFS, built from another machine) does not
+pull it away; a binary that does not run on the machine, built on another one,
+is reported before the sweep.
 
 Prerequisites on the machine under test: `ldd`, the glibc or the musl one,
 and `python3`.
@@ -58,7 +62,7 @@ one `name => path` per line.
 | Check | What it covers |
 | --- | --- |
 | dependency lists | every object lists the same dependencies as `ldd`, each one resolved to the same file |
-| panics | no object makes rldd panic, and rldd reads every object ldd traces |
+| panics | no object makes rldd panic, crash (a signal, such as a stack overflow) or time out, and rldd reads every object ldd traces |
 
 The order of the listing is not compared: ldd prints the objects in load order
 and rldd -l in dependency tree order.  The vDSO entry ldd lists is not a
@@ -110,3 +114,60 @@ process printed; rldd reporting the named one not found is accepted.
 listed for information: a plugin whose host program is not installed, or a
 library of an optional package.  A dependency only one of them resolves is a
 failure.
+
+## Crafted cases
+
+`cases.sh` builds, for each case, a few small libraries and programs with gcc
+in a temporary directory, and checks the rldd result on them on the local
+machine:
+
+```sh
+tests/linux/cases.sh                        # every case
+tests/linux/cases.sh nodeflib preload       # some of them
+tests/linux/cases.sh -b path/to/rldd        # another binary than the checkout build
+```
+
+Options:
+
+| Option | Meaning |
+| --- | --- |
+| `-b`, `--rldd PATH` | check this binary (default: a release build of the checkout, in `$CARGO_TARGET_DIR` when it is set) |
+| `-k`, `--keep` | leave the objects built for the cases, and print where |
+| `-l`, `--list` | list the cases |
+
+Prerequisites: the glibc `ldd`, `gcc`, `readelf`, `objcopy`, `realpath`,
+`python3` and `bash`.
+
+Most cases compare the `rldd -l` listing with the `ldd` one (with the same
+`LD_PRELOAD` or `LD_LIBRARY_PATH` as the rldd option), each dependency
+resolved through `realpath`, and the loader and vDSO lines left out.  The
+`-d`/`-r` cases compare the version and undefined symbol diagnostics, with
+the directories left out.  The other cases check the rldd output against the
+expected result, where ldd can not tell:
+
+* the objects the glibc loader fails the whole load on (a candidate of
+  another OS ABI, a separate debug info file, a linker script, an executable),
+  where ldd only prints the error, and a preload of another class, which ldd
+  leaves out: rldd reports the dependency as not found, with the loader error
+  in verbose mode;
+* the musl rules, with programs naming a musl loader in the temporary
+  directory (it does not need to exist, nothing is run), and a path file next
+  to it.
+
+| Case | What it covers |
+| --- | --- |
+| `rpath`, `runpath` | the DT_RPATH chain of the loading objects, which DT_RUNPATH is not part of and hides |
+| `tokens`, `origin-literal` | `$ORIGIN` and `${ORIGIN}`, while `$ORIGINAL` is a directory name |
+| `lib`, `platform` | `$LIB` and `${PLATFORM}`, with the values the loader prints on `--list-diagnostics` (skipped without them) |
+| `empty-entry` | an empty DT_RPATH or DT_RUNPATH entry is the current directory |
+| `nodeflib` | DF_1_NODEFLIB: the objects already loaded are still used, the default directories are not searched |
+| `preload`, `library-path` | the tokens of the `--preload` and `--library-path` entries, the `;` separator and the empty entry of the latter |
+| `slash-needed` | a DT_NEEDED entry naming a path with a token |
+| `soname` | a name matching the soname of a preloaded object |
+| `not-found-then-found` | a library a module does not find, loaded by the next one, and reused by a later one |
+| `symlink-root` | the `$ORIGIN` of a library given through a symlink |
+| `wrong-class`, `verify` | the candidate files the loader skips or fails the load on |
+| `versions` | the version check diagnostics and the symbol version binding rules |
+| `musl` | the musl search order, rpath chain and path file |
+
+The glibc-hwcaps subdirectories are not covered yet.
