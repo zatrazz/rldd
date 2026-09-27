@@ -32,12 +32,21 @@ pub struct NamespaceConfig {
     name: String,
     isolated: bool,
     visible: bool,
+    // The 'whitelisted' and 'allowed_libs' names, which the loader only sets
+    // on the namespaces other than the default one (init_default_namespaces),
+    // so they are left empty for that one.
     allowed_libs: Vec<String>,
     pub search_paths: search_path::SearchPathVec,
+    // The 'permitted.paths' directories, only with the variables replaced:
+    // unlike the search paths, the loader does not resolve them.
+    permitted_paths: Vec<String>,
     pub namespaces: NamespaceLinkingConfigVec,
 }
 
 impl NamespaceConfig {
+    // The name part of the bionic android_namespace_t::is_accessible: an
+    // isolated namespace with an allowed_libs list only loads the names on
+    // it.
     pub fn is_accessible<S: AsRef<str>>(&self, file: S) -> bool {
         if !self.isolated {
             return true;
@@ -52,6 +61,54 @@ impl NamespaceConfig {
         // found.
         true
     }
+
+    // The bionic android_namespace_t::is_accessible, which the loader applies
+    // to the real path of every file a namespace loads (a DT_RUNPATH hit, or
+    // a DT_NEEDED with a slash, included).  An isolated namespace only loads
+    // a file whose name is on its allowed_libs (if it has any), and that is
+    // directly in one of the LD_LIBRARY_PATH directories (which only the
+    // default namespace has) or of its search paths, or anywhere below one of
+    // its permitted paths.
+    #[allow(dead_code)] // Not applied by the resolution yet.
+    pub fn is_accessible_path(
+        &self,
+        realpath: &str,
+        ld_library_paths: &search_path::SearchPathVec,
+    ) -> bool {
+        if !self.isolated {
+            return true;
+        }
+
+        if !self.allowed_libs.is_empty() {
+            let name = realpath.rsplit('/').next().unwrap_or(realpath);
+            if !self.allowed_libs.iter().any(|lib| lib == name) {
+                return false;
+            }
+        }
+
+        ld_library_paths
+            .iter()
+            .chain(&self.search_paths)
+            .any(|dir| file_is_in_dir(realpath, &dir.path))
+            || self
+                .permitted_paths
+                .iter()
+                .any(|dir| file_is_under_dir(realpath, dir))
+    }
+}
+
+// The bionic file_is_in_dir: FILE is directly in DIR, compared as strings.
+fn file_is_in_dir(file: &str, dir: &str) -> bool {
+    file.strip_prefix(dir)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .is_some_and(|name| !name.contains('/'))
+}
+
+// The bionic file_is_under_dir: FILE is anywhere below DIR, compared as
+// strings (so an empty DIR takes any absolute path).
+fn file_is_under_dir(file: &str, dir: &str) -> bool {
+    file.strip_prefix(dir)
+        .is_some_and(|rest| rest.starts_with('/'))
 }
 
 const DEFAULT_NAME_CONFIG: &str = "default";
@@ -98,6 +155,7 @@ impl LdCache {
                 visible: false,
                 search_paths: search_path::SearchPathVec::new(),
                 allowed_libs: Vec::<String>::new(),
+                permitted_paths: Vec::<String>::new(),
                 namespaces: NamespaceLinkingConfigVec::new(),
             },
         );
@@ -483,22 +541,21 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
         ns.isolated = properties.get_bool(format!("{property_name_prefix}.isolated"));
         ns.visible = properties.get_bool(format!("{property_name_prefix}.visible"));
 
-        // Android r31 added 'allowed_libs' as synonym for 'whitelisted'.
-        let mut allowed_libs: Vec<String> = properties
-            .get_string(format!("{property_name_prefix}.whitelisted"))
-            .split(':')
-            .map(|s| s.to_string())
-            .filter(|x| !x.is_empty())
-            .collect();
-        allowed_libs.append(
-            &mut properties
-                .get_string(format!("{property_name_prefix}.allowed_libs"))
-                .split(':')
-                .map(|s| s.to_string())
-                .filter(|x| !x.is_empty())
-                .collect(),
-        );
-        ns.allowed_libs = allowed_libs;
+        // Android 12 added 'allowed_libs' as a synonym of 'whitelisted', and
+        // the two lists are joined.  An empty entry is kept like the loader
+        // does: it matches no name, but the list is still a restriction.
+        if ns.name != DEFAULT_NAME_CONFIG {
+            let mut allowed_libs =
+                properties.get_string(format!("{property_name_prefix}.whitelisted"));
+            let libs = properties.get_string(format!("{property_name_prefix}.allowed_libs"));
+            if !allowed_libs.is_empty() && !libs.is_empty() {
+                allowed_libs.push(':');
+            }
+            allowed_libs.push_str(&libs);
+            if !allowed_libs.is_empty() {
+                ns.allowed_libs = allowed_libs.split(':').map(|lib| lib.to_string()).collect();
+            }
+        }
 
         if is_asan {
             property_name_prefix.push_str(".asan");
@@ -517,7 +574,11 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
             }
         }
 
-        // Skip the permitted.paths, since it is not required for program loading.
+        ns.permitted_paths = properties.get_paths(
+            format!("{property_name_prefix}.permitted.paths"),
+            ei_class,
+            props,
+        );
     }
 
     Ok(ldcache)
@@ -993,16 +1054,20 @@ mod tests {
             format!("{}/{path}", self.base)
         }
 
-        fn parse_bytes(&self, config: &[u8]) -> Result<LdCache, &'static str> {
+        fn parse_as(&self, config: &[u8], interp: &str) -> Result<LdCache, &'static str> {
             let cfgpath = Path::new(&self.base).join("ld.config.txt");
             fs::write(&cfgpath, config).map_err(|_| "could not write the configuration")?;
             parse_ld_config_txt(
                 &cfgpath,
                 &self.path("bin/binary"),
-                Some("/system/bin/linker64"),
+                Some(interp),
                 ELFCLASS64,
                 &props(),
             )
+        }
+
+        fn parse_bytes(&self, config: &[u8]) -> Result<LdCache, &'static str> {
+            self.parse_as(config, "/system/bin/linker64")
         }
 
         fn parse(&self, config: &str) -> Result<LdCache, &'static str> {
@@ -1120,6 +1185,79 @@ mod tests {
         assert_eq!(
             search_paths(&ldcache, "default"),
             vec![fixture.path("lib64"), fixture.path("lib")]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn namespace_accessibility() -> Result<(), Error> {
+        let fixture = Fixture::new()?;
+        std::os::unix::fs::symlink(fixture.path("lib64"), fixture.path("link"))?;
+        let config = "dir.test = {base}/bin\n\
+             [test]\n\
+             additional.namespaces = other,open\n\
+             namespace.default.isolated = true\n\
+             namespace.default.search.paths = {base}/lib\n\
+             namespace.default.permitted.paths = {base}/link/$LIB:{base}/missing\n\
+             namespace.default.asan.permitted.paths = /data/asan{base}/${LIB}\n\
+             namespace.default.allowed_libs = libfoo.so\n\
+             namespace.other.isolated = true\n\
+             namespace.other.search.paths = {base}/link\n\
+             namespace.other.whitelisted = libfoo.so\n\
+             namespace.other.allowed_libs = libbar.so\n\
+             namespace.open.search.paths = {base}/lib\n"
+            .replace("{base}", &fixture.base);
+        let ldcache = fixture
+            .parse_bytes(config.as_bytes())
+            .map_err(Error::other)?;
+        let no_paths = search_path::SearchPathVec::new();
+
+        let default_ns = ldcache
+            .get_default_namespace()
+            .ok_or(Error::other("default namespace not found"))?;
+        // The permitted paths are only substituted, not resolved.
+        assert_eq!(
+            default_ns.permitted_paths,
+            vec![fixture.path("link/lib64"), fixture.path("missing")]
+        );
+        // The default namespace ignores its allowed_libs.
+        assert!(default_ns.allowed_libs.is_empty());
+        assert!(default_ns.is_accessible_path(&fixture.path("lib/libbaz.so"), &no_paths));
+        // A file directly on a search path, or anywhere below a permitted path.
+        assert!(!default_ns.is_accessible_path(&fixture.path("lib/sub/libbaz.so"), &no_paths));
+        assert!(default_ns.is_accessible_path(&fixture.path("link/lib64/sub/libbaz.so"), &no_paths));
+        assert!(!default_ns.is_accessible_path(&fixture.path("lib64/libbaz.so"), &no_paths));
+        assert!(!default_ns.is_accessible_path(&fixture.path("libx/libbaz.so"), &no_paths));
+        // Or directly on a LD_LIBRARY_PATH directory.
+        let ld_library_paths = search_path::from_string(fixture.path("lib64"), &[':']);
+        assert!(default_ns.is_accessible_path(&fixture.path("lib64/libbaz.so"), &ld_library_paths));
+
+        // Both lists apply, against the resolved search path.
+        let other_ns = ldcache
+            .get_namespace("other")
+            .ok_or(Error::other("other namespace not found"))?;
+        assert_eq!(other_ns.allowed_libs, vec!["libfoo.so", "libbar.so"]);
+        assert!(other_ns.is_accessible_path(&fixture.path("lib64/libfoo.so"), &no_paths));
+        assert!(other_ns.is_accessible_path(&fixture.path("lib64/libbar.so"), &no_paths));
+        assert!(!other_ns.is_accessible_path(&fixture.path("lib64/libbaz.so"), &no_paths));
+        assert!(!other_ns.is_accessible_path(&fixture.path("link/libfoo.so"), &no_paths));
+
+        // A namespace that is not isolated loads anything.
+        let open_ns = ldcache
+            .get_namespace("open")
+            .ok_or(Error::other("open namespace not found"))?;
+        assert!(open_ns.is_accessible_path("/anywhere/libbaz.so", &no_paths));
+
+        // The sanitizer variants.
+        let ldcache = fixture
+            .parse_as(config.as_bytes(), "/system/bin/linker_asan64")
+            .map_err(Error::other)?;
+        let default_ns = ldcache
+            .get_default_namespace()
+            .ok_or(Error::other("default namespace not found"))?;
+        assert_eq!(
+            default_ns.permitted_paths,
+            vec![format!("/data/asan{}/lib64", fixture.base)]
         );
         Ok(())
     }
