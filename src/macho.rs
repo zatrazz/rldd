@@ -735,11 +735,17 @@ fn resolve_file(
     ) {
         return ResolveResult::Skip;
     }
-    let Ok(elc) = open_macho_file(
+    // dyld only links against a dylib: the dependencies and the inserted
+    // libraries are loaded with the canBeDylib option alone, so a bundle or
+    // an executable is refused (JustInTimeLoader::makeJustInTimeLoaderDisk)
+    // and the search continues.
+    let Some(elc) = open_macho_file(
         &path,
         Check::Dependency(config.arch),
         config.executable_path,
-    ) else {
+    )
+    .ok()
+    .filter(|elc| elc.filetype == MH_DYLIB) else {
         return ResolveResult::Miss;
     };
     add_found(elc, &path, mode, dep, tree, depp, None)
@@ -1433,6 +1439,29 @@ mod tests {
             [
                 node(&lib, DepMode::LdLibraryPath),
                 repeat(&lib, DepMode::LdLibraryPath),
+            ]
+        );
+    }
+
+    #[test]
+    fn dependency_file_type() {
+        // A bundle or an executable on the recorded path is not linked
+        // against, and the search continues.
+        let dir = Scratch::new("filetype");
+        let bundle = dir.write(
+            "lib/libfoo.dylib",
+            &macho(CPU_TYPE_X86_64, 3, MH_BUNDLE, &[]),
+        );
+        let exe_dep = dir.write("bin/tool", &x86_64_exe(&[]));
+        let dylib = dir.write("fb/libfoo.dylib", &x86_64_dylib(&[]));
+        let exe = dir.write("bin/exe", &x86_64_exe(&[load(&bundle), load(&exe_dep)]));
+        let mut ctx = context(None);
+        ctx.env.fallback_library_path = search_path::from_string(dir.path("fb"), &[':']);
+        assert_eq!(
+            resolve(&mut ctx, &exe),
+            [
+                node(&dylib, DepMode::LdFallbackLibraryPath),
+                node(&exe_dep, DepMode::NotFound),
             ]
         );
     }
