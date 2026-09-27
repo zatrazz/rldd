@@ -14,11 +14,16 @@ use crate::search_path;
 
 mod system_dirs;
 
-#[cfg(target_os = "android")]
+// The ld.config.txt parsing does not depend on the device beyond the system
+// properties, so it is also built for the unit tests on a Linux host, where
+// nothing else uses it.
+#[cfg(any(target_os = "android", all(test, target_os = "linux")))]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod android;
 #[cfg(target_os = "linux")]
 mod interp;
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", all(test, target_os = "linux")))]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod ld_config_txt;
 // The BSD configuration file parsers are also built for the Linux tests, so
 // their unit tests run where CI does.

@@ -155,15 +155,20 @@ impl Properties {
             .to_string()
     }
 
-    fn get_paths<S: AsRef<str>>(&self, name: S, ei_class: FileClass) -> search_path::SearchPathVec {
+    fn get_paths<S: AsRef<str>>(
+        &self,
+        name: S,
+        ei_class: FileClass,
+        props: &SystemProperties,
+    ) -> search_path::SearchPathVec {
         let mut path = self.get_string(name);
 
         path = path.replace("${SDK_VER}", self.target_sdk_version.as_str());
 
         // The VNDK APEX uses a different delimiter than the VNDK version
         // itself ('v30' against '-30').
-        path = path.replace("${VNDK_VER}", get_vndk_version_str('-').as_str());
-        path = path.replace("${VNDK_APEX_VER}", get_vndk_version_str('v').as_str());
+        path = path.replace("${VNDK_VER}", props.vndk_version_string('-').as_str());
+        path = path.replace("${VNDK_APEX_VER}", props.vndk_version_string('v').as_str());
 
         path = path.replace("${LIB}", libpath(ei_class));
 
@@ -179,25 +184,21 @@ enum Token {
     Error,
 }
 
-fn get_vndk_version_str(delimiter: char) -> String {
-    let vndk_str = get_vndk_version_string("");
-    if vndk_str.is_empty() || vndk_str == "current" {
-        return "".to_string();
-    }
-    format!("{delimiter}{vndk_str}")
-}
-
 pub fn get_ld_config_path<P: AsRef<Path>>(
     executable: &P,
     e_machine: Machine,
     ei_class: FileClass,
+    props: &SystemProperties,
 ) -> Option<String> {
-    fn get_ld_config_vndk_path() -> String {
-        if get_property_bool("ro.vndk.lite", false).unwrap_or(false) {
+    fn get_ld_config_vndk_path(props: &SystemProperties) -> String {
+        if props.vndk_lite {
             return "/system/etc/ld.config.vndk_lite.txt".to_string();
         }
 
-        format!("/system/etc/ld.config{}.txt", get_vndk_version_str('.'))
+        format!(
+            "/system/etc/ld.config{}.txt",
+            props.vndk_version_string('.')
+        )
     }
 
     fn get_default_ld_config_path() -> Option<String> {
@@ -208,6 +209,7 @@ pub fn get_ld_config_path<P: AsRef<Path>>(
         e_machine: Machine,
         ei_class: FileClass,
         linkerconfig: bool,
+        props: &SystemProperties,
     ) -> Option<String> {
         if let Some(abi) = abi_string(e_machine, ei_class) {
             let ld_config_arch = format!("/system/etc/ld.config.{abi}.txt");
@@ -223,7 +225,7 @@ pub fn get_ld_config_path<P: AsRef<Path>>(
             }
         }
 
-        let vndk_config = get_ld_config_vndk_path();
+        let vndk_config = get_ld_config_vndk_path(props);
         if Path::new(&vndk_config).exists() {
             return Some(vndk_config);
         }
@@ -252,9 +254,7 @@ pub fn get_ld_config_path<P: AsRef<Path>>(
         None
     }
 
-    let Ok(release) = get_release() else {
-        return None;
-    };
+    let release = props.release;
 
     // Android 7.0/7.1 does not support ld.config.txt.
     if release < AndroidRelease::R26 {
@@ -277,7 +277,7 @@ pub fn get_ld_config_path<P: AsRef<Path>>(
     }
 
     // Android 9 added support for abi and vndk specific path.
-    get_vndk_ld_config_path(e_machine, ei_class, linkerconfig)
+    get_vndk_ld_config_path(e_machine, ei_class, linkerconfig, props)
 }
 
 pub fn read_version_file<P: AsRef<Path>>(binary: &P) -> Result<i64, &'static str> {
@@ -296,10 +296,11 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
     binary: &P1,
     interp: Option<&str>,
     ei_class: FileClass,
+    props: &SystemProperties,
 ) -> Result<LdCache, &'static str> {
     let is_asan = is_asan(interp);
     let is_hwasan = is_hwasan(interp);
-    let release = get_release().map_err(|_| "invalid android release")?;
+    let release = props.release;
 
     if is_asan && release == AndroidRelease::R26 {
         return Err("asan not supported");
@@ -423,8 +424,11 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
             property_name_prefix.push_str(".hwasan");
         }
 
-        ns.search_paths =
-            properties.get_paths(format!("{property_name_prefix}.search.paths"), ei_class);
+        ns.search_paths = properties.get_paths(
+            format!("{property_name_prefix}.search.paths"),
+            ei_class,
+            props,
+        );
 
         // Skip the permitted.paths, since it is not required for program loading.
     }
@@ -568,6 +572,15 @@ mod tests {
     use std::io::{Error, Write};
     use std::iter::zip;
 
+    // The properties of an Android 12 device without a VNDK.
+    fn props() -> SystemProperties {
+        SystemProperties {
+            release: AndroidRelease(31),
+            vndk_version: String::new(),
+            vndk_lite: false,
+        }
+    }
+
     fn create_cfg(tmp_path: &str) -> String {
         format!(
             "# comment \n\
@@ -700,7 +713,7 @@ mod tests {
             vec![systemlib.to_str().unwrap()]
         };
 
-        match parse_ld_config_txt(&cfgpath, &binpath, Some(interp), ELFCLASS32) {
+        match parse_ld_config_txt(&cfgpath, &binpath, Some(interp), ELFCLASS32, &props()) {
             Ok(ldcache) => {
                 let default_ns = ldcache
                     .get_default_namespace()
@@ -841,10 +854,12 @@ mod tests {
         let libpath = tmpdir.path().join("libfoo.so");
         File::create(&libpath)?;
 
-        assert!(parse_ld_config_txt(&cfgpath, &libpath, Some("linker"), ELFCLASS32).is_err());
+        assert!(
+            parse_ld_config_txt(&cfgpath, &libpath, Some("linker"), ELFCLASS32, &props()).is_err()
+        );
 
-        let ldcache =
-            parse_ld_config_txt(&cfgpath, &libpath, None, ELFCLASS32).map_err(Error::other)?;
+        let ldcache = parse_ld_config_txt(&cfgpath, &libpath, None, ELFCLASS32, &props())
+            .map_err(Error::other)?;
         let default_ns = ldcache
             .get_default_namespace()
             .ok_or(Error::other("default namespace not found"))?;

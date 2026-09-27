@@ -12,8 +12,11 @@ impl Loader for Android {
         binary: &P,
         elc: &ElfInfo,
     ) {
+        let Ok(props) = crate::elf::android::SystemProperties::get() else {
+            return;
+        };
         if let Some(ld_config_path) =
-            ld_config_txt::get_ld_config_path(binary, elc.e_machine, elc.ei_class)
+            ld_config_txt::get_ld_config_path(binary, elc.e_machine, elc.ei_class, &props)
         {
             // On Android 10 and forward each executable might have a associated ld.config.txt
             // file in different paths, so we need to reload for each argument.
@@ -23,6 +26,7 @@ impl Loader for Android {
                 binary,
                 elc.interp.as_deref(),
                 elc.ei_class,
+                &props,
             )
             .ok();
         }

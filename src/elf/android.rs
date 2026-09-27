@@ -1,12 +1,14 @@
 use object::elf::*;
+#[cfg(target_os = "android")]
 use std::ffi::CString;
 use std::fmt;
+#[cfg(target_os = "android")]
 use std::io::Error;
 
 use crate::pathutils;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct AndroidRelease(u32);
+pub struct AndroidRelease(pub u32);
 
 impl AndroidRelease {
     // Android 8.0, which added the ld.config.txt file on a hardcoded path.
@@ -26,8 +28,42 @@ impl fmt::Display for AndroidRelease {
     }
 }
 
+// The system properties the loader configuration depends on.  They are read
+// from the device, except on the host tests that set them directly.
+#[derive(Clone, Debug)]
+pub struct SystemProperties {
+    // ro.build.version.sdk
+    pub release: AndroidRelease,
+    // ro.vndk.version, empty when unset.
+    pub vndk_version: String,
+    // ro.vndk.lite
+    pub vndk_lite: bool,
+}
+
+impl SystemProperties {
+    #[cfg(target_os = "android")]
+    pub fn get() -> Result<SystemProperties, std::io::Error> {
+        Ok(SystemProperties {
+            release: get_release()?,
+            vndk_version: get_property("ro.vndk.version", "").unwrap_or_default(),
+            vndk_lite: get_property_bool("ro.vndk.lite", false).unwrap_or(false),
+        })
+    }
+
+    // The bionic Config::get_vndk_version_string: the VNDK version preceded
+    // by DELIMITER, or nothing when it is unset or 'current'.
+    pub fn vndk_version_string(&self, delimiter: char) -> String {
+        if self.vndk_version.is_empty() || self.vndk_version == "current" {
+            return String::new();
+        }
+        format!("{delimiter}{}", self.vndk_version)
+    }
+}
+
+#[cfg(target_os = "android")]
 const PROP_VALUE_MAX: usize = 92;
 
+#[cfg(target_os = "android")]
 pub fn get_property<S1: AsRef<str>, S2: AsRef<str>>(
     property: S1,
     default: S2,
@@ -52,10 +88,12 @@ pub fn get_property<S1: AsRef<str>, S2: AsRef<str>>(
     }
 }
 
+#[cfg(target_os = "android")]
 pub fn get_release_str() -> Result<String, std::io::Error> {
     get_property("ro.build.version.sdk", "")
 }
 
+#[cfg(target_os = "android")]
 pub fn get_release() -> Result<AndroidRelease, std::io::Error> {
     get_release_str()?
         .trim()
@@ -64,6 +102,7 @@ pub fn get_release() -> Result<AndroidRelease, std::io::Error> {
         .map_err(|_| Error::other("Could not read the Android release"))
 }
 
+#[cfg(target_os = "android")]
 pub fn get_property_bool<S: AsRef<str>>(
     property: S,
     default: bool,
@@ -72,13 +111,6 @@ pub fn get_property_bool<S: AsRef<str>>(
         "1" | "y" | "yes" | "on" | "true" => Ok(true),
         "0" | "n" | "no" | "off" | "false" => Ok(false),
         _ => Ok(default),
-    }
-}
-
-pub fn get_vndk_version_string<S: AsRef<str>>(default: S) -> String {
-    match get_property("ro.vndk.version", "") {
-        Ok(value) => value,
-        Err(_) => default.as_ref().to_string(),
     }
 }
 

@@ -7,7 +7,9 @@ device.  This builds rldd for the ABI of each attached device, pushes it, and
 resolves every object of the image with it.
 
 The `ld.config.txt` parsing itself is covered by the unit tests, which
-`cargo test` runs on the host.
+`cargo test` runs on a Linux host: the tests set the system properties the
+parsing depends on (the release and the VNDK version) instead of reading them
+from the device.  They do not run on the other hosts.
 
 ## Running
 
