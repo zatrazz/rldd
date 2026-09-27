@@ -20,6 +20,8 @@ impl AndroidRelease {
     pub const R29: AndroidRelease = AndroidRelease(29);
     // Android 11, which added the generated /linkerconfig files.
     pub const R30: AndroidRelease = AndroidRelease(30);
+    // Android 13, which dropped the configuration shipped on the APEX.
+    pub const R33: AndroidRelease = AndroidRelease(33);
 }
 
 impl fmt::Display for AndroidRelease {

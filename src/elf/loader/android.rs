@@ -15,9 +15,13 @@ impl Loader for Android {
         let Ok(props) = crate::elf::android::SystemProperties::get() else {
             return;
         };
-        if let Some(ld_config_path) =
-            ld_config_txt::get_ld_config_path(binary, elc.e_machine, elc.ei_class, &props)
-        {
+        if let Some(ld_config_path) = ld_config_txt::get_ld_config_path(
+            binary,
+            elc.interp.as_deref(),
+            elc.e_machine,
+            elc.ei_class,
+            &props,
+        ) {
             // On Android 10 and forward each executable might have a associated ld.config.txt
             // file in different paths, so we need to reload for each argument.
             // A shared library has no PT_INTERP segment, so no sanitizer applies.

@@ -323,100 +323,116 @@ enum Token<'a> {
     Error,
 }
 
-pub fn get_ld_config_path<P: AsRef<Path>>(
-    executable: &P,
+// The APEX whose configuration the bionic get_ld_config_file_apex_path
+// selects for EXECUTABLE: an executable on the bin directory of an APEX
+// (/apex/<name>/bin/<file>, and anywhere below that directory from Android 11
+// on).  A shared library anywhere below /apex/<name> is taken as loaded by an
+// executable on the bin directory of its APEX, like find_initial_section
+// does.
+fn apex_name(executable: &Path, library: bool, release: AndroidRelease) -> Option<String> {
+    // The path split on '/' the way the loader does: "", "apex", the APEX
+    // name, "bin", and the file.
+    let parts: Vec<&[u8]> = executable
+        .as_os_str()
+        .as_bytes()
+        .split(|&c| c == b'/')
+        .collect();
+    if parts.len() < 4 || !parts[0].is_empty() || parts[1] != b"apex" || parts[2].is_empty() {
+        return None;
+    }
+    let in_bin = parts.len() >= 5
+        && parts[3] == b"bin"
+        && (parts.len() == 5 || release >= AndroidRelease::R30);
+    (library || in_bin).then(|| String::from_utf8_lossy(parts[2]).into_owned())
+}
+
+// The configuration files the bionic get_ld_config_file_path tries for
+// EXECUTABLE, in order: the first one that exists is read, and the last one
+// is read regardless (a missing file meaning no configuration).
+fn ld_config_candidates(
+    executable: &Path,
+    library: bool,
     e_machine: Machine,
     ei_class: FileClass,
     props: &SystemProperties,
-) -> Option<String> {
-    fn get_ld_config_vndk_path(props: &SystemProperties) -> String {
-        if props.vndk_lite {
-            return "/system/etc/ld.config.vndk_lite.txt".to_string();
-        }
-
-        format!(
-            "/system/etc/ld.config{}.txt",
-            props.vndk_version_string('.')
-        )
-    }
-
-    fn get_default_ld_config_path() -> Option<String> {
-        Some("/system/etc/ld.config.txt".to_string())
-    }
-
-    fn get_vndk_ld_config_path(
-        e_machine: Machine,
-        ei_class: FileClass,
-        linkerconfig: bool,
-        props: &SystemProperties,
-    ) -> Option<String> {
-        if let Some(abi) = abi_string(e_machine, ei_class) {
-            let ld_config_arch = format!("/system/etc/ld.config.{abi}.txt");
-            if Path::new(&ld_config_arch).exists() {
-                return Some(ld_config_arch);
-            }
-        }
-
-        if linkerconfig {
-            let linkerconfig_path = "/linkerconfig/ld.config.txt".to_string();
-            if Path::new(&linkerconfig_path).exists() {
-                return Some(linkerconfig_path);
-            }
-        }
-
-        let vndk_config = get_ld_config_vndk_path(props);
-        if Path::new(&vndk_config).exists() {
-            return Some(vndk_config);
-        }
-
-        get_default_ld_config_path()
-    }
-
-    fn get_apex_ld_config_path<P: AsRef<Path>>(
-        executable: &P,
-        linkerconfig: bool,
-    ) -> Option<String> {
-        let parts: Vec<&OsStr> = executable.as_ref().iter().collect();
-        if parts.len() >= 3 && parts[1] == "apex" && parts[2] != "com.android.runtime" {
-            let name = parts[2].to_string_lossy();
-            if linkerconfig {
-                let linkerconfig_path = format!("/linkerconfig/{name}/ld.config.txt");
-                if Path::new(&linkerconfig_path).exists() {
-                    return Some(linkerconfig_path);
-                }
-            }
-            let apex_config = format!("/apex/{name}/etc/ld.config.txt");
-            if Path::new(&apex_config).exists() {
-                return Some(apex_config);
-            }
-        }
-        None
-    }
-
+) -> Vec<String> {
     let release = props.release;
+    let default = "/system/etc/ld.config.txt".to_string();
 
     // Android 7.0/7.1 does not support ld.config.txt.
     if release < AndroidRelease::R26 {
-        return None;
+        return Vec::new();
     }
 
     // Android 8.0/8.1 has the ld.config.txt hardcoded.
     if release < AndroidRelease::R28 {
-        return get_default_ld_config_path();
+        return vec![default];
     }
 
-    // Android 11 added the /linkerconfig generated files.
-    let linkerconfig = release >= AndroidRelease::R30;
+    let mut candidates = Vec::new();
 
-    // Android 10 added the per binary (APEX) ld.config.txt.
+    // Android 10 added the configuration the APEX ships, which Android 11
+    // and 12 only read when linkerconfig did not generate one for it, and
+    // Android 13 no longer reads.
     if release >= AndroidRelease::R29 {
-        if let Some(cfg) = get_apex_ld_config_path(executable, linkerconfig) {
-            return Some(cfg);
+        if let Some(apex) = apex_name(executable, library, release) {
+            if release >= AndroidRelease::R30 {
+                candidates.push(format!("/linkerconfig/{apex}/ld.config.txt"));
+            }
+            if release < AndroidRelease::R33 {
+                candidates.push(format!("/apex/{apex}/etc/ld.config.txt"));
+            }
         }
     }
 
-    // Android 9 added support for abi and vndk specific path.
-    get_vndk_ld_config_path(e_machine, ei_class, linkerconfig, props)
+    // Android 9 added the architecture specific configuration, used for the
+    // native bridge objects.
+    if let Some(abi) = abi_string(e_machine, ei_class) {
+        candidates.push(format!("/system/etc/ld.config.{abi}.txt"));
+    }
+
+    // Android 11 added the generated configuration.
+    if release >= AndroidRelease::R30 {
+        candidates.push("/linkerconfig/ld.config.txt".to_string());
+    }
+
+    // Android 9 also added the VNDK ones.
+    if props.vndk_lite {
+        candidates.push("/system/etc/ld.config.vndk_lite.txt".to_string());
+    } else {
+        candidates.push(format!(
+            "/system/etc/ld.config{}.txt",
+            props.vndk_version_string('.')
+        ));
+    }
+
+    candidates.push(default);
+    candidates
+}
+
+// The configuration file for EXECUTABLE (a shared library when it has no
+// INTERP), if the release has any.
+pub fn get_ld_config_path<P: AsRef<Path>>(
+    executable: &P,
+    interp: Option<&str>,
+    e_machine: Machine,
+    ei_class: FileClass,
+    props: &SystemProperties,
+) -> Option<String> {
+    let mut candidates = ld_config_candidates(
+        executable.as_ref(),
+        interp.is_none(),
+        e_machine,
+        ei_class,
+        props,
+    );
+    let last = candidates.pop()?;
+    Some(
+        candidates
+            .into_iter()
+            .find(|path| Path::new(path).exists())
+            .unwrap_or(last),
+    )
 }
 
 // The target SDK version set by the '.version' file next to the binary, read
@@ -1296,6 +1312,102 @@ mod tests {
             vec![format!("/data/asan{}/lib64", fixture.base)]
         );
         Ok(())
+    }
+
+    #[test]
+    fn config_candidates() {
+        let candidates = |path: &str, library: bool, release: u32| {
+            let props = SystemProperties {
+                release: AndroidRelease(release),
+                ..props()
+            };
+            ld_config_candidates(Path::new(path), library, EM_X86_64, ELFCLASS64, &props)
+        };
+        let arch = "/system/etc/ld.config.x86_64.txt";
+        let generated = "/linkerconfig/ld.config.txt";
+        let default = "/system/etc/ld.config.txt";
+
+        assert!(candidates("/system/bin/ls", false, 25).is_empty());
+        assert_eq!(candidates("/system/bin/ls", false, 27), vec![default]);
+        assert_eq!(
+            candidates("/system/bin/ls", false, 28),
+            vec![arch, default, default]
+        );
+        assert_eq!(
+            candidates("/system/bin/ls", false, 30),
+            vec![arch, generated, default, default]
+        );
+
+        // Android 10 only reads the configuration an APEX ships, for an
+        // executable directly on its bin directory, the runtime APEX
+        // included.
+        let runtime = "/apex/com.android.runtime/etc/ld.config.txt";
+        assert_eq!(
+            candidates("/apex/com.android.runtime/bin/linker64", false, 29),
+            vec![runtime, arch, default, default]
+        );
+        assert_eq!(
+            candidates("/apex/com.android.runtime/bin/sub/tool", false, 29),
+            vec![arch, default, default]
+        );
+        // Android 11 and 12 read the generated one first, anywhere below
+        // the bin directory.
+        let art = [
+            "/linkerconfig/com.android.art/ld.config.txt",
+            "/apex/com.android.art/etc/ld.config.txt",
+        ];
+        for release in [30, 32] {
+            assert_eq!(
+                candidates("/apex/com.android.art/bin/sub/dalvikvm64", false, release),
+                vec![art[0], art[1], arch, generated, default, default]
+            );
+        }
+        // Android 13 only reads the generated one.
+        assert_eq!(
+            candidates("/apex/com.android.art/bin/dalvikvm64", false, 33),
+            vec![art[0], arch, generated, default, default]
+        );
+        // An executable elsewhere on the APEX gets the system configuration,
+        // while a shared library gets the one of its APEX.
+        assert_eq!(
+            candidates("/apex/com.android.art/lib64/tool", false, 33),
+            vec![arch, generated, default, default]
+        );
+        assert_eq!(
+            candidates("/apex/com.android.art/lib64/libart.so", true, 33),
+            vec![art[0], arch, generated, default, default]
+        );
+        assert_eq!(
+            candidates("/apex/com.android.art/lib64/libart.so", true, 29),
+            vec![art[1], arch, default, default]
+        );
+
+        // The VNDK ones.
+        let vndk = |vndk_version: &str, vndk_lite: bool| {
+            let props = SystemProperties {
+                vndk_version: vndk_version.to_string(),
+                vndk_lite,
+                ..props()
+            };
+            ld_config_candidates(
+                Path::new("/system/bin/ls"),
+                false,
+                EM_386,
+                ELFCLASS32,
+                &props,
+            )
+        };
+        assert_eq!(
+            vndk("31", false),
+            vec![
+                "/system/etc/ld.config.x86.txt",
+                generated,
+                "/system/etc/ld.config.31.txt",
+                default
+            ]
+        );
+        assert_eq!(vndk("current", false)[2], default);
+        assert_eq!(vndk("31", true)[2], "/system/etc/ld.config.vndk_lite.txt");
     }
 
     #[test]
