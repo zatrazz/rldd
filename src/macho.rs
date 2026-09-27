@@ -563,7 +563,7 @@ fn print_object_information(
     }
     if let Some(reason) = security.restricted {
         lines.push(format!(
-            "  restricted: {reason} (the DYLD_* options and @executable_path are ignored)"
+            "  restricted: {reason} (the DYLD_* options, @executable_path, and the relative load paths are ignored)"
         ));
     }
     if !omf.dyld_environment.is_empty() {
@@ -933,7 +933,7 @@ fn cryptex_path(path: &Path) -> Option<PathBuf> {
         .map(|rest| Path::new(CRYPTEX_OS_PATH).join(rest))
 }
 
-// The realpath(3) of an absolute path whose leaf may not exist (the macOS
+// The realpath(3) of a path whose leaf may not exist (the macOS
 // semantics, which resolve the symlinks of the directory components).
 fn realpath_leaf(path: &Path) -> Option<String> {
     let parent = path.parent()?.canonicalize().ok()?;
@@ -1040,16 +1040,20 @@ fn resolve_path(
         result => return result,
     }
 
-    // Then the filesystem, only for absolute paths.
+    // Then the filesystem.  dyld opens a relative path (one not starting with
+    // / or @) from the current directory, which a restricted process does not
+    // do (the relative paths not allowed in hardened programs of
+    // Loader::getLoader), and does not look for it below the cryptex mount.
     let path = Path::new(dependency);
-    if !path.is_absolute() {
+    let relative = !path.is_absolute();
+    if relative && (dependency.starts_with('@') || !config.security.allow_env_vars_path()) {
         return ResolveResult::Miss;
     }
     match resolve_file(config, path, dep, mode, tree, requester) {
         ResolveResult::Miss => {}
         result => return result,
     }
-    if let Some(cryptex) = cryptex_path(path) {
+    if let Some(cryptex) = cryptex_path(path).filter(|_| !relative) {
         match resolve_file(config, &cryptex, dep, mode, tree, requester) {
             ResolveResult::Miss => {}
             result => return result,
@@ -1057,7 +1061,8 @@ fn resolve_path(
     }
 
     // dyld only retries a recorded load path through its realpath when it
-    // does not start with @ (Loader::getLoader).
+    // does not start with @ (Loader::getLoader), a relative one taken from
+    // the current directory.
     if matches!(mode, DepMode::Direct | DepMode::Preload) && !dep.name.starts_with('@') {
         if let Some(real) = realpath_leaf(path).filter(|real| real != dependency) {
             return resolve_cache(config, &real, dep, tree, requester);
@@ -2932,6 +2937,45 @@ mod tests {
         assert_eq!(
             resolve(&mut ctx, &absolute),
             [node(&lib, DepMode::LdLibraryPath)]
+        );
+    }
+
+    #[test]
+    fn relative_load_paths() {
+        // A relative load path is opened from the current directory, which
+        // the test does not change: it goes up to the root and down to the
+        // scratch directory.
+        let dir = Scratch::new("relative");
+        let lib = dir.write("lib/libfoo.dylib", &x86_64_dylib(&[]));
+        let depth = std::env::current_dir().unwrap().components().count() - 1;
+        let relative = format!("{}{}", "../".repeat(depth), &lib[1..]);
+        // A bare leaf name is not an implicit @rpath one for a dependency,
+        // which dyld only does for dlopen.
+        dir.write("rp/libbare.dylib", &x86_64_dylib(&[]));
+        let cmds = [
+            load(&relative),
+            load("libbare.dylib"),
+            string_command(LC_RPATH, &[], &dir.path("rp")),
+        ];
+        let exe = dir.write("bin/exe", &x86_64_exe(&cmds));
+        let mut ctx = context(None);
+        assert_eq!(
+            resolve(&mut ctx, &exe),
+            [
+                node(&lib, DepMode::Direct),
+                node("libbare.dylib", DepMode::NotFound),
+            ]
+        );
+        // A restricted process does not open a relative path.
+        let mut cmds = cmds.to_vec();
+        cmds.push(segment64("__RESTRICT", &["__restrict"]));
+        let restricted = dir.write("bin/restricted", &x86_64_exe(&cmds));
+        assert_eq!(
+            resolve(&mut ctx, &restricted),
+            [
+                node(&relative, DepMode::NotFound),
+                node("libbare.dylib", DepMode::NotFound),
+            ]
         );
     }
 
