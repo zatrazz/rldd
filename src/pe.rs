@@ -1,3 +1,4 @@
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::io::Error;
@@ -46,6 +47,12 @@ struct PeDep {
     // The symbols imported from it, used to follow the export forwarders and
     // to check the imports.
     imports: Vec<ImportName>,
+}
+
+impl PeDep {
+    fn is_delay_load(&self) -> bool {
+        self.attrs.contains(&"delay-load")
+    }
 }
 
 // Where an exported symbol points to.
@@ -115,6 +122,9 @@ const IMAGE_FILE_EXECUTION_OPTIONS_KEY: &str =
 pub struct PeContext {
     apiset: apiset::ApiSetMap,
     knowndlls: knowndlls::KnownDlls,
+    // The known DLL sections of the 64 and the 32 bit images, built on first
+    // use.
+    known_sections: [OnceCell<HashSet<String>>; 2],
     winsxs: sxs::WinSxs,
     windows_dir: String,
     safe_search: bool,
@@ -150,6 +160,7 @@ impl PeContext {
         Self {
             apiset,
             knowndlls: knowndlls::load(),
+            known_sections: Default::default(),
             winsxs: sxs::WinSxs::new(&windows_dir),
             windows_dir,
             safe_search,
@@ -173,6 +184,33 @@ impl PeContext {
             Some(dir) => vec![dir.to_string()],
             None => search_dirs::system_dirs(&self.windows_dir, is_32bit),
         }
+    }
+
+    // The known DLL sections for a 32 or a 64 bit image, built the way smss
+    // does from the registry list and the static imports of the modules on
+    // the known DLLs directory.
+    fn known_dlls(&self, is_32bit: bool) -> &HashSet<String> {
+        self.known_sections[usize::from(is_32bit)].get_or_init(|| {
+            let dirs = self.knowndll_dirs(is_32bit);
+            knowndlls::sections(self.knowndlls.names(), |name| {
+                let deps = dirs
+                    .iter()
+                    .find_map(|dir| static_import_modules(&Path::new(dir).join(name)))?;
+                Some(
+                    deps.into_iter()
+                        .filter_map(|dep| match self.apiset.resolve(&dep, name) {
+                            Some("") => None,
+                            Some(host) => Some(host.to_string()),
+                            None => Some(dep),
+                        })
+                        .collect(),
+                )
+            })
+        })
+    }
+
+    fn is_known_dll(&self, name: &str, is_32bit: bool) -> bool {
+        self.known_dlls(is_32bit).contains(&name.to_lowercase())
     }
 }
 
@@ -255,7 +293,10 @@ fn print_object_information(
             format!("{} sets", ctx.apiset.len())
         }
     ));
-    lines.push(format!("  known dlls: {} modules", ctx.knowndlls.len()));
+    lines.push(format!(
+        "  known dlls: {} modules",
+        ctx.known_dlls(machine::is_32bit(pei.machine)).len()
+    ));
     lines.push(format!(
         "  winsxs: {}",
         if ctx.winsxs.is_empty() {
@@ -329,9 +370,6 @@ struct WorkItem {
     // The directories the loading chain redirects to, searched before the
     // loaded module list.
     redirect: search_dirs::SearchDirs,
-    // Whether the importer is a known DLL, whose own dependencies the loader
-    // also takes from the known DLLs directory.
-    known: bool,
     depp: usize,
     level: usize,
 }
@@ -375,7 +413,6 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
             dep: dep.clone(),
             importing: root_name.clone(),
             redirect: root_sxs.clone(),
-            known: false,
             depp: root_depp,
             level: 1,
         });
@@ -446,7 +483,6 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
                     redirect: item.redirect.clone(),
                     // The forwarded module is a dependency of the module
                     // already on the tree, not of the current importer.
-                    known: entry.mode == DepMode::LdCache,
                     depp: index,
                     level: item.level + 1,
                 });
@@ -456,7 +492,7 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
 
         let found = match redirect {
             Some(found) => Some(found),
-            None => find_dependency(config, &name, item.known, &mut searched),
+            None => find_dependency(config, &name, &mut searched),
         };
         let Some((info, dir, mode)) = found else {
             add_not_found(config, &item, deptree, searched);
@@ -479,13 +515,11 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
             continue;
         }
         let sxs = assembly_dirs(config, &item.redirect, &info.assemblies);
-        let known = item.known || mode == DepMode::LdCache;
         for dep in &info.deps {
             queue.push_back(WorkItem {
                 dep: dep.clone(),
                 importing: name.clone(),
                 redirect: sxs.clone(),
-                known,
                 depp: depd,
                 level: item.level + 1,
             });
@@ -501,7 +535,6 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
                 },
                 importing: name.clone(),
                 redirect: sxs.clone(),
-                known,
                 depp: depd,
                 level: item.level + 1,
             });
@@ -570,7 +603,7 @@ pub fn check_imports(ctx: &PeContext, deptree: &DepTree, delay_load: bool) -> Ve
         let sxs = sxs_dirs(ctx, &info.assemblies, info.machine);
 
         for dep in &info.deps {
-            if !delay_load && dep.attrs.contains(&"delay-load") {
+            if !delay_load && dep.is_delay_load() {
                 continue;
             }
 
@@ -674,11 +707,14 @@ fn find_in_dirs(
 }
 
 // Resolve NAME against the known DLLs and then the search directories, returning th
-// parsed object, the directory it was found at, and the mode.
+// parsed object, the directory it was found at, and the mode.  A known DLL is
+// taken from the known DLLs directory whoever imports it, while any other
+// module, even one a known DLL pulls in through a forwarder or a delay load
+// import, follows the search order (the loader maps an application copy of
+// CRYPTBASE, which advapi32 forwards SystemFunction001 to).
 fn find_dependency(
     config: &Config,
     name: &str,
-    known: bool,
     searched: &mut Vec<String>,
 ) -> Option<(PeInfo, String, DepMode)> {
     // A recorded name with a path component is taken as is.
@@ -689,7 +725,10 @@ fn find_dependency(
         return Some((info, pathutils::get_path(&path)?, DepMode::Direct));
     }
 
-    if known || config.ctx.knowndlls.contains(name) {
+    if config
+        .ctx
+        .is_known_dll(name, machine::is_32bit(config.machine))
+    {
         let known = config.ctx.knowndll_dirs(machine::is_32bit(config.machine));
         let known = known.iter().map(|dir| (dir.as_str(), DepMode::LdCache));
         if let Some(found) = find_in(config, name, known, searched) {
@@ -752,6 +791,32 @@ fn process_manifest(ctx: &PeContext, filename: &Path, pei: &mut PeInfo) {
 fn open_pe_file<P: AsRef<Path>>(filename: &P) -> Result<PeInfo, std::io::Error> {
     let mmap = pathutils::map_file(filename)?;
     parse_object(&mmap).map_err(Error::other)
+}
+
+// The modules the import directory of FILENAME names, without parsing the
+// rest of the object, which is all the known DLL sections need.
+fn static_import_modules(filename: &Path) -> Option<Vec<String>> {
+    fn modules<Pe: ImageNtHeaders>(data: &[u8]) -> Option<Vec<String>> {
+        let file = PeFile::<Pe>::parse(data).ok()?;
+        let mut modules = Vec::new();
+        if let Ok(Some(table)) = file.import_table() {
+            if let Ok(mut descriptors) = table.descriptors() {
+                while let Ok(Some(descriptor)) = descriptors.next() {
+                    if let Some(name) = rva_name(&file, descriptor.name.get(LE)) {
+                        modules.push(String::from_utf8_lossy(name).into_owned());
+                    }
+                }
+            }
+        }
+        Some(modules)
+    }
+
+    let mmap = pathutils::map_file(&filename).ok()?;
+    match FileKind::parse(&*mmap).ok()? {
+        FileKind::Pe32 => modules::<pe::ImageNtHeaders32>(&mmap),
+        FileKind::Pe64 => modules::<pe::ImageNtHeaders64>(&mmap),
+        _ => None,
+    }
 }
 
 fn parse_object(data: &[u8]) -> Result<PeInfo, &'static str> {
@@ -1112,9 +1177,20 @@ mod tests {
 
     #[test]
     fn known_dlls_from_the_registry() {
-        let known = knowndlls::load();
-        assert!(known.contains("KERNEL32.dll"));
-        assert!(!known.contains("rldd-not-a-known.dll"));
+        let ctx = PeContext::new(true);
+        for is_32bit in [false, true] {
+            assert!(ctx.is_known_dll("KERNEL32.dll", is_32bit));
+            // Not on the registry list, but imported by kernel32.
+            assert!(ctx.is_known_dll("ntdll.dll", is_32bit));
+            assert!(ctx.is_known_dll("KernelBase.dll", is_32bit));
+            assert!(!ctx.is_known_dll("rldd-not-a-known.dll", is_32bit));
+        }
+        // The WOW64 layer only exists as 64 bit modules.
+        let system = search_dirs::system_dir(&search_dirs::windows_dir(), false);
+        if Path::new(&system).join("wow64.dll").exists() {
+            assert!(ctx.is_known_dll("wow64.dll", false));
+            assert!(!ctx.is_known_dll("wow64.dll", true));
+        }
     }
 
     #[test]
