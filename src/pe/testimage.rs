@@ -105,6 +105,18 @@ impl Image {
         self.directory(pe::IMAGE_DIRECTORY_ENTRY_IMPORT, &data);
     }
 
+    // The delay load import directory, with the attributes, the name, the
+    // module handle, the address table and the name table of each entry.
+    pub fn delay_imports(&mut self, descriptors: &[[u32; 5]]) {
+        let mut data = Vec::new();
+        for descriptor in descriptors.iter().chain(&[[0; 5]]) {
+            for field in descriptor.iter().chain(&[0, 0, 0]) {
+                data.extend_from_slice(&field.to_le_bytes());
+            }
+        }
+        self.directory(pe::IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT, &data);
+    }
+
     pub fn build(&self) -> Vec<u8> {
         let (optional, dirs_at, image_base_at) = match self.pe64 {
             true => (240usize, 112usize, 24usize),

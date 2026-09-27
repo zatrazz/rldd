@@ -122,6 +122,9 @@ const ISOLATIONAWARE_MANIFEST_RESOURCE_ID: u16 = 2;
 // system modules stay well under 1 MiB.
 const NAMES_BUDGET: usize = 16 << 20;
 
+// The delay load descriptor attribute of the RVA based layout.
+const DLATTR_RVA: u32 = 1;
+
 // The longest symbol or module name read, the MSVC limit on a decorated name.
 const MAX_NAME: usize = 4096;
 
@@ -1014,39 +1017,55 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
         if let Ok(mut descriptors) = table.descriptors() {
             while let Ok(Some(descriptor)) = descriptors.next() {
                 if let Some(name) = rva_name(&file, descriptor.name.get(LE)) {
-                    // The import name table holds the names, and is only
-                    // absent on the old bound objects.
-                    let thunks = match descriptor.original_first_thunk.get(LE) {
-                        0 => descriptor.first_thunk.get(LE),
-                        rva => rva,
-                    };
                     // A non zero timestamp means the imports were bound at
                     // link time.
+                    let bound = descriptor.time_date_stamp.get(LE) != 0;
                     let mut attrs = Vec::new();
-                    if descriptor.time_date_stamp.get(LE) != 0 {
+                    if bound {
                         attrs.push("bound");
                     }
+                    // The import name table holds the names.  The objects
+                    // of the old Borland linkers have none, and the loader
+                    // reads the names from the address table then, which
+                    // holds the addresses the names resolved to instead when
+                    // the object was bound, leaving no name to read.
+                    let thunks = match descriptor.original_first_thunk.get(LE) {
+                        0 if bound => None,
+                        0 => Some(descriptor.first_thunk.get(LE)),
+                        rva => Some(rva),
+                    };
+                    let imports = thunks.map(|rva| import_names::<Pe>(&file, rva, 0, &mut budget));
                     pei.deps.push(PeDep {
                         name: String::from_utf8_lossy(name).into_owned(),
                         attrs,
-                        imports: import_names::<Pe>(&file, thunks, &mut budget),
+                        imports: imports.unwrap_or_default(),
                     });
                 }
             }
         }
     }
 
-    // The delay load imports are only resolved on the first call.
+    // The delay load imports are only resolved on the first call.  The
+    // descriptors the Visual C++ 6 linker wrote lack the dlattrRva attribute
+    // and hold virtual addresses instead of RVAs, and so do the thunks of
+    // their name tables (delayimp.h).
     if let Ok(Some(table)) = file.delay_load_import_table() {
+        let image_base = headers.optional_header().image_base();
         if let Ok(mut descriptors) = table.descriptors() {
             while let Ok(Some(descriptor)) = descriptors.next() {
-                if let Some(name) = rva_name(&file, descriptor.dll_name_rva.get(LE)) {
+                let base = match descriptor.attributes.get(LE) & DLATTR_RVA {
+                    0 => image_base,
+                    _ => 0,
+                };
+                let rva = |address: u32| u64::from(address).wrapping_sub(base) as u32;
+                if let Some(name) = rva_name(&file, rva(descriptor.dll_name_rva.get(LE))) {
                     pei.deps.push(PeDep {
                         name: String::from_utf8_lossy(name).into_owned(),
                         attrs: vec!["delay-load"],
                         imports: import_names::<Pe>(
                             &file,
-                            descriptor.import_name_table_rva.get(LE),
+                            rva(descriptor.import_name_table_rva.get(LE)),
+                            base,
                             &mut budget,
                         ),
                     });
@@ -1278,9 +1297,12 @@ fn spend(budget: &mut usize, cost: usize) -> bool {
     }
 }
 
+// The names of the thunk array at RVA, whose entries are virtual addresses
+// when BASE, the image base they are relative to, is not zero.
 fn import_names<Pe: ImageNtHeaders>(
     file: &PeFile<Pe>,
     rva: u32,
+    base: u64,
     budget: &mut usize,
 ) -> Vec<ImportName> {
     let mut names = Vec::new();
@@ -1301,7 +1323,11 @@ fn import_names<Pe: ImageNtHeaders>(
         }
         // The thunk points at the hint/name entry, with the name following the
         // two bytes hint.
-        let Some(name) = rva_name(file, thunk.address().wrapping_add(2)) else {
+        let address = match base {
+            0 => thunk.address(),
+            base => thunk.raw().wrapping_sub(base) as u32,
+        };
+        let Some(name) = rva_name(file, address.wrapping_add(2)) else {
             break;
         };
         if !spend(budget, std::mem::size_of::<ImportName>() + name.len()) {
@@ -2069,6 +2095,61 @@ mod tests {
             machine(hybrid_image(amd64, false, Some((1, &[arm64x])))),
             amd64
         );
+    }
+
+    fn import_list(dep: &PeDep) -> Vec<String> {
+        dep.imports.iter().map(ImportName::to_string).collect()
+    }
+
+    // The Visual C++ 6 delay load descriptors hold virtual addresses, in the
+    // name table too, while the current ones hold RVAs.
+    #[test]
+    fn delay_load_layouts() {
+        for (attributes, pe64) in [(0, false), (DLATTR_RVA, false), (DLATTR_RVA, true)] {
+            let mut image = testimage::Image::dll(pe::IMAGE_FILE_MACHINE_I386, pe64);
+            image.image_base = 0x40_0000;
+            let base = match attributes {
+                0 => image.image_base,
+                _ => 0,
+            };
+            let va = |rva: u32| (u64::from(rva) + base) as u32;
+            let func = image.hint_name(b"Func");
+            let ordinal = match pe64 {
+                true => pe::IMAGE_ORDINAL_FLAG64 | 5,
+                false => u64::from(pe::IMAGE_ORDINAL_FLAG32 | 5),
+            };
+            let names = image.thunks(&[u64::from(va(func)), ordinal]);
+            let module = image.string(b"old.dll");
+            image.delay_imports(&[[attributes, va(module), 0, 0, va(names)]]);
+            let pei = parse_object(&image.build()).unwrap();
+            assert_eq!(pei.deps.len(), 1, "attributes {attributes}");
+            assert_eq!(pei.deps[0].name, "old.dll");
+            assert!(pei.deps[0].is_delay_load());
+            assert_eq!(import_list(&pei.deps[0]), ["Func", "#5"]);
+        }
+    }
+
+    // Without an import name table the names are read from the address
+    // table, unless the imports were bound, which leaves addresses there.
+    #[test]
+    fn imports_without_name_table() {
+        let mut image = testimage::Image::exe(pe::IMAGE_FILE_MACHINE_AMD64, true);
+        let func = image.hint_name(b"Func");
+        let names = image.thunks(&[u64::from(func)]);
+        let addresses = image.thunks(&[0x7ff8_1234_5678]);
+        let module = image.string(b"m.dll");
+        image.imports(&[
+            [0, 0, module, names],
+            [0, u32::MAX, module, addresses],
+            [names, u32::MAX, module, addresses],
+        ]);
+        let pei = parse_object(&image.build()).unwrap();
+        assert_eq!(pei.deps.len(), 3);
+        assert_eq!(import_list(&pei.deps[0]), ["Func"]);
+        assert!(pei.deps[0].attrs.is_empty());
+        assert!(pei.deps[1].imports.is_empty());
+        assert_eq!(pei.deps[1].attrs, ["bound"]);
+        assert_eq!(import_list(&pei.deps[2]), ["Func"]);
     }
 
     #[test]
