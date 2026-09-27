@@ -105,6 +105,10 @@ struct ElfInfo {
     filters: DepsVec,
     nodeflibs: bool,
     is_musl: bool,
+    // The $LIB expansion of the glibc loader resolving the input object,
+    // handed down to every object it loads.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    dst_lib: Option<String>,
     // The $ORIGIN expansion, None when the directory is not valid UTF-8.
     origin: Option<String>,
     // The search list entries and the dependencies dropped because of a
@@ -260,6 +264,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
             has_needed,
             filters: DepsVec::new(),
             is_musl: false,
+            dst_lib: None,
             origin: None,
             unexpanded: Vec::new(),
         });
@@ -453,7 +458,7 @@ fn open_elf_file<P: AsRef<Path>>(
     }
 
     elc.origin = Rtld::origin_directory(filename, melc);
-    Rtld::handle_loader(&mut elc);
+    Rtld::handle_loader(&mut elc, melc);
     // The tokens of the input object are expanded by the caller, once its
     // loader is known.
     if melc.is_some() {
@@ -669,6 +674,12 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
     } else {
         search_path::SearchPathVec::new()
     };
+
+    // The $LIB expansion is built into the glibc loader.
+    #[cfg(target_os = "linux")]
+    if !elc.is_musl {
+        elc.dst_lib = system_dirs::get_dst_lib(loader.as_deref(), &elc);
+    }
 
     expand_object(&mut elc, ctx.platform.as_ref());
 
@@ -1218,6 +1229,7 @@ fn open_root_elf(deptree: &DepTree) -> Option<ElfInfo> {
     let root = deptree.arena.first()?;
     let path = deptree_node_path(&root.val)?;
     let mut elc = open_elf_file(&path, None, None, false).ok()?;
+    elc.dst_lib = system_dirs::get_dst_lib(elc.interp.as_deref(), &elc);
     expand_object(&mut elc, None);
     Some(elc)
 }

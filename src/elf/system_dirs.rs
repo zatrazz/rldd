@@ -115,33 +115,81 @@ fn get_musl_system_dirs(interp: &Option<String>) -> search_path::SearchPathVec {
     search_path::fixed_list(["/lib", "/usr/local/lib", "/usr/lib"])
 }
 
+// The configuration built into a glibc loader, read from its file.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Default)]
+struct LoaderStrings {
+    // The system directories.
+    system_dirs: Option<Vec<String>>,
+    // The $LIB expansion (DL_DST_LIB).
+    dst_lib: Option<String>,
+}
+
 // The loader keep the configured system directories in a static array of NUL
 // separated absolute directories each ending with a slash.  The result is kep
 // for the next object using the same loader.
 #[cfg(target_os = "linux")]
-fn loader_system_dirs(loader: &str) -> Option<Vec<String>> {
+fn loader_strings(loader: &str) -> LoaderStrings {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    static CACHE: Mutex<Option<HashMap<String, Option<Vec<String>>>>> = Mutex::new(None);
-    let mut cache = CACHE.lock().ok()?;
+    static CACHE: Mutex<Option<HashMap<String, LoaderStrings>>> = Mutex::new(None);
+    let Ok(mut cache) = CACHE.lock() else {
+        return LoaderStrings::default();
+    };
     let cache = cache.get_or_insert_with(HashMap::new);
-    if let Some(dirs) = cache.get(loader) {
-        return dirs.clone();
-    }
-    let dirs = read_loader_system_dirs(loader);
-    cache.insert(loader.to_string(), dirs.clone());
-    dirs
+    cache
+        .entry(loader.to_string())
+        .or_insert_with(|| read_loader_strings(loader).unwrap_or_default())
+        .clone()
 }
 
 #[cfg(target_os = "linux")]
-fn read_loader_system_dirs(loader: &str) -> Option<Vec<String>> {
+fn read_loader_strings(loader: &str) -> Option<LoaderStrings> {
     use object::{Object, ObjectSection};
 
     let mmap = crate::pathutils::map_file(&loader).ok()?;
     let object = object::File::parse(&*mmap).ok()?;
     let section = object.section_by_name(".rodata")?;
-    system_dirs_in(section.data().ok()?)
+    let data = section.data().ok()?;
+    let system_dirs = system_dirs_in(data);
+    // The first system directory is the slibdir the loader was built with.
+    let dst_lib = system_dirs
+        .as_ref()
+        .and_then(|dirs| dirs.first())
+        .and_then(|slibdir| dst_lib_in(data, slibdir));
+    Some(LoaderStrings {
+        system_dirs,
+        dst_lib,
+    })
+}
+
+// The glibc build sets the $LIB expansion (DL_DST_LIB) to the last component
+// of the slibdir (lib64, or lp64d for /lib64/lp64d on RISC-V), while some
+// distributions set their own one (lib/x86_64-linux-gnu on Debian).  Find the
+// longest trailing part of SLIBDIR that DATA holds as a string of its own.
+#[cfg(target_os = "linux")]
+fn dst_lib_in(data: &[u8], slibdir: &str) -> Option<String> {
+    let dir = slibdir.trim_matches('/');
+    let mut candidates = vec![dir];
+    candidates.extend(dir.match_indices('/').map(|(i, _)| &dir[i + 1..]));
+    candidates
+        .into_iter()
+        .filter(|candidate| !candidate.is_empty())
+        .find(|candidate| data.split(|&b| b == 0).any(|s| s == candidate.as_bytes()))
+        .map(str::to_string)
+}
+
+// The $LIB expansion of the glibc LOADER for the ELC object, or without a
+// loader to read the upstream default for its architecture (the last
+// component of the slibdir).
+#[cfg(target_os = "linux")]
+pub fn get_dst_lib(loader: Option<&str>, elc: &ElfInfo) -> Option<String> {
+    if let Some(dst_lib) = loader.and_then(|loader| loader_strings(loader).dst_lib) {
+        return Some(dst_lib);
+    }
+    let slibdir = get_slibdir(elc.e_machine, elc.ei_class, elc.e_flags).ok()?;
+    slibdir.rsplit('/').next().map(str::to_string)
 }
 
 // Extract the longest run of consecutive NUL terminated strings which
@@ -189,7 +237,7 @@ pub fn get_system_dirs(
     if elc.is_musl {
         return Ok(get_musl_system_dirs(&elc.interp));
     }
-    if let Some(dirs) = loader.and_then(loader_system_dirs) {
+    if let Some(dirs) = loader.and_then(|loader| loader_strings(loader).system_dirs) {
         use crate::search_path::SearchPathVecExt;
         let mut r = search_path::SearchPathVec::new();
         for dir in dirs {
@@ -405,7 +453,26 @@ mod solaris_tests {
 
 #[cfg(all(test, target_os = "linux"))]
 mod system_dirs_tests {
-    use super::system_dirs_in;
+    use super::{dst_lib_in, system_dirs_in};
+
+    #[test]
+    fn dst_lib_of_the_loader() {
+        // The Debian loader: the whole relative slibdir, which also holds
+        // the architecture triplet as its tail.
+        let data = b"ORIGIN\0PLATFORM\0LIB\0lib/x86_64-linux-gnu\0/lib/x86_64-linux-gnu/\0";
+        assert_eq!(
+            dst_lib_in(data, "/lib/x86_64-linux-gnu").as_deref(),
+            Some("lib/x86_64-linux-gnu")
+        );
+        // The upstream build: the last component of the slibdir.
+        let data = b"ORIGIN\0PLATFORM\0LIB\0lp64d\0/lib64/lp64d/\0/usr/lib64/lp64d/\0";
+        assert_eq!(dst_lib_in(data, "/lib64/lp64d").as_deref(), Some("lp64d"));
+        let data = b"LIB\0lib64\0/lib64/\0/usr/lib64/\0";
+        assert_eq!(dst_lib_in(data, "/lib64").as_deref(), Some("lib64"));
+        // Only a string of its own matches.
+        assert_eq!(dst_lib_in(b"/lib64/\0xlib64\0", "/lib64"), None);
+        assert_eq!(dst_lib_in(b"\0\0", "/"), None);
+    }
 
     #[test]
     fn run_of_directories() {

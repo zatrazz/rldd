@@ -41,7 +41,10 @@ impl Loader for Linux {
         Vec::new()
     }
 
-    fn handle_loader(elc: &mut ElfInfo) {
+    fn handle_loader(elc: &mut ElfInfo, melc: Option<&ElfInfo>) {
+        if let Some(melc) = melc {
+            elc.dst_lib = melc.dst_lib.clone();
+        }
         elc.is_musl = interp::is_musl(&elc.interp)
             || elc
                 .needed
@@ -102,8 +105,12 @@ impl Loader for Linux {
         let platform = platform
             .map(String::as_str)
             .or_else(|| platform::get(elc.e_machine, elc.ei_data));
-        let lib = system_dirs::get_slibdir(elc.e_machine, elc.ei_class, elc.e_flags).ok();
-        glibc_expand(input, elc.origin.as_deref(), platform, lib)
+        glibc_expand(
+            input,
+            elc.origin.as_deref(),
+            platform,
+            elc.dst_lib.as_deref(),
+        )
     }
 
     // musl loader and libc is on the same shared object, so adds a synthetic dependendy for

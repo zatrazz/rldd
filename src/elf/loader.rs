@@ -70,8 +70,9 @@ pub(super) trait Loader {
         Vec::new()
     }
 
-    // Record the loader specific flavor of the parsed object.
-    fn handle_loader(_elc: &mut ElfInfo) {}
+    // Record the loader specific flavor of the parsed object, handed down
+    // from MELC, the object loading it (None for the input object).
+    fn handle_loader(_elc: &mut ElfInfo, _melc: Option<&ElfInfo>) {}
 
     // Adjust the DT_RPATH and DT_RUNPATH of the parsed object.
     fn handle_search_paths(_elc: &mut ElfInfo) {}
