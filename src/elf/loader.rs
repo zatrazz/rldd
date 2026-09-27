@@ -7,13 +7,14 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 
+// The BSD and illumos rules are also built for the Linux tests, which check
+// them.
 #[cfg(target_os = "android")]
 mod android;
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "freebsd", all(test, target_os = "linux")))]
 mod freebsd;
 #[cfg(target_os = "linux")]
 mod linux;
-// The BSD rules are also built for the Linux tests, which check them.
 #[cfg(any(target_os = "netbsd", all(test, target_os = "linux")))]
 mod netbsd;
 #[cfg(any(target_os = "openbsd", all(test, target_os = "linux")))]
@@ -348,9 +349,10 @@ fn canonical_origin_directory<P: AsRef<Path>>(filename: &P) -> Option<String> {
     path.parent().and_then(Path::to_str).map(str::to_string)
 }
 
-// The string value of the NAME sysctl, where the NetBSD loader takes the
-// values of some dynamic string tokens from (_rtld_expand_path).
-#[cfg(target_os = "netbsd")]
+// The string value of the NAME sysctl, where the FreeBSD and NetBSD loaders
+// take the values of some dynamic string tokens from (uname(3) and
+// _rtld_expand_path).
+#[cfg(any(target_os = "freebsd", target_os = "netbsd"))]
 fn sysctl_string(name: &std::ffi::CStr) -> Option<String> {
     use std::ffi::{c_char, c_int, c_void};
     extern "C" {

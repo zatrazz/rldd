@@ -586,7 +586,7 @@ struct Config<'a> {
     system_dirs: search_path::SearchPathVec,
     platform: Option<&'a String>,
     all: bool,
-    #[cfg(target_os = "freebsd")]
+    #[cfg(any(target_os = "freebsd", all(test, target_os = "linux")))]
     libmap: Option<ld_libmap_freebsd::LibMap>,
 }
 
@@ -895,6 +895,8 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
         all: ctx.all,
         #[cfg(target_os = "freebsd")]
         libmap: ld_libmap_freebsd::parse_libmap(&Path::new("/etc/libmap.conf")),
+        #[cfg(all(test, target_os = "linux"))]
+        libmap: None,
     };
 
     if ctx.verbose {
