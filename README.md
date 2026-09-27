@@ -762,8 +762,12 @@ where that table holds addresses and the imports are left unread.
 
 The `api-ms-` and `ext-ms-` virtual names are resolved with the API set schema
 from `apisetschema.dll` and printed as `NAME -> HOST`, with the module that
-implements them.  A set that implements nothing on the running system is
-reported as not found.
+implements them.  The extension schemas registered under the
+ApiSetSchemaExtensions key of the Session Manager are merged into it the way
+the kernel does at boot: they supply the hosts of the sets the base schema does
+not seal (the Hyper-V ones, for instance), and the `-v` option prints how many
+were merged.  A set that implements nothing on the running system is reported
+as not found.
 
 The search order is the application directory, the `--library-path`
 directories, the system directory, the 16-bit system directory, the Windows
@@ -783,7 +787,9 @@ searched location).
 The known DLLs are the sections smss creates at boot on the \KnownDlls object
 directory (\KnownDlls32 for the 32-bit images): the modules of the KnownDLLs
 registry key along with every module their static imports pull in, with the
-API sets resolved.  They are always resolved from the known DLLs directory
+API sets resolved, less the modules the ExcludeFromKnownDlls value of the
+Session Manager lists (whose imports are not followed either).  They are
+always resolved from the known DLLs directory
 (the system directory, or the expanded DllDirectory and DllDirectory32
 registry values), regardless of the search order, and printed as
 `[KnownDLLs]`.  A module a known DLL only pulls in through a delay load import
@@ -834,10 +840,22 @@ parsed as XML: the comments and the CDATA sections are skipped, the namespace
 prefixes dropped, the entities expanded, and UTF-8 and UTF-16 are read with or
 without a byte order mark.  The WinSxS directory names the store shortens (a
 name over 40 characters kept as its first and last 19 around a `..`, and a
-language over 8 as its first and last 3) are matched.  If the publisher policy
-is not read, the highest installed build for the requested major and minor
+language over 8 as its first and last 3) are matched.  The publisher policy is
+not read: the highest installed build for the requested major and minor
 version is used.  The side-by-side redirection does not apply to an import
 name with a path.
+
+A module name is looked up, after the `.local` directory, in the activation
+context active for the import (the one of the importing module when it has a
+resource 2 manifest, even one that asks for nothing, and otherwise the one
+active for the module that loaded it), then in the context of the process,
+and at last in the system default activation context.  The system default
+context redirects comctl32 to the version 5.82 common controls assembly and
+gdiplus to the version 1.1 one, even for an executable without a manifest, so
+those modules are printed as `[side-by-side]`; rldd asks the running system for
+it, for the architecture of the image.  A forwarded module takes the context of
+the forwarding one.  An import of comctl32 by the absolute System32 path, which
+the loader also redirects to the system default context, is not modelled.
 
 When a `.local` directory exists, the dependencies are taken from it, and when
 it is a plain file, they are taken from the application directory.  The
@@ -846,10 +864,9 @@ or the external file), unless the DevOverrideEnable value of the Image File
 Execution Options key is set, and it applies to the base name of an import
 name with a path as well.
 
-The system default activation context (the loader maps comctl32 and gdiplus
-from WinSxS even for an executable without a manifest), the API set schema
-extensions, the application compatibility shims, and the ExcludeFromKnownDlls
-registry value are not supported.
+The application compatibility shims (apphelp.dll, AcLayers.dll, and the
+modules they pull in for the executables the compatibility database lists) are
+not supported.
 
 Since the recursive listing of a system binary expands to most of the system
 directory, only the direct dependencies are printed by default, and the tree
@@ -954,7 +971,8 @@ The suites below compare rldd with the reference tool of each system on a real
 installation.  Each one always builds rldd before the run (a no-op when it is
 up to date), so a stale binary is never tested.  The Android, macOS, Linux, and
 BSD ones report a crash (a panic, or rldd killed by a signal) as a failure, and
-the Windows one a panic, or an error on an object dumpbin reads.
+the Windows one a crash (a panic, or rldd killed by an exception, such as a
+stack overflow) or an error on an object dumpbin reads.
 
 Its configuration parser aside, the Android backend is only compiled when cross
 building and needs a real system image to be exercised.  The device test suite
@@ -986,9 +1004,9 @@ directory and compares the dependency names with `dumpbin /dependents`.  With
 `-Paths` it also starts every executable of the sweep under the debugger, up to
 the initial loader breakpoint, and compares the modules the loader maps with
 the paths rldd resolves the static dependencies to, each run bounded by
-`-Timeout`.  What rldd does not model (the modules the loader maps on its own,
-the compatibility shims, and the system default activation context) is counted
-apart, and `-Verbose` lists every failure:
+`-Timeout`.  What rldd does not model (the modules the loader maps on its own
+and the compatibility shims) is counted apart, and `-Verbose` lists every
+failure:
 
 ```
 tests\windows\run.ps1

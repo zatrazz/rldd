@@ -62,6 +62,14 @@ All notable changes to this project will be documented in this file.
   32-bit ARM image has SysArm32 as its system directory.
 - PE: a .NET image gets the `mscoree.dll` dependency the loader maps for it,
   with the `clr` attribute, when its imports do not record it.
+- PE: the API set schema extensions registered under the
+  ApiSetSchemaExtensions key are merged into the base schema, like the kernel
+  does at boot, so the sets they host (the Hyper-V ones) resolve; `-v` prints
+  how many were merged.
+- PE: the system default activation context, which redirects comctl32 to the
+  version 5.82 common controls and gdiplus to the version 1.1 assembly even
+  without a manifest, is taken from the running system for the architecture
+  of the image.
 - The options that take a value accept the `--option=value` form.
 - `-h` prints the usage, like `--help`.
 - The package declares its minimum supported Rust version (1.88), so an older
@@ -76,7 +84,9 @@ All notable changes to this project will be documented in this file.
 - The `-Paths` option of the Windows test suite, which starts every executable
   of the sweep under the debugger up to the initial loader breakpoint, and
   compares the modules the loader maps with the paths rldd resolves, along
-  with `-Timeout` to bound each run.
+  with `-Timeout` to bound each run.  The suite also reports an rldd killed by
+  an exception (a stack overflow, an access violation, or a fast fail) as a
+  crash.
 - The configuration parsers of the Android and the BSD backends, and the
   loader rules of the FreeBSD, OpenBSD, NetBSD, and illumos ones, are also
   built for the Linux tests, so `cargo test` and the CI run their unit tests.
@@ -157,11 +167,17 @@ All notable changes to this project will be documented in this file.
   with the API sets resolved (ntdll, kernelbase, and ucrtbase among them).  A
   module a known DLL only pulls in through a delay load import or a forwarder
   follows the search order instead of being taken from the known DLLs
-  directory.
+  directory.  The modules the ExcludeFromKnownDlls value lists are left out,
+  along with their imports.
 - PE: the manifest is the one the loader activates: for the executable, its
   resource 1, the external `<name>.exe.manifest` file, or its resource 2, only
   one of them (the PreferExternalManifest value puts the external file first),
   and for a DLL its resource 2 alone.
+- PE: a module name is looked up in the activation contexts in the loader
+  order: the one active for the import (the importing module's resource 2
+  manifest, or else the one of the module that loaded it), then the process
+  context, and at last the system default one.  A forwarded module takes the
+  context of the forwarding one.
 - PE: the `.local` redirection is ignored when the process starts with a
   manifest, unless the DevOverrideEnable value is set.
 - PE: `--library-path` removes the current directory from the search order,

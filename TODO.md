@@ -57,23 +57,25 @@
 - [ ] Side-by-side: read the Win32 publisher policy.  The highest installed build of the requested major and minor version is used instead, and a Windows 11 install carries no Win32 policy assembly to check it against (the `*_policy.*` ones on WinSxS are managed assemblies).
 - [ ] The package dependency graph of a packaged application.
 - [ ] API set schema version 4 (Windows 8.1), only version 6 is parsed.
-- [ ] The system default activation context: the loader maps comctl32 from
-      the version 5.82 assembly of WinSxS, and gdiplus from the version 1.1
-      one, even for an executable without a manifest, while rldd takes them
-      from the search order (the WinSxS manifests of the context are
-      compressed).
-- [ ] The API set schema extensions, which add sets to the apisetschema.dll
-      ones.
 - [ ] The application compatibility shims, which the loader maps (apphelp.dll,
       AcLayers.dll and the modules they pull in) for the executables the
       compatibility database lists.
-- [ ] The ExcludeFromKnownDlls registry value, which removes modules from the
-      known DLLs.
+- [ ] An import of comctl32 by its absolute System32 path, which the loader
+      also redirects to the system default activation context.
+- [ ] Check the ExcludeFromKnownDlls handling on a system where the value is
+      set (it follows the ReactOS smss and the unit tests only).
+- [ ] Check the value layout of an API set schema extension that carries an
+      alias (none on the systems tested).
 - [ ] Check the known DLL directories on an ARM64 host for the x86 (CHPE) and
       the 32-bit ARM images, which are unverified.
 
 
 ## Done
+
+- [x] PE: Resolve through the system default activation context, and look the
+      module names up in the activation contexts in the loader order.
+- [x] PE: Merge the API set schema extensions into the base schema.
+- [x] PE: Leave the ExcludeFromKnownDlls modules out of the known DLLs.
 
 - [x] PE: Follow the export forwarders, including for the modules already
       resolved through another importer, and the forwarder chains.
