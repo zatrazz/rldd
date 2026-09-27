@@ -965,7 +965,20 @@ fn resolve_dependencies(
     // The already loaded objects, the input one first.
     let mut parents: Vec<LoadedObject> = Vec::new();
     // The tree nodes of the objects found, looked up by name.
+    #[cfg(not(target_os = "android"))]
     let mut found = FoundIndex::default();
+    // The Android linker only looks up the objects its namespaces loaded,
+    // where the input object is on all of them.
+    #[cfg(target_os = "android")]
+    let mut namespaces = android::LoadedObjects::default();
+    #[cfg(target_os = "android")]
+    namespaces.record(
+        &None,
+        true,
+        root_elc.soname.as_deref(),
+        fs::metadata(&root_refpath).ok().map(|m| (m.dev(), m.ino())),
+        root_depp,
+    );
     // The tree node of the first object loaded with each soname, and with
     // each device and inode.
     let mut sonames: HashMap<String, usize> = HashMap::new();
@@ -1125,6 +1138,7 @@ fn resolve_dependencies(
         // A dependency referring back to the root object by its path is
         // resolved too, since the loader records the name on it and the
         // trace lists it once.
+        #[cfg(not(target_os = "android"))]
         let loaded = found.find(deptree, dependency);
         #[cfg(target_os = "linux")]
         let loaded = loaded.or_else(|| {
@@ -1133,6 +1147,14 @@ fn resolve_dependencies(
             }
             sonames.get(dependency.as_str()).copied()
         });
+        // The Android linker looks the objects up and searches the name on
+        // the namespaces the requesting object sees (loader/android.rs).
+        #[cfg(target_os = "android")]
+        let (loaded, resolved) =
+            match Rtld::find_library(config, &namespaces, elc, namespace, dependency) {
+                loader::Lookup::Loaded(node) => (Some(node), None),
+                loader::Lookup::Search(resolved) => (None, *resolved),
+            };
         if let Some(node) = loaded {
             let entry = deptree.arena[node].val.clone();
             deptree.add_repeated(
@@ -1167,7 +1189,7 @@ fn resolve_dependencies(
             } else {
                 resolve_dependency_1(dependency, config, elc, namespace, item.preload)
             };
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         let resolved = resolve_dependency_1(dependency, config, elc, namespace, item.preload);
         let mut dep = match resolved {
             Some(Ok(dep)) => dep,
@@ -1215,8 +1237,10 @@ fn resolve_dependencies(
         // (through a symlink) by its device and inode, and record the new
         // name on the loaded object instead of loading it again.  The input
         // object is not recorded (the glibc loader has no file identity for
-        // the executable it runs).
+        // the executable it runs).  The Android linker only looks them up on
+        // the namespaces (Android::find_library).
         let file_id = fs::metadata(&depref).ok().map(|m| (m.dev(), m.ino()));
+        #[cfg(not(target_os = "android"))]
         if let Some(node) = file_id.and_then(|id| file_ids.get(&id)) {
             let entry = deptree.arena[*node].val.clone();
             deptree.add_repeated(
@@ -1233,6 +1257,15 @@ fn resolve_dependencies(
         if let Some(soname) = &dep.elc.soname {
             sonames.entry(soname.clone()).or_insert(c);
         }
+        // The linker adds the preloaded objects to every namespace.
+        #[cfg(target_os = "android")]
+        namespaces.record(
+            &dep.namespace,
+            item.preload && item.parent == 0,
+            dep.elc.soname.as_deref(),
+            file_id,
+            c,
+        );
 
         // The DT_RPATH scope used for the indirect dependencies is system
         // specific: the glibc loader searches the object own DT_RPATH and
@@ -1353,6 +1386,9 @@ fn subdir_path(dir: &str, subdir: &str) -> String {
     format!("{}/{subdir}", dir.strip_suffix('/').unwrap_or(dir))
 }
 
+// The Android dependencies are searched on the linker namespaces instead
+// (Android::find_library).
+#[cfg_attr(target_os = "android", allow(dead_code))]
 fn resolve_dependency_1<'a>(
     dtneeded: &'a String,
     config: &'a Config,

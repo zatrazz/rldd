@@ -1,4 +1,4 @@
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
@@ -149,8 +149,9 @@ impl DepTree {
 // search path list by their leaf name, and any other one by its name, or by
 // its full path for an absolute name.  It is updated with the nodes added
 // since the previous lookup, in tree order, so the first node matching a name
-// is the one found.
-#[cfg(all(unix, not(target_os = "macos")))]
+// is the one found.  The Android linker only looks up the objects of the
+// namespaces instead.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
 #[derive(Default)]
 pub struct FoundIndex {
     // The number of tree nodes already indexed.
@@ -163,7 +164,7 @@ pub struct FoundIndex {
     leaves: HashMap<String, usize>,
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
 impl FoundIndex {
     fn update(&mut self, deptree: &DepTree) {
         for (idx, node) in deptree.arena.iter().enumerate().skip(self.indexed) {
@@ -348,7 +349,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, unix, not(target_os = "macos")))]
+#[cfg(all(test, unix, not(any(target_os = "macos", target_os = "android"))))]
 mod found_index_tests {
     use super::arenatree::EqualString;
     use super::*;

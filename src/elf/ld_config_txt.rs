@@ -44,24 +44,6 @@ pub struct NamespaceConfig {
 }
 
 impl NamespaceConfig {
-    // The name part of the bionic android_namespace_t::is_accessible: an
-    // isolated namespace with an allowed_libs list only loads the names on
-    // it.
-    pub fn is_accessible<S: AsRef<str>>(&self, file: S) -> bool {
-        if !self.isolated {
-            return true;
-        }
-
-        if !self.allowed_libs.is_empty() && !self.allowed_libs.contains(&file.as_ref().to_string())
-        {
-            return false;
-        }
-
-        // The loader cache resolution will check the search_path and fail if it is not
-        // found.
-        true
-    }
-
     // The bionic android_namespace_t::is_accessible, which the loader applies
     // to the real path of every file a namespace loads (a DT_RUNPATH hit, or
     // a DT_NEEDED with a slash, included).  An isolated namespace only loads

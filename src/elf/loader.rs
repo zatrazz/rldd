@@ -22,7 +22,7 @@ mod openbsd;
 mod solaris;
 
 #[cfg(target_os = "android")]
-pub(super) use android::Android as Rtld;
+pub(super) use android::{Android as Rtld, Lookup};
 #[cfg(target_os = "freebsd")]
 pub(super) use freebsd::FreeBsd as Rtld;
 #[cfg(target_os = "linux")]

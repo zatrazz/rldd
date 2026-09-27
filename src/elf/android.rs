@@ -5,6 +5,7 @@ use std::fmt;
 #[cfg(target_os = "android")]
 use std::io::Error;
 
+use crate::elf::ld_config_txt::{LdCache, NamespaceLink};
 use crate::pathutils;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -225,11 +226,215 @@ pub fn runpath_list(
         .collect()
 }
 
+// The namespace an ld.config.txt link names, None for the default one (the
+// key the objects are recorded with).
+pub fn namespace_key(name: &str) -> Option<String> {
+    (name != "default").then(|| name.to_string())
+}
+
+// An object loaded on a linker namespace.
+struct NamespaceObject {
+    // The namespace it was loaded on, None for the default one.
+    namespace: Option<String>,
+    // Whether it is on every namespace: the linker adds the executable and
+    // the LD_PRELOAD objects to all the namespaces of the configuration.
+    global: bool,
+    // The DT_SONAME the dependency names are matched against: an object
+    // without one is only matched by its file.
+    soname: Option<String>,
+    file_id: Option<(u64, u64)>,
+    // The dependency tree node.
+    node: usize,
+}
+
+// The objects the linker namespaces loaded, looked up the way the linker
+// looks up the soinfo list of each namespace.
+#[derive(Default)]
+pub struct LoadedObjects {
+    objects: Vec<NamespaceObject>,
+}
+
+impl LoadedObjects {
+    pub fn record(
+        &mut self,
+        namespace: &Option<String>,
+        global: bool,
+        soname: Option<&str>,
+        file_id: Option<(u64, u64)>,
+        node: usize,
+    ) {
+        self.objects.push(NamespaceObject {
+            namespace: namespace.clone(),
+            global,
+            soname: soname.map(str::to_string),
+            file_id,
+            node,
+        });
+    }
+
+    fn on<'a>(
+        &'a self,
+        namespace: &'a Option<String>,
+    ) -> impl Iterator<Item = &'a NamespaceObject> {
+        self.objects
+            .iter()
+            .filter(move |object| object.global || object.namespace == *namespace)
+    }
+
+    // The bionic find_loaded_library_by_soname: the node of the object NAME
+    // matches on NAMESPACE of the CACHE configuration, or with SEARCH_LINKED
+    // on the namespaces it links to whose link shares NAME.  A name with a
+    // slash is not matched.
+    pub fn find_by_soname(
+        &self,
+        cache: Option<&LdCache>,
+        namespace: &Option<String>,
+        name: &str,
+        search_linked: bool,
+    ) -> Option<usize> {
+        if name.contains('/') {
+            return None;
+        }
+        let find = |namespace: &Option<String>| {
+            self.on(namespace)
+                .find(|object| object.soname.as_deref() == Some(name))
+                .map(|object| object.node)
+        };
+        find(namespace).or_else(|| {
+            if !search_linked {
+                return None;
+            }
+            links(cache, namespace)
+                .iter()
+                .filter(|link| link.is_accessible(name))
+                .find_map(|link| find(&namespace_key(&link.namespace)))
+        })
+    }
+
+    // The bionic find_loaded_library_by_inode: the node of the object loaded
+    // from FILE_ID on NAMESPACE, or with SEARCH_LINKED on the namespaces it
+    // links to whose link shares the object soname.
+    pub fn find_by_file(
+        &self,
+        cache: Option<&LdCache>,
+        namespace: &Option<String>,
+        file_id: (u64, u64),
+        search_linked: bool,
+    ) -> Option<usize> {
+        let find = |namespace: &Option<String>| {
+            self.on(namespace)
+                .find(|object| object.file_id == Some(file_id))
+                .map(|object| (object.node, object.soname.clone()))
+        };
+        if let Some((node, _)) = find(namespace) {
+            return Some(node);
+        }
+        if !search_linked {
+            return None;
+        }
+        links(cache, namespace).iter().find_map(|link| {
+            find(&namespace_key(&link.namespace))
+                .filter(|(_, soname)| link.is_accessible(soname.as_deref().unwrap_or_default()))
+                .map(|(node, _)| node)
+        })
+    }
+}
+
+// The links of NAMESPACE on the CACHE configuration.
+fn links<'a>(cache: Option<&'a LdCache>, namespace: &Option<String>) -> &'a [NamespaceLink] {
+    let config = cache.and_then(|cache| match namespace {
+        Some(name) => cache.get_namespace(name),
+        None => cache.get_default_namespace(),
+    });
+    config.map_or(&[], |config| &config.namespaces)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tempdir::TempDir;
     use std::fs;
+
+    #[test]
+    fn namespace_lookups() -> std::io::Result<()> {
+        let tmpdir = TempDir::new()?;
+        let base = fs::canonicalize(tmpdir.path())?;
+        fs::create_dir(base.join("bin"))?;
+        fs::write(base.join("bin/binary"), [])?;
+        let config = base.join("ld.config.txt");
+        fs::write(
+            &config,
+            format!(
+                "dir.test = {}/bin\n\
+                 [test]\n\
+                 additional.namespaces = art,other\n\
+                 namespace.default.links = art,other\n\
+                 namespace.default.link.art.shared_libs = libart.so\n\
+                 namespace.default.link.other.allow_all_shared_libs = true\n\
+                 namespace.art.links = default\n\
+                 namespace.art.link.default.shared_libs = libc.so\n",
+                base.display()
+            ),
+        )?;
+        let props = SystemProperties {
+            release: AndroidRelease(31),
+            vndk_version: String::new(),
+            vndk_lite: false,
+        };
+        let cache = crate::elf::ld_config_txt::parse_ld_config_txt(
+            &config,
+            &base.join("bin/binary"),
+            Some("/system/bin/linker64"),
+            ELFCLASS64,
+            &props,
+        )
+        .map_err(std::io::Error::other)?;
+        let cache = Some(&cache);
+
+        let default = None;
+        let art = namespace_key("art");
+        let other = namespace_key("other");
+        assert_eq!(namespace_key("default"), None);
+
+        let mut loaded = LoadedObjects::default();
+        loaded.record(&default, true, None, Some((1, 1)), 0);
+        loaded.record(&default, false, Some("libc.so"), Some((1, 2)), 1);
+        loaded.record(&art, false, Some("libart.so"), Some((1, 3)), 2);
+        loaded.record(&art, false, Some("libx.so"), Some((1, 4)), 3);
+        loaded.record(&other, false, Some("libdup.so"), Some((1, 5)), 4);
+        // A preloaded object is on every namespace.
+        loaded.record(&default, true, Some("libp.so"), Some((1, 6)), 5);
+        loaded.record(&art, false, None, Some((1, 7)), 6);
+
+        let soname = |namespace: &Option<String>, name, linked| {
+            loaded.find_by_soname(cache, namespace, name, linked)
+        };
+        // The namespace own objects, then the ones the links share.
+        assert_eq!(soname(&default, "libc.so", true), Some(1));
+        assert_eq!(soname(&default, "libart.so", true), Some(2));
+        assert_eq!(soname(&default, "libart.so", false), None);
+        assert_eq!(soname(&default, "libx.so", true), None);
+        assert_eq!(soname(&default, "libdup.so", true), Some(4));
+        assert_eq!(soname(&default, "libp.so", false), Some(5));
+        assert_eq!(soname(&art, "libc.so", true), Some(1));
+        assert_eq!(soname(&art, "libdup.so", true), None);
+        assert_eq!(soname(&art, "libp.so", false), Some(5));
+        // A name with a slash is not matched.
+        assert_eq!(soname(&default, "/lib/libc.so", true), None);
+
+        let file = |namespace: &Option<String>, id, linked| {
+            loaded.find_by_file(cache, namespace, id, linked)
+        };
+        assert_eq!(file(&default, (1, 1), false), Some(0));
+        assert_eq!(file(&default, (1, 3), true), Some(2));
+        assert_eq!(file(&default, (1, 3), false), None);
+        // Through a link, the object soname must be shared.
+        assert_eq!(file(&default, (1, 4), true), None);
+        assert_eq!(file(&default, (1, 7), true), None);
+        assert_eq!(file(&art, (1, 2), true), Some(1));
+        assert_eq!(file(&art, (1, 7), false), Some(6));
+        Ok(())
+    }
 
     #[test]
     fn preload_entries() {
