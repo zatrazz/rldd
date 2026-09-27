@@ -120,11 +120,12 @@ impl SearchPathVecExt for SearchPathVec {
 }
 
 // A list of the existing directories of STRING, separated by any of DELIM,
-// with the empty entries skipped.  The Linux, NetBSD and illumos loaders
-// split their lists on their own.
+// with the empty entries skipped.  The Linux, Android, NetBSD and illumos
+// loaders split their lists on their own.
 #[cfg_attr(
     any(
         target_os = "linux",
+        target_os = "android",
         target_os = "netbsd",
         target_os = "illumos",
         target_os = "solaris"
