@@ -166,8 +166,36 @@ impl Printer {
             return;
         }
 
+        #[cfg(target_os = "macos")]
+        if self.ldd {
+            self.print_ldd_load_order(deps);
+            return;
+        }
+
         let mut deptrace = Vec::<bool>::new();
         self.print_deps_children(deps, &bin.children, &mut deptrace);
+    }
+
+    // The Mach-O backend adds the images to the tree in the order dyld loads
+    // them, which the ldd style listing follows, the way
+    // DYLD_PRINT_LIBRARIES reports them, rather than the tree order.  The
+    // dependencies not found are listed where they were looked up.
+    #[cfg(target_os = "macos")]
+    fn print_ldd_load_order(&self, deps: &DepTree) {
+        for dep in deps.arena.iter().skip(1).filter(|dep| !dep.val.found) {
+            let dep = &dep.val;
+            if dep.mode == DepMode::NotFound {
+                self.print_not_found(
+                    &dep.name,
+                    dep.alias.as_deref(),
+                    &dep.attrs,
+                    &dep.searched,
+                    &[],
+                );
+            } else {
+                self.print_ldd(&dep.name, dep.alias.as_deref(), dep.path.as_ref().unwrap());
+            }
+        }
     }
 
     fn print_deps_children(&self, deps: &DepTree, children: &[usize], deptrace: &mut Vec<bool>) {
@@ -544,6 +572,58 @@ mod tests {
         );
         // A single file is not named.
         assert_eq!(print(false, true, true, false, &tree()), deps);
+    }
+
+    // The Mach-O ldd style listing follows the order the images were added
+    // to the tree, the dyld load order, where libb.so, a dependency of the
+    // root, is loaded before libc.so, a dependency of liba.so.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ldd_load_order() {
+        let dir = |dir: &str| Some(dir.to_string());
+        let mut deps = DepTree::new();
+        let root = deps.addroot(DepNode::new(
+            dir("/bin"),
+            "prog".into(),
+            DepMode::Executable,
+        ));
+        let a = deps.addnode(
+            DepNode::new(dir("/lib"), "liba.dylib".into(), DepMode::Direct),
+            root,
+        );
+        let b = deps.addnode(
+            DepNode::new(dir("/lib"), "libb.dylib".into(), DepMode::Direct),
+            root,
+        );
+        deps.addnode(
+            DepNode::new(dir("/lib"), "libc.dylib".into(), DepMode::Direct),
+            a,
+        );
+        deps.addnode(
+            DepNode::not_found("@rpath/libd.dylib".into(), Vec::new()),
+            a,
+        );
+        let a = DepNode::new(dir("/lib"), "liba.dylib".into(), DepMode::Direct);
+        deps.addnode(a.already_found(), b);
+        assert_eq!(
+            print(false, true, true, false, &deps),
+            format!(
+                "        liba.dylib => {}\n        libb.dylib => {}\n        libc.dylib => {}\n        @rpath/libd.dylib => not found\n",
+                path("/lib", "liba.dylib"),
+                path("/lib", "libb.dylib"),
+                path("/lib", "libc.dylib"),
+            )
+        );
+        // The tree keeps the dependencies below the image they belong to.
+        assert_eq!(
+            print(false, false, false, false, &deps),
+            "prog\n\
+             \\_ liba.dylib [direct]\n\
+             |  \\_ libc.dylib [direct]\n\
+             |  \\_ @rpath/libd.dylib not found\n\
+             \\_ libb.dylib [direct]\n   \
+                \\_ liba.dylib [direct]\n"
+        );
     }
 
     #[cfg(all(target_family = "unix", not(target_os = "macos")))]
