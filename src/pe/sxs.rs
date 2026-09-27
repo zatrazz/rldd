@@ -77,7 +77,7 @@ impl WinSxs {
         arch_names(&assembly.arch, machine)
             .iter()
             .find_map(|arch| self.best_build(assembly, arch))
-            .map(|dir| pathutils::join(&self.root, &dir))
+            .map(|dir| pathutils::join(&self.root, dir))
     }
 
     fn best_build(&self, assembly: &Assembly, arch: &str) -> Option<&String> {
