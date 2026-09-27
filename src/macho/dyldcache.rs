@@ -1,6 +1,6 @@
 use memmap2::Mmap;
 use object::Endianness;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::pathutils;
@@ -149,7 +149,14 @@ fn dylibs_trie(
         tdata.get(offset as usize..(offset as usize).checked_add(size as usize)?)
     })();
     if let Some(trie) = trie {
-        walk_trie(trie, 0, &mut Vec::new(), &mut dylibs, 0);
+        walk_trie(
+            trie,
+            0,
+            &mut Vec::new(),
+            &mut dylibs,
+            &mut HashSet::new(),
+            0,
+        );
     }
     dylibs
 }
@@ -178,10 +185,19 @@ fn walk_trie(
     offset: usize,
     prefix: &mut Vec<u8>,
     dylibs: &mut Vec<(String, u64)>,
+    visited: &mut HashSet<usize>,
     depth: usize,
 ) -> Option<()> {
     // Guard against malformed input, the paths are bounded in practice.
     if depth > 128 {
+        return None;
+    }
+    // Each trie node has a single parent, so a node reached again (a child
+    // offset back to an ancestor, or children shared between nodes) means a
+    // malformed trie, which dyld also rejects on its lookups (the visited
+    // node offsets of GenericTrie).  Each node is walked once, where a
+    // crafted trie would otherwise take an exponential number of visits.
+    if !visited.insert(offset) {
         return None;
     }
     let mut pos = offset;
@@ -206,7 +222,7 @@ fn walk_trie(
         let child = read_uleb(data, &mut pos)?;
         let len = prefix.len();
         prefix.extend_from_slice(&edge);
-        walk_trie(data, child as usize, prefix, dylibs, depth + 1);
+        walk_trie(data, child as usize, prefix, dylibs, visited, depth + 1);
         prefix.truncate(len);
     }
     Some(())
@@ -225,5 +241,100 @@ fn unversioned_framework_alias(name: &str) -> Option<String> {
         Some(format!("{fwdir}/{leaf}"))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn walk(trie: &[u8]) -> Vec<(String, u64)> {
+        let mut dylibs = Vec::new();
+        walk_trie(
+            trie,
+            0,
+            &mut Vec::new(),
+            &mut dylibs,
+            &mut HashSet::new(),
+            0,
+        );
+        dylibs
+    }
+
+    fn entry(path: &str, index: u64) -> (String, u64) {
+        (path.to_string(), index)
+    }
+
+    #[test]
+    fn dylibs_trie() {
+        // The root with the "/a" and "/b" edges, to the terminal nodes with
+        // the image indexes 0 and 1.
+        #[rustfmt::skip]
+        let trie = [
+            0, 2, b'/', b'a', 0, 10, b'/', b'b', 0, 13,
+            1, 0, 0,
+            1, 1, 0,
+        ];
+        assert_eq!(walk(&trie), [entry("/a", 0), entry("/b", 1)]);
+
+        // A child offset past the end of the trie is skipped.
+        let trie = [0, 2, b'/', b'a', 0, 10, b'/', b'b', 0, 99, 1, 0, 0];
+        assert_eq!(walk(&trie), [entry("/a", 0)]);
+    }
+
+    #[test]
+    fn dylibs_trie_cycle() {
+        // An edge back to the root, and a node (at offset 8) with an edge to
+        // itself.
+        #[rustfmt::skip]
+        let trie = [
+            0, 2, b'x', 0, 0, b'y', 0, 8,
+            1, 2, 1, b'z', 0, 8,
+        ];
+        assert_eq!(walk(&trie), [entry("y", 2)]);
+    }
+
+    #[test]
+    fn dylibs_trie_shared_children() {
+        // A chain of nodes whose two edges both lead to the next node, which
+        // is 2^LEVELS paths if each node were walked once for each parent.
+        // The offsets use a two byte ULEB128 encoding, so every node has the
+        // same size.
+        const LEVELS: usize = 64;
+        const NODE: usize = 10;
+        let mut trie = Vec::new();
+        for level in 0..LEVELS {
+            let next = (level + 1) * NODE;
+            let next = [0x80 | (next & 0x7f) as u8, (next >> 7) as u8];
+            trie.extend([0, 2, b'a', 0, next[0], next[1], b'b', 0, next[0], next[1]]);
+        }
+        trie.extend([1, 7, 0]);
+        assert_eq!(walk(&trie), [entry(&"a".repeat(LEVELS), 7)]);
+    }
+
+    #[test]
+    fn framework_alias() {
+        assert_eq!(
+            unversioned_framework_alias("/System/Library/Frameworks/Foo.framework/Versions/A/Foo")
+                .as_deref(),
+            Some("/System/Library/Frameworks/Foo.framework/Foo")
+        );
+        assert_eq!(
+            unversioned_framework_alias("/Library/Frameworks/Foo.framework/Versions/Current/Foo")
+                .as_deref(),
+            Some("/Library/Frameworks/Foo.framework/Foo")
+        );
+        for name in [
+            // The leaf is not the framework name.
+            "/S/L/F/Foo.framework/Versions/A/Bar",
+            // Not directly below the version directory.
+            "/S/L/F/Foo.framework/Versions/A/Libraries/Foo",
+            // Already unversioned, and not a framework.
+            "/S/L/F/Foo.framework/Foo",
+            "/usr/lib/Versions/A/Foo",
+            "/usr/lib/libz.dylib",
+        ] {
+            assert_eq!(unversioned_framework_alias(name), None, "{name}");
+        }
     }
 }
