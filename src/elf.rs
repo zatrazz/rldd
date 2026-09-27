@@ -1147,6 +1147,12 @@ fn resolve_dependencies(
             }
             sonames.get(dependency.as_str()).copied()
         });
+        // The Android linker is on every namespace under its own soname.
+        #[cfg(target_os = "android")]
+        if let Some(node) = Rtld::linker_dependency(dependency, root_elc) {
+            deptree.add_repeated(config.all, node, item.depp);
+            continue;
+        }
         // The Android linker looks the objects up and searches the name on
         // the namespaces the requesting object sees (loader/android.rs).
         #[cfg(target_os = "android")]

@@ -327,6 +327,36 @@ enum Load<'a> {
 }
 
 impl Android {
+    // The linker itself for NAME, a dependency of an object loaded for the
+    // ROOT input object: the linker soinfo is on every namespace as
+    // ld-android.so, or as libdl.so before Android 8 (where it provided the
+    // libdl functions), so it is already loaded.  It is the program
+    // interpreter of the executable, or the one of its ELF class for a
+    // shared library.
+    pub(in crate::elf) fn linker_dependency(name: &str, root: &ElfInfo) -> Option<DepNode> {
+        let soname = match release() {
+            Some(release) if release < AndroidRelease::R26 => "libdl.so",
+            _ => "ld-android.so",
+        };
+        if name != soname {
+            return None;
+        }
+        let interp = root
+            .interp
+            .as_deref()
+            .unwrap_or(if root.ei_class == ELFCLASS64 {
+                "/system/bin/linker64"
+            } else {
+                "/system/bin/linker"
+            });
+        let path = fs::canonicalize(interp).unwrap_or_else(|_| PathBuf::from(interp));
+        Some(
+            DepNode::from_path(&path, DepMode::Direct)
+                .already_found()
+                .with_alias(Some(name.to_string())),
+        )
+    }
+
     // The bionic find_library_internal for NAME, a dependency of the ELC
     // object at NEEDED_BY loaded on NAMESPACE (the executable and the preload
     // entries are on the default one).  An object already loaded with NAME
