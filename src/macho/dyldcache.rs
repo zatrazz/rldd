@@ -50,6 +50,12 @@ impl DyldCache {
             .map(|entry| entry.map(|(idx, offset)| (&self.files[idx][..], offset)))
     }
 
+    // The identity of the image NAME leads to (the cache file and the offset
+    // of its Mach-O header), the same for all the aliases of an image.
+    pub fn image_id(&self, name: &str) -> Option<(usize, u64)> {
+        self.images.get(name).copied().flatten()
+    }
+
     pub fn len(&self) -> usize {
         self.images.len()
     }
