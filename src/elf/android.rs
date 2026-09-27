@@ -236,8 +236,9 @@ pub fn namespace_key(name: &str) -> Option<String> {
 struct NamespaceObject {
     // The namespace it was loaded on, None for the default one.
     namespace: Option<String>,
-    // Whether it is on every namespace: the linker adds the executable and
-    // the LD_PRELOAD objects to all the namespaces of the configuration.
+    // Whether it is on every namespace: the linker adds the executable, the
+    // LD_PRELOAD objects and the DF_1_GLOBAL ones to all the namespaces of
+    // the configuration (find_libraries).
     global: bool,
     // The DT_SONAME the dependency names are matched against: an object
     // without one is only matched by its file.

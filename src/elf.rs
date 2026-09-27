@@ -127,6 +127,10 @@ struct ElfInfo {
     // Whether DF_1_PIE is set.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pie: bool,
+    // Whether DF_1_GLOBAL is set, which puts the object on every Android
+    // linker namespace.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    global: bool,
     // The subdirectories the loader of the input object tries first in each
     // directory it searches, best first (the glibc hwcaps ones), handed down
     // to every object it loads.
@@ -171,6 +175,7 @@ impl ElfInfo {
             loader_platform: None,
             loader_flags: e_flags,
             pie: false,
+            global: false,
             search_subdirs: Rc::default(),
             origin: Some("/o".to_string()),
             unexpanded: Vec::new(),
@@ -328,6 +333,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
             loader_platform: None,
             loader_flags: elf.e_flags(endian),
             pie: DynamicFlags1(tags.flags_1).contains(DF_1_PIE),
+            global: DynamicFlags1(tags.flags_1).contains(DF_1_GLOBAL),
             search_subdirs: Rc::default(),
             origin: None,
             unexpanded: Vec::new(),
@@ -1283,11 +1289,12 @@ fn resolve_dependencies(
         if let Some(soname) = &dep.elc.soname {
             sonames.entry(soname.clone()).or_insert(c);
         }
-        // The linker adds the preloaded objects to every namespace.
+        // The linker adds the preloaded objects and the DF_1_GLOBAL ones to
+        // every namespace.
         #[cfg(target_os = "android")]
         namespaces.record(
             &dep.namespace,
-            item.preload && item.parent == 0,
+            (item.preload && item.parent == 0) || dep.elc.global,
             dep.elc.soname.as_deref(),
             file_id,
             c,
