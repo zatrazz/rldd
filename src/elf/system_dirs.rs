@@ -256,17 +256,41 @@ pub fn get_system_dirs(elc: &ElfInfo) -> Result<search_path::SearchPathVec, std:
     Ok(r)
 }
 
+// The rtld STANDARD_LIBRARY_PATH (rtld_paths.h) for an object of the EI_CLASS
+// class.  The 32-bit compat loader of a 64-bit system (ld-elf32.so.1, built
+// with the "32" COMPAT_libcompat suffix) appends the suffix to both /lib and
+// /usr/lib, and has no /lib/casper.
+#[cfg(any(target_os = "freebsd", all(test, target_os = "linux")))]
+fn freebsd_standard_dirs(ei_class: object::elf::FileClass) -> &'static [&'static str] {
+    if cfg!(target_pointer_width = "64") && ei_class == object::elf::ELFCLASS32 {
+        &["/lib32", "/usr/lib32"]
+    } else {
+        &["/lib/casper", "/lib", "/usr/lib"]
+    }
+}
+
 #[cfg(target_os = "freebsd")]
 pub fn get_system_dirs(elc: &ElfInfo) -> Result<search_path::SearchPathVec, std::io::Error> {
-    // The rtld STANDARD_LIBRARY_PATH, with the COMPAT_libcompat suffix for
-    // the 32-bit compat objects.
-    let dirs: &[&str] =
-        if cfg!(target_pointer_width = "64") && elc.ei_class == object::elf::ELFCLASS32 {
-            &["/lib/casper", "/lib32", "/usr/lib32"]
-        } else {
-            &["/lib/casper", "/lib", "/usr/lib"]
-        };
-    Ok(search_path::fixed_list(dirs.iter().copied()))
+    Ok(search_path::fixed_list(
+        freebsd_standard_dirs(elc.ei_class).iter().copied(),
+    ))
+}
+
+#[cfg(all(test, any(target_os = "freebsd", target_os = "linux")))]
+mod freebsd_tests {
+    use super::freebsd_standard_dirs;
+    use object::elf::*;
+
+    #[test]
+    fn standard_dirs() {
+        assert_eq!(
+            freebsd_standard_dirs(ELFCLASS64),
+            ["/lib/casper", "/lib", "/usr/lib"]
+        );
+        if cfg!(target_pointer_width = "64") {
+            assert_eq!(freebsd_standard_dirs(ELFCLASS32), ["/lib32", "/usr/lib32"]);
+        }
+    }
 }
 
 #[cfg(target_os = "openbsd")]
