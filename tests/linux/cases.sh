@@ -59,7 +59,7 @@ EOF
 
 CASES="rpath runpath tokens origin-literal lib platform empty-entry nodeflib
 preload library-path slash-needed soname not-found-then-found symlink-root
-wrong-class verify versions musl hwcaps"
+wrong-class verify versions musl hwcaps legacy-hwcaps"
 
 RLDD=
 KEEP=false
@@ -595,6 +595,64 @@ case_hwcaps() {
         -v hwcaps/rpath
 }
 
+# The legacy hwcaps subdirectories (every combination of tls, the platform and
+# the hwcap bits, such as tls/x86_64) glibc 2.36 and older search in each
+# directory, after the glibc-hwcaps ones (2.33 to 2.36), checked with copies
+# of the loader claiming an older release, which ldd can not run.
+case_legacy_hwcaps() {
+    mkdir -p legacy-hwcaps
+    if ! python3 - "$LOADER" legacy-hwcaps/ld-2.35.so legacy-hwcaps/ld-2.31.so <<'EOF'; then
+import re, sys
+data = open(sys.argv[1], "rb").read()
+banner = re.search(rb" release version (\d+\.\d+)", data)
+if not banner:
+    sys.exit(1)
+start, end = banner.span(1)
+version = b"2.35".ljust(end - start, b".")[: end - start]
+open(sys.argv[2], "wb").write(data[:start] + version + data[end:])
+# The loaders before glibc 2.33 have no version banner.
+start, end = banner.span(0)
+open(sys.argv[3], "wb").write(data[:start] + b"x" * (end - start) + data[end:])
+EOF
+        skip "legacy hwcaps (the loader has no version banner)"
+        return
+    fi
+    chmod +x legacy-hwcaps/ld-2.35.so legacy-hwcaps/ld-2.31.so
+    for dir in legacy-hwcaps/a/lib legacy-hwcaps/b/lib; do
+        lib "$dir/libfoo.so" foo.c
+        lib "$dir/tls/libfoo.so" foo.c
+    done
+    for subdir in $HWCAPS; do
+        lib "legacy-hwcaps/b/lib/glibc-hwcaps/$subdir/libfoo.so" foo.c
+    done
+    for release in 2.35 2.31; do
+        prog "legacy-hwcaps/a/main-$release" main.c -Llegacy-hwcaps/a/lib -lfoo \
+            -Wl,-rpath,'$ORIGIN/lib' -Wl,--disable-new-dtags \
+            "-Wl,--dynamic-linker=$WORK/legacy-hwcaps/ld-$release.so"
+    done
+    check_output "legacy tls subdirectory for glibc 2.35" 'a/lib/tls/libfoo\.so \[rpath\]' \
+        -p legacy-hwcaps/a/main-2.35
+    check_output "legacy tls subdirectory before glibc 2.33" 'a/lib/tls/libfoo\.so \[rpath\]' \
+        -p legacy-hwcaps/a/main-2.31
+    # The current loader has none of them.
+    prog legacy-hwcaps/a/main main.c -Llegacy-hwcaps/a/lib -lfoo -Wl,-rpath,'$ORIGIN/lib' \
+        -Wl,--disable-new-dtags
+    check_ldd "no legacy subdirectory for the current loader" legacy-hwcaps/a/main
+    # The glibc-hwcaps subdirectories (if any) come first since glibc 2.33,
+    # and not at all before.
+    prog legacy-hwcaps/b/main-2.31 main.c -Llegacy-hwcaps/b/lib -lfoo -Wl,-rpath,'$ORIGIN/lib' \
+        -Wl,--disable-new-dtags "-Wl,--dynamic-linker=$WORK/legacy-hwcaps/ld-2.31.so"
+    check_output "no glibc-hwcaps subdirectory before glibc 2.33" \
+        'b/lib/tls/libfoo\.so \[rpath\]' -p legacy-hwcaps/b/main-2.31
+    if [ -n "$HWCAPS" ]; then
+        prog legacy-hwcaps/b/main-2.35 main.c -Llegacy-hwcaps/b/lib -lfoo \
+            -Wl,-rpath,'$ORIGIN/lib' -Wl,--disable-new-dtags \
+            "-Wl,--dynamic-linker=$WORK/legacy-hwcaps/ld-2.35.so"
+        check_no_output "glibc-hwcaps subdirectories before the legacy ones" \
+            'b/lib/(tls/)?libfoo\.so \[rpath\]' -p legacy-hwcaps/b/main-2.35
+    fi
+}
+
 for case_name in $CASES; do
     if [ -n "$SELECTED" ]; then
         case " $SELECTED " in
@@ -623,6 +681,7 @@ for case_name in $CASES; do
     versions) case_versions ;;
     musl) case_musl ;;
     hwcaps) case_hwcaps ;;
+    legacy-hwcaps) case_legacy_hwcaps ;;
     esac
 done
 

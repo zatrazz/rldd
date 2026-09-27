@@ -845,7 +845,11 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
     #[cfg(target_os = "linux")]
     if !elc.is_musl {
         elc.dst_lib = system_dirs::get_dst_lib(loader.as_deref(), &elc);
-        elc.search_subdirs = Rc::new(system_dirs::get_search_subdirs(loader.as_deref(), &elc));
+        elc.search_subdirs = Rc::new(system_dirs::get_search_subdirs(
+            loader.as_deref(),
+            &elc,
+            ctx.platform.as_deref(),
+        ));
     }
 
     expand_object(&mut elc, ctx.platform.as_ref());

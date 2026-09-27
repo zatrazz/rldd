@@ -179,11 +179,21 @@ pub enum GlibcRelease {
 
 // The subdirectories the glibc LOADER tries in each directory it searches
 // before the directory itself, best first, for the ELC input object and on
-// this machine (the capstr list of _dl_important_hwcaps): the glibc-hwcaps
-// ones the CPU supports, since glibc 2.33.  A loader of an unknown release
-// (none to read) is taken as a current one.
+// this machine (the capstr list of _dl_important_hwcaps):
+// - the glibc-hwcaps ones the CPU supports, since glibc 2.33;
+// - the legacy hwcaps ones up to glibc 2.36: every combination of the tls
+//   one, the platform one (GLRO(dl_platform): the PLATFORM given, or else the
+//   one the x86 loaders set, or else the kernel one), and the hwcap bits the
+//   loader uses (x86_64 and avx512_1, or sse2 for i386), with the later names
+//   first, as tls/haswell/x86_64, tls/haswell, tls/x86_64, tls,
+//   haswell/x86_64, haswell, x86_64.
+// A loader of an unknown release (none to read) is taken as a current one.
 #[cfg(target_os = "linux")]
-pub fn get_search_subdirs(loader: Option<&str>, elc: &ElfInfo) -> Vec<String> {
+pub fn get_search_subdirs(
+    loader: Option<&str>,
+    elc: &ElfInfo,
+    platform: Option<&str>,
+) -> Vec<String> {
     use super::ld_so_cache::hwcap;
 
     let release = loader.and_then(|loader| loader_strings(loader).release);
@@ -195,7 +205,44 @@ pub fn get_search_subdirs(loader: Option<&str>, elc: &ElfInfo) -> Vec<String> {
                 .map(|subdir| format!("glibc-hwcaps/{subdir}")),
         );
     }
+    if release.is_some_and(|release| release < GlibcRelease::Release(2, 37)) {
+        let legacy = hwcap::loader_hwcaps(elc.e_machine, elc.ei_class, elc.ei_data).legacy;
+        let platform = platform
+            .or(legacy.platform_name())
+            .or_else(|| super::platform::get(elc.e_machine, elc.ei_data));
+        // The platform may be one of the hwcap names (x86_64), which the
+        // loader tries twice.
+        for subdir in legacy_subdirs(legacy.hwcap_names(), platform) {
+            if !r.contains(&subdir) {
+                r.push(subdir);
+            }
+        }
+    }
     r
+}
+
+// The legacy hwcaps subdirectories of a loader with the HWCAP_NAMES bits and
+// the PLATFORM, best first, without the empty one: the power set of the names
+// along with the tls one, each subset joined from the last name to the first
+// one, in the decreasing order of the subset bit mask (_dl_important_hwcaps).
+#[cfg(target_os = "linux")]
+fn legacy_subdirs(hwcap_names: &[&str], platform: Option<&str>) -> Vec<String> {
+    let mut names: Vec<&str> = hwcap_names.to_vec();
+    names.extend(platform);
+    names.push("tls");
+    (1..1u32 << names.len())
+        .rev()
+        .map(|mask| {
+            names
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(i, _)| mask & (1 << i) != 0)
+                .map(|(_, name)| *name)
+                .collect::<Vec<_>>()
+                .join("/")
+        })
+        .collect()
 }
 
 // The glibc build sets the $LIB expansion (DL_DST_LIB) to the last component
@@ -489,7 +536,7 @@ mod solaris_tests {
 
 #[cfg(all(test, target_os = "linux"))]
 mod system_dirs_tests {
-    use super::{dst_lib_in, get_musl_path_file, system_dirs_in, GlibcRelease};
+    use super::{dst_lib_in, get_musl_path_file, legacy_subdirs, system_dirs_in, GlibcRelease};
 
     #[test]
     fn musl_path_file() {
@@ -506,6 +553,45 @@ mod system_dirs_tests {
             Some("/etc/ld-musl-aarch64.path")
         );
         assert_eq!(get_musl_path_file("/lib/ld-linux.so.2"), None);
+    }
+
+    // The order the glibc 2.26 to 2.36 loaders search them (LD_DEBUG=libs).
+    #[test]
+    fn legacy_hwcaps_subdirs() {
+        assert_eq!(legacy_subdirs(&[], None), ["tls"]);
+        assert_eq!(
+            legacy_subdirs(&["x86_64"], Some("haswell")),
+            [
+                "tls/haswell/x86_64",
+                "tls/haswell",
+                "tls/x86_64",
+                "tls",
+                "haswell/x86_64",
+                "haswell",
+                "x86_64"
+            ]
+        );
+        // The x86-64 platform is the kernel one, x86_64 as the hwcap bit.
+        assert_eq!(
+            legacy_subdirs(&["x86_64"], Some("x86_64")),
+            [
+                "tls/x86_64/x86_64",
+                "tls/x86_64",
+                "tls/x86_64",
+                "tls",
+                "x86_64/x86_64",
+                "x86_64",
+                "x86_64"
+            ]
+        );
+        let avx512 = legacy_subdirs(&["x86_64", "avx512_1"], Some("haswell"));
+        assert_eq!(avx512.len(), 15);
+        assert_eq!(avx512[0], "tls/haswell/avx512_1/x86_64");
+        assert_eq!(avx512[14], "x86_64");
+        assert_eq!(
+            legacy_subdirs(&["sse2"], Some("i686"))[..3],
+            ["tls/i686/sse2", "tls/i686", "tls/sse2"]
+        );
     }
 
     #[test]

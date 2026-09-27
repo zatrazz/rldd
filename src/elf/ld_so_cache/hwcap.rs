@@ -34,6 +34,12 @@ pub struct LegacyHwcaps {
     // The bit of the machine platform (GLRO(dl_platform)), all of them if
     // there is none.
     platform: u64,
+    // The names of the hwcap bits the loader uses, in bit order
+    // (_dl_hwcap_string), and of the platform it sets over the kernel one
+    // (AT_PLATFORM), if any: the names of the legacy hwcaps subdirectories
+    // (_dl_important_hwcaps).
+    hwcap_names: &'static [&'static str],
+    platform_name: Option<&'static str>,
 }
 
 impl LegacyHwcaps {
@@ -46,6 +52,23 @@ impl LegacyHwcaps {
             accepted: (hwcap & important) | platform_mask | HWCAP_TLS,
             platform_mask,
             platform: platform.unwrap_or(u64::MAX),
+            hwcap_names: &[],
+            platform_name: None,
+        }
+    }
+
+    // The names of the hwcap bits the loader uses and of the platform it
+    // sets, if any.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn with_names(
+        self,
+        hwcap_names: &'static [&'static str],
+        platform_name: Option<&'static str>,
+    ) -> Self {
+        LegacyHwcaps {
+            hwcap_names,
+            platform_name,
+            ..self
         }
     }
 
@@ -53,6 +76,17 @@ impl LegacyHwcaps {
     pub fn check(&self, hwcap: u64) -> bool {
         let platform = hwcap & self.platform_mask;
         hwcap & !self.accepted == 0 && (platform == 0 || platform == self.platform)
+    }
+
+    // The names of the hwcap bits the loader uses, in bit order.
+    pub fn hwcap_names(&self) -> &'static [&'static str] {
+        self.hwcap_names
+    }
+
+    // The platform the loader sets over the kernel one (GLRO(dl_platform)),
+    // if any.
+    pub fn platform_name(&self) -> Option<&'static str> {
+        self.platform_name
     }
 }
 
@@ -251,12 +285,23 @@ mod cpuid {
                     platform = Some(PLATFORM_HASWELL);
                 }
             }
+            let hwcap_names: &[&str] = if hwcap & HWCAP_X86_AVX512_1 != 0 {
+                &["x86_64", "avx512_1"]
+            } else {
+                &["x86_64"]
+            };
+            let platform_name = match platform {
+                Some(PLATFORM_XEON_PHI) => Some("xeon_phi"),
+                Some(_) => Some("haswell"),
+                None => None,
+            };
             LegacyHwcaps::new(
                 hwcap,
                 HWCAP_X86_64 | HWCAP_X86_AVX512_1,
                 PLATFORM_I586 | PLATFORM_I686 | PLATFORM_HASWELL | PLATFORM_XEON_PHI,
                 platform,
             )
+            .with_names(hwcap_names, platform_name)
         }
 
         // The legacy hwcap bits of the i386 loader: sse2, and the i686 (with
@@ -267,19 +312,21 @@ mod cpuid {
             } else {
                 0
             };
-            let platform = if self.leaf1_edx & CPUID_1_EDX_CMOV != 0 {
-                Some(PLATFORM_I686)
+            let (platform, platform_name) = if self.leaf1_edx & CPUID_1_EDX_CMOV != 0 {
+                (Some(PLATFORM_I686), Some("i686"))
             } else if self.leaf1_edx & CPUID_1_EDX_CX8 != 0 {
-                Some(PLATFORM_I586)
+                (Some(PLATFORM_I586), Some("i586"))
             } else {
-                None
+                (None, None)
             };
+            let hwcap_names: &[&str] = if hwcap != 0 { &["sse2"] } else { &[] };
             LegacyHwcaps::new(
                 hwcap,
                 HWCAP_X86_SSE2,
                 PLATFORM_I586 | PLATFORM_I686,
                 platform,
             )
+            .with_names(hwcap_names, platform_name)
         }
 
         fn check_basic(&self) -> bool {
@@ -517,6 +564,16 @@ mod cpuid {
             assert!(i386.check(HWCAP_X86_SSE2 | PLATFORM_I686 | TLS));
             assert!(!i386.check(PLATFORM_I586));
             assert!(!i386.check(HWCAP_X86_64) && !i386.check(PLATFORM_HASWELL));
+
+            // And the names of the legacy hwcaps subdirectories.
+            assert_eq!(amd.hwcap_names(), ["x86_64"]);
+            assert_eq!(amd.platform_name(), None);
+            assert_eq!(skylake.hwcap_names(), ["x86_64", "avx512_1"]);
+            assert_eq!(skylake.platform_name(), Some("haswell"));
+            assert_eq!(knl.hwcap_names(), ["x86_64"]);
+            assert_eq!(knl.platform_name(), Some("xeon_phi"));
+            assert_eq!(i386.hwcap_names(), ["sse2"]);
+            assert_eq!(i386.platform_name(), Some("i686"));
         }
 
         #[test]

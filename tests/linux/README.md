@@ -152,7 +152,10 @@ expected result, where ldd can not tell:
   in verbose mode;
 * the musl rules, with programs naming a musl loader in the temporary
   directory (it does not need to exist, nothing is run), and a path file next
-  to it.
+  to it;
+* the rules of the older glibc releases (the legacy hwcaps subdirectories),
+  with programs naming a copy of the loader whose version banner claims glibc
+  2.35, or which has none like the ones before 2.33.
 
 | Case | What it covers |
 | --- | --- |
@@ -170,3 +173,4 @@ expected result, where ldd can not tell:
 | `versions` | the version check diagnostics and the symbol version binding rules |
 | `musl` | the musl search order, rpath chain and path file |
 | `hwcaps` | the glibc-hwcaps subdirectories of the DT_RPATH, DT_RUNPATH and library path directories (for the ones `ld.so --help` lists, skipped without them) |
+| `legacy-hwcaps` | the legacy hwcaps subdirectories (tls and the like) of the glibc 2.36 and older loaders, with copies of the loader claiming an older release (skipped for a loader without version banner) |
