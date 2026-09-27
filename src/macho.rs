@@ -8,7 +8,6 @@ use object::Endianness;
 use crate::deptree::*;
 use crate::pathutils;
 use crate::search_path;
-use crate::search_path::*;
 
 mod arch;
 mod dyldcache;
@@ -29,7 +28,11 @@ type DepsVec = Vec<MachODep>;
 
 #[derive(Default, Debug)]
 struct MachOInfo {
-    rpath: search_path::SearchPathVec,
+    // The LC_RPATH entries, with @executable_path and @loader_path expanded.
+    // Like dyld, an entry is kept whether or not its directory exists on
+    // the root filesystem, since the candidates it leads to may still be
+    // found in the dyld cache or below the OS cryptex mount.
+    rpath: Vec<String>,
     deps: DepsVec,
     // The LC_ID_DYLIB install name.
     id: Option<String>,
@@ -205,7 +208,10 @@ fn print_object_information(ctx: &MachOContext, env: &DyldEnv, filename: &Path, 
     if let Some(uuid) = &omf.uuid {
         lines.push(format!("  uuid: {uuid}"));
     }
-    lines.push(format!("  rpath: {}", search_path::format_list(&omf.rpath)));
+    lines.push(format!(
+        "  rpath: {}",
+        search_path::format_entries(omf.rpath.iter().map(String::as_str))
+    ));
     for (name, list) in [
         ("library path", &env.library_path),
         ("framework path", &env.framework_path),
@@ -247,7 +253,7 @@ struct Config<'a> {
 fn resolve_dependency(
     config: &Config,
     loader_path: &str,
-    rpaths: &search_path::SearchPathVec,
+    rpaths: &[String],
     dep: &MachODep,
     deptree: &mut DepTree,
     depp: usize,
@@ -331,7 +337,7 @@ fn check_already_resolved(
 // object own dependencies) are returned.
 fn find_dependency(
     config: &Config,
-    rpaths: &search_path::SearchPathVec,
+    rpaths: &[String],
     dependency: &str,
     dep: &MachODep,
     deptree: &mut DepTree,
@@ -371,7 +377,7 @@ fn find_dependency(
 //    directories.
 fn candidate_paths(
     config: &Config,
-    rpaths: &search_path::SearchPathVec,
+    rpaths: &[String],
     dependency: &str,
     preload: bool,
 ) -> Vec<(String, DepMode)> {
@@ -390,7 +396,7 @@ fn candidate_paths(
 
     if dependency.contains("@rpath") {
         for rpath in rpaths {
-            candidates.push((expand_rpath(dependency, &rpath.path), DepMode::DtRpath));
+            candidates.push((expand_rpath(dependency, rpath), DepMode::DtRpath));
         }
     } else {
         let mode = if preload {
@@ -479,7 +485,7 @@ fn suffix_variants(config: &Config, path: &str) -> Vec<String> {
 // The locations searched for a not found dependency, printed in verbose mode.
 fn searched_locations(
     config: &Config,
-    rpaths: &search_path::SearchPathVec,
+    rpaths: &[String],
     dependency: &str,
     preload: bool,
 ) -> Vec<String> {
@@ -762,7 +768,9 @@ fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
                 let path = path
                     .replace("@executable_path", executable_path)
                     .replace("@loader_path", loader_path);
-                info.rpath.add_path(path.as_str());
+                if !path.is_empty() && !info.rpath.contains(&path) {
+                    info.rpath.push(path);
+                }
             }
             Some(LoadCommand::Id(name)) => info.id = Some(name),
             Some(LoadCommand::Platform(platform)) => platforms.push(platform),
@@ -1067,6 +1075,24 @@ mod tests {
 
     fn x86_64_dylib(cmds: &[Vec<u8>]) -> Vec<u8> {
         macho(CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL.0, MH_DYLIB, cmds)
+    }
+
+    #[test]
+    fn rpath_entries() {
+        let arch = Arch::new(None).unwrap();
+        let rpath = |path| string_command(LC_RPATH, &[], path);
+        let image = x86_64_dylib(&[
+            rpath("/does/not/exist"),
+            rpath("@loader_path/../lib"),
+            rpath("@executable_path/Frameworks/"),
+            rpath("/does/not/exist"),
+            rpath(""),
+        ]);
+        let info = parse(&image, &arch).unwrap();
+        assert_eq!(
+            info.rpath,
+            ["/does/not/exist", "/loader/../lib", "/exe/Frameworks/"]
+        );
     }
 
     #[test]
