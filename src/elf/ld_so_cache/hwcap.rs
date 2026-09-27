@@ -318,16 +318,66 @@ mod cpuid {
     }
 }
 
+// The subdirectories of LEVELS (from the lowest, each with the capability
+// bits it needs) the HWCAP bits support, best first: each level also needs
+// the lower ones, as _dl_hwcaps_subdirs_active tests them.
+#[cfg(any(test, target_arch = "powerpc64", target_arch = "s390x"))]
+fn active_subdirs(hwcap: u64, levels: &[(&'static str, u64)]) -> Vec<&'static str> {
+    let mut r: Vec<&'static str> = levels
+        .iter()
+        .take_while(|(_, mask)| hwcap & mask == *mask)
+        .map(|(subdir, _)| *subdir)
+        .collect();
+    r.reverse();
+    r
+}
+
+// The little-endian powerpc64 subdirectories for the AT_HWCAP2 bits (glibc
+// sysdeps/powerpc/powerpc64/le/dl-hwcaps-subdirs.c).
+#[cfg(any(test, target_arch = "powerpc64"))]
+fn power_subdirs(hwcap2: u64) -> Vec<&'static str> {
+    const PPC_FEATURE2_ARCH_3_00: u64 = 0x00800000; // ISA 3.0
+    const PPC_FEATURE2_HAS_IEEE128: u64 = 0x00400000; // VSX IEEE Binary Float 128-bit
+    const PPC_FEATURE2_ARCH_3_1: u64 = 0x00040000; // ISA 3.1
+    const PPC_FEATURE2_MMA: u64 = 0x00020000; //  Matrix-Multiply Assist
+    active_subdirs(
+        hwcap2,
+        &[
+            ("power9", PPC_FEATURE2_ARCH_3_00 | PPC_FEATURE2_HAS_IEEE128),
+            ("power10", PPC_FEATURE2_ARCH_3_1 | PPC_FEATURE2_MMA),
+        ],
+    )
+}
+
+// The s390x subdirectories for the AT_HWCAP bits (glibc
+// sysdeps/s390/s390-64/dl-hwcaps-subdirs.c).  glibc 2.42 adds z17 above
+// z16, which is not checked (it tests the facility list of the stfle
+// instruction rather than an AT_HWCAP bit).
+#[cfg(any(test, target_arch = "s390x"))]
+fn s390_subdirs(hwcap: u64) -> Vec<&'static str> {
+    const HWCAP_S390_VX: u64 = 1 << 11;
+    const HWCAP_S390_VXD: u64 = 1 << 12;
+    const HWCAP_S390_VXE: u64 = 1 << 13;
+    const HWCAP_S390_GS: u64 = 1 << 14;
+    const HWCAP_S390_VXRS_EXT2: u64 = 1 << 15;
+    const HWCAP_S390_VXRS_PDE: u64 = 1 << 16;
+    const HWCAP_S390_VXRS_PDE2: u64 = 1 << 19;
+    active_subdirs(
+        hwcap,
+        &[
+            ("z13", HWCAP_S390_VX),
+            ("z14", HWCAP_S390_VXD | HWCAP_S390_VXE | HWCAP_S390_GS),
+            ("z15", HWCAP_S390_VXRS_EXT2 | HWCAP_S390_VXRS_PDE),
+            ("z16", HWCAP_S390_VXRS_PDE2),
+        ],
+    )
+}
+
 #[cfg(target_arch = "powerpc64")]
 mod cpuid {
     mod auxv;
 
     use object::elf::{DataEncoding, FileClass, Machine, ELFCLASS64, ELFDATA2LSB, EM_PPC64};
-
-    pub const PPC_FEATURE2_ARCH_3_00: auxv::AuxvType = 0x00800000; // ISA 3.0
-    pub const PPC_FEATURE2_HAS_IEEE128: auxv::AuxvType = 0x00400000; // VSX IEEE Binary Float 128-bit
-    pub const PPC_FEATURE2_ARCH_3_1: auxv::AuxvType = 0x00040000; // ISA 3.1
-    pub const PPC_FEATURE2_MMA: auxv::AuxvType = 0x00020000; //  Matrix-Multiply Assist
 
     // Only the little-endian ABI has glibc-hwcaps subdirectories
     // (sysdeps/powerpc/powerpc64/le/dl-hwcaps-subdirs.c).
@@ -341,15 +391,9 @@ mod cpuid {
 
     pub fn supported() -> Result<Vec<&'static str>, std::io::Error> {
         // Priority sorted, best-fit first (the glibc _dl_hwcaps_subdirs order).
-        let mut r = vec![];
-        let hwcap2 = auxv::getauxval(auxv::AT_HWCAP2)?;
-        if hwcap2 & PPC_FEATURE2_ARCH_3_1 != 0 && hwcap2 & PPC_FEATURE2_MMA != 0 {
-            r.push("power10");
-        }
-        if hwcap2 & PPC_FEATURE2_ARCH_3_00 != 0 && hwcap2 & PPC_FEATURE2_HAS_IEEE128 != 0 {
-            r.push("power9");
-        }
-        Ok(r)
+        Ok(super::power_subdirs(
+            auxv::getauxval(auxv::AT_HWCAP2)? as u64
+        ))
     }
 }
 
@@ -358,15 +402,6 @@ mod cpuid {
     mod auxv;
 
     use object::elf::{DataEncoding, FileClass, Machine, ELFCLASS64, ELFDATA2MSB, EM_S390};
-
-    // s390x AT_HWCAP
-    pub const HWCAP_S390_VX: auxv::AuxvType = 1 << 11;
-    pub const HWCAP_S390_VXD: auxv::AuxvType = 1 << 12;
-    pub const HWCAP_S390_VXE: auxv::AuxvType = 1 << 13;
-    pub const HWCAP_S390_GS: auxv::AuxvType = 1 << 14;
-    pub const HWCAP_S390_VXRS_EXT2: auxv::AuxvType = 1 << 15;
-    pub const HWCAP_S390_VXRS_PDE: auxv::AuxvType = 1 << 16;
-    pub const HWCAP_S390_VXRS_PDE2: auxv::AuxvType = 1 << 19;
 
     // Only the 64-bit ABI has glibc-hwcaps subdirectories
     // (sysdeps/s390/s390-64/dl-hwcaps-subdirs.c).
@@ -380,22 +415,7 @@ mod cpuid {
 
     pub fn supported() -> Result<Vec<&'static str>, std::io::Error> {
         // Priority sorted, best-fit first (the glibc _dl_hwcaps_subdirs order).
-        let mut r = vec![];
-        let hwcap = auxv::getauxval(auxv::AT_HWCAP)?;
-        if hwcap & HWCAP_S390_VXRS_PDE2 != 0 {
-            r.push("z16");
-        }
-        if hwcap & HWCAP_S390_VXRS_EXT2 != 0 && hwcap & HWCAP_S390_VXRS_PDE != 0 {
-            r.push("z15");
-        }
-        if hwcap & HWCAP_S390_VXD != 0 && hwcap & HWCAP_S390_VXE != 0 && hwcap & HWCAP_S390_GS != 0
-        {
-            r.push("z14");
-        }
-        if hwcap & HWCAP_S390_VX != 0 {
-            r.push("z13");
-        }
-        Ok(r)
+        Ok(super::s390_subdirs(auxv::getauxval(auxv::AT_HWCAP)? as u64))
     }
 }
 
@@ -465,6 +485,32 @@ mod tests {
         ] {
             assert!(glibc_hwcaps_subdirs(e_machine, ei_class, ei_data).is_empty());
         }
+    }
+
+    #[test]
+    fn power_levels() {
+        // POWER10 needs POWER9 as well.
+        assert!(power_subdirs(0).is_empty());
+        assert!(power_subdirs(0x00060000).is_empty());
+        assert_eq!(power_subdirs(0x00c00000), ["power9"]);
+        assert_eq!(power_subdirs(0x00800000 | 0x00060000), Vec::<&str>::new());
+        assert_eq!(power_subdirs(0x00c60000), ["power10", "power9"]);
+    }
+
+    #[test]
+    fn s390_levels() {
+        // Each level needs the lower ones.
+        assert!(s390_subdirs(0).is_empty());
+        assert!(s390_subdirs(1 << 19).is_empty());
+        assert_eq!(s390_subdirs(1 << 11 | 1 << 19), ["z13"]);
+        // z14 needs VXD, VXE and GS.
+        assert_eq!(s390_subdirs(0x7 << 11), ["z13"]);
+        assert_eq!(s390_subdirs(0xf << 11), ["z14", "z13"]);
+        assert_eq!(s390_subdirs(0x3f << 11), ["z15", "z14", "z13"]);
+        assert_eq!(
+            s390_subdirs(0x3f << 11 | 1 << 19),
+            ["z16", "z15", "z14", "z13"]
+        );
     }
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
