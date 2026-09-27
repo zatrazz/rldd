@@ -84,10 +84,10 @@ impl WinSxs {
         let prefix = format!(
             "{}_{}_{}_",
             arch,
-            assembly.name.to_lowercase(),
+            shorten(&assembly.name.to_lowercase(), NAME_LIMIT),
             assembly.token.to_lowercase()
         );
-        let language = language_name(&assembly.language);
+        let language = shorten(&language_name(&assembly.language), LANGUAGE_LIMIT);
         let wanted = version(&assembly.version);
 
         let mut best: Option<(Vec<u32>, &String)> = None;
@@ -112,6 +112,27 @@ impl WinSxs {
 
         best.map(|(_, dir)| dir)
     }
+}
+
+// The store shortens the name and the language fields of the directory names
+// longer than these, keeping as much of the head as of the tail around a '..':
+// 'microsoft.windows.c..-controls.resources' and 'sr-..-rs' are the
+// directory fields of Microsoft.Windows.Common-Controls.Resources and
+// sr-Latn-RS.  Derived from a Windows 11 24H2 store, where the 12424
+// shortened names are all 40 characters long and none of the others is
+// longer, and the same holds for the languages and 8 characters.
+const NAME_LIMIT: usize = 40;
+const LANGUAGE_LIMIT: usize = 8;
+
+fn shorten(field: &str, limit: usize) -> String {
+    let chars: Vec<char> = field.chars().collect();
+    if chars.len() <= limit {
+        return field.to_string();
+    }
+    let keep = (limit - 2) / 2;
+    let head: String = chars[..keep].iter().collect();
+    let tail: String = chars[chars.len() - keep..].iter().collect();
+    format!("{head}..{tail}")
 }
 
 // The names the assembly directories are prefixed with, in the order they are
@@ -581,6 +602,47 @@ mod tests {
         assert!(store
             .resolve(assembly, pe::IMAGE_FILE_MACHINE_I386)
             .is_none());
+    }
+
+    #[test]
+    fn shortened_fields() {
+        assert_eq!(
+            shorten("microsoft.windows.common-controls.resources", NAME_LIMIT),
+            "microsoft.windows.c..-controls.resources"
+        );
+        assert_eq!(
+            shorten(
+                "microsoft.windows.isolationautomation.proxystub",
+                NAME_LIMIT
+            ),
+            "microsoft.windows.i..utomation.proxystub"
+        );
+        let exact = "a".repeat(NAME_LIMIT);
+        assert_eq!(shorten(&exact, NAME_LIMIT), exact);
+        assert_eq!(shorten("sr-latn-rs", LANGUAGE_LIMIT), "sr-..-rs");
+        assert_eq!(shorten("ca-es-valencia", LANGUAGE_LIMIT), "ca-..cia");
+        assert_eq!(shorten("qps-ploc", LANGUAGE_LIMIT), "qps-ploc");
+        assert_eq!(shorten("en-us", LANGUAGE_LIMIT), "en-us");
+    }
+
+    // A long assembly name and a long language are matched against the
+    // shortened directory fields.
+    #[test]
+    fn resolve_shortened_directory() {
+        let store = WinSxs::with_dirs(
+            "W",
+            &[
+                "amd64_microsoft.windows.c..-controls.resources_6595b64144ccf1df_6.0.1.0_sr-..-rs_a",
+                "amd64_microsoft.windows.c..-controls.resources_6595b64144ccf1df_6.0.1.0_en-us_b",
+            ],
+        );
+        let manifest = br#"<dependentAssembly><assemblyIdentity
+            name="Microsoft.Windows.Common-Controls.Resources" version="6.0.0.0"
+            processorArchitecture="amd64" publicKeyToken="6595b64144ccf1df"
+            language="sr-Latn-RS"/></dependentAssembly>"#;
+        let assembly = &parse_manifest(manifest)[0];
+        let resolved = store.resolve(assembly, pe::IMAGE_FILE_MACHINE_AMD64);
+        assert!(resolved.is_some_and(|dir| dir.ends_with("_sr-..-rs_a")));
     }
 
     #[test]
