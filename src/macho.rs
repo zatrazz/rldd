@@ -36,8 +36,10 @@ struct MachOInfo {
     deps: DepsVec,
     // The LC_ID_DYLIB install name.
     id: Option<String>,
-    // The LC_BUILD_VERSION/LC_VERSION_MIN_* information.
+    // The LC_BUILD_VERSION/LC_VERSION_MIN_* information, and the platforms
+    // in the load command order.
     platform: Option<String>,
+    platforms: Vec<Platform>,
     // The LC_UUID value.
     uuid: Option<String>,
     // The Mach-O header architecture and file type.
@@ -188,6 +190,9 @@ pub fn resolve_binary(ctx: &mut MachOContext, arg: &str) -> Result<DepTree, std:
 
     let config = Config {
         arch: &arch,
+        macos: omf.filetype == MH_EXECUTE
+            && built_for_macos(&omf)
+            && !omf.platforms.contains(&PLATFORM_MACCATALYST),
         cache,
         executable_path: &executable_path,
         env: &ctx.env,
@@ -358,6 +363,14 @@ fn print_object_information(
 struct Config<'a> {
     // The process architecture, which the dependencies have to match.
     arch: &'a Arch,
+    // Whether the process runs a main executable built for macOS alone.
+    // dyld only loads the images built for the process platform, the one of
+    // the main executable (UnsafeHeader::loadableIntoProcess), which for
+    // macOS are the macOS and the zippered images.  The other platforms have
+    // more rules (an iOS or a Mac Catalyst app on a Mac also loads the macOS
+    // images, for instance), and an input that is not a main executable may
+    // be loaded by processes of several platforms, so they are not checked.
+    macos: bool,
     cache: &'a DyldCache,
     executable_path: &'a str,
     env: &'a DyldEnv,
@@ -695,7 +708,9 @@ fn resolve_cache(
     if check_already_resolved(config, found, dep, tree, depp) {
         return ResolveResult::Skip;
     }
-    let Some(elc) = self::cache_image(config.cache, name, config.executable_path) else {
+    let Some(elc) = self::cache_image(config.cache, name, config.executable_path)
+        .filter(|elc| loads_platform(config, elc))
+    else {
         return ResolveResult::Miss;
     };
     add_found(
@@ -745,10 +760,17 @@ fn resolve_file(
         config.executable_path,
     )
     .ok()
-    .filter(|elc| elc.filetype == MH_DYLIB) else {
+    .filter(|elc| elc.filetype == MH_DYLIB && loads_platform(config, elc)) else {
         return ResolveResult::Miss;
     };
     add_found(elc, &path, mode, dep, tree, depp, None)
+}
+
+// Whether the process platform loads the image ELC, the images of another
+// platform being rejected like the other architectures (see Config::macos).
+// A cache image whose header is outside the cache mappings is taken as is.
+fn loads_platform(config: &Config, elc: &MachOInfo) -> bool {
+    !config.macos || elc.cputype == CpuType(0) || built_for_macos(elc)
 }
 
 // Add the object ELC found at PATH (or at the CACHE_IMAGE of the dyld cache)
@@ -953,8 +975,27 @@ fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
         }
     }
 
+    info.platforms = platforms.iter().map(|platform| platform.id).collect();
     info.platform = format_platforms(platforms);
     Ok(info)
+}
+
+// Whether an image is built for macOS, the way dyld combines its platform
+// load commands (PlatformAndVersions::zip): the first one sets the
+// platform, which a macOS and a Mac Catalyst pair turns into a zippered
+// image loadable in both, and any other platform after it is ignored.  An
+// image without any is taken as a macOS one on the Intel and arm64
+// architectures (UnsafeHeader::forEachPlatformLoadCommand).
+fn built_for_macos(info: &MachOInfo) -> bool {
+    match info.platforms.first() {
+        None => matches!(
+            info.cputype,
+            CPU_TYPE_X86_64 | CPU_TYPE_X86 | CPU_TYPE_ARM64
+        ),
+        Some(&PLATFORM_MACOS) => true,
+        Some(&PLATFORM_MACCATALYST) => info.platforms.contains(&PLATFORM_MACOS),
+        Some(_) => false,
+    }
 }
 
 // Format the LC_BUILD_VERSION/LC_VERSION_MIN_* list, printing the dual
@@ -981,6 +1022,7 @@ fn format_platforms(platforms: Vec<PlatformInfo>) -> Option<String> {
 // A build platform recorded on a LC_BUILD_VERSION or LC_VERSION_MIN_*
 // load command.
 struct PlatformInfo {
+    id: Platform,
     name: String,
     min: String,
     sdk: String,
@@ -1129,19 +1171,24 @@ fn parse_load_command<Mach: MachHeader>(
             endian, &command, x.path,
         )?)),
         LoadCommandVariant::BuildVersion(x, _) => Some(LoadCommand::Platform(PlatformInfo {
+            id: x.platform.get(endian),
             name: platform_name(x.platform.get(endian)),
             min: format_os_version(x.minos.get(endian)),
             sdk: format_os_version(x.sdk.get(endian)),
         })),
         LoadCommandVariant::VersionMin(x) => {
-            let platform = match command.cmd() {
-                LC_VERSION_MIN_MACOSX => "macOS",
-                LC_VERSION_MIN_IPHONEOS => "iOS",
-                LC_VERSION_MIN_TVOS => "tvOS",
-                LC_VERSION_MIN_WATCHOS => "watchOS",
-                _ => "unknown",
+            // dyld takes the x86 iOS, tvOS and watchOS ones as the old
+            // simulator binaries, which makes no difference to the macOS
+            // check.
+            let (id, platform) = match command.cmd() {
+                LC_VERSION_MIN_MACOSX => (PLATFORM_MACOS, "macOS"),
+                LC_VERSION_MIN_IPHONEOS => (PLATFORM_IOS, "iOS"),
+                LC_VERSION_MIN_TVOS => (PLATFORM_TVOS, "tvOS"),
+                LC_VERSION_MIN_WATCHOS => (PLATFORM_WATCHOS, "watchOS"),
+                _ => (Platform(0), "unknown"),
             };
             Some(LoadCommand::Platform(PlatformInfo {
+                id,
                 name: platform.to_string(),
                 min: format_os_version(x.version.get(endian)),
                 sdk: format_os_version(x.sdk.get(endian)),
@@ -1463,6 +1510,81 @@ mod tests {
                 node(&dylib, DepMode::LdFallbackLibraryPath),
                 node(&exe_dep, DepMode::NotFound),
             ]
+        );
+    }
+
+    fn build_version(platform: Platform) -> Vec<u8> {
+        let version = 14 << 16;
+        words(
+            &[LC_BUILD_VERSION.0, 24, platform.0, version, version, 0],
+            false,
+        )
+    }
+
+    #[test]
+    fn macos_platform() {
+        let info = |cputype, platforms: &[Platform]| MachOInfo {
+            cputype,
+            platforms: platforms.to_vec(),
+            ..Default::default()
+        };
+        let (macos, catalyst, ios) = (PLATFORM_MACOS, PLATFORM_MACCATALYST, PLATFORM_IOS);
+        for (image, expected) in [
+            (info(CPU_TYPE_X86_64, &[]), true),
+            (info(CPU_TYPE_ARM64, &[]), true),
+            (info(CPU_TYPE_POWERPC, &[]), false),
+            (info(CPU_TYPE_ARM64, &[macos]), true),
+            (info(CPU_TYPE_ARM64, &[macos, ios]), true),
+            (info(CPU_TYPE_ARM64, &[ios, macos]), false),
+            (info(CPU_TYPE_ARM64, &[catalyst]), false),
+            (info(CPU_TYPE_ARM64, &[catalyst, macos]), true),
+            (info(CPU_TYPE_ARM64, &[catalyst, ios, macos]), true),
+            (info(CPU_TYPE_ARM64, &[PLATFORM_DRIVERKIT]), false),
+        ] {
+            assert_eq!(built_for_macos(&image), expected, "{:?}", image.platforms);
+        }
+    }
+
+    #[test]
+    fn dependency_platform() {
+        // A macOS executable does not load an iOS library, while it loads a
+        // zippered one, and one without any platform.
+        let dir = Scratch::new("platform");
+        let ios = dir.write(
+            "ios/libfoo.dylib",
+            &x86_64_dylib(&[build_version(PLATFORM_IOS)]),
+        );
+        let zippered = dir.write(
+            "fb/libfoo.dylib",
+            &x86_64_dylib(&[
+                build_version(PLATFORM_MACCATALYST),
+                build_version(PLATFORM_MACOS),
+            ]),
+        );
+        let plain = dir.write("lib/libbar.dylib", &x86_64_dylib(&[]));
+        let exe = |platform: Option<Platform>| {
+            let mut cmds: Vec<Vec<u8>> = platform.into_iter().map(build_version).collect();
+            cmds.extend([load(&ios), load(&plain)]);
+            x86_64_exe(&cmds)
+        };
+        let macos = dir.write("bin/macos", &exe(Some(PLATFORM_MACOS)));
+        let implicit = dir.write("bin/implicit", &exe(None));
+        let iphone = dir.write("bin/ios", &exe(Some(PLATFORM_IOS)));
+        let mut ctx = context(None);
+        ctx.env.fallback_library_path = search_path::from_string(dir.path("fb"), &[':']);
+        for input in [macos, implicit] {
+            assert_eq!(
+                resolve(&mut ctx, &input),
+                [
+                    node(&zippered, DepMode::LdFallbackLibraryPath),
+                    node(&plain, DepMode::Direct),
+                ]
+            );
+        }
+        // Only the macOS processes are checked.
+        assert_eq!(
+            resolve(&mut ctx, &iphone),
+            [node(&ios, DepMode::Direct), node(&plain, DepMode::Direct)]
         );
     }
 
