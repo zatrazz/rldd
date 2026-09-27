@@ -2,17 +2,35 @@
 
 use object::pe;
 
-// The 32 bit machines resolve the system directory to SysWOW64 instead of
-// System32.
-pub fn is_32bit(machine: pe::Machine) -> bool {
-    matches!(
-        machine,
-        pe::IMAGE_FILE_MACHINE_I386
-            | pe::IMAGE_FILE_MACHINE_ARM
+// The system directory the WOW64 layer shows an image as System32: the
+// native images see it as it is, the x86 ones get SysWOW64, and the 32 bit
+// ARM ones SysArm32 (on an ARM64 host, up to Windows 11 23H2).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Wow64 {
+    Native,
+    X86,
+    Arm32,
+}
+
+impl Wow64 {
+    pub fn of(machine: pe::Machine) -> Self {
+        match machine {
+            pe::IMAGE_FILE_MACHINE_I386 => Wow64::X86,
+            pe::IMAGE_FILE_MACHINE_ARM
             | pe::IMAGE_FILE_MACHINE_ARMNT
-            | pe::IMAGE_FILE_MACHINE_THUMB
-            | pe::IMAGE_FILE_MACHINE_RISCV32
-    )
+            | pe::IMAGE_FILE_MACHINE_THUMB => Wow64::Arm32,
+            _ => Wow64::Native,
+        }
+    }
+
+    // The name of the directory standing for System32.
+    pub fn system_dir(self) -> &'static str {
+        match self {
+            Wow64::Native => "System32",
+            Wow64::X86 => "SysWOW64",
+            Wow64::Arm32 => "SysArm32",
+        }
+    }
 }
 
 // Whether a dependency built for MACHINE can be loaded by an image built for
@@ -85,10 +103,12 @@ mod tests {
 
     #[test]
     fn wow64_selection() {
-        assert!(is_32bit(pe::IMAGE_FILE_MACHINE_I386));
-        assert!(is_32bit(pe::IMAGE_FILE_MACHINE_ARMNT));
-        assert!(!is_32bit(pe::IMAGE_FILE_MACHINE_AMD64));
-        assert!(!is_32bit(pe::IMAGE_FILE_MACHINE_ARM64));
+        let dir = |machine| Wow64::of(machine).system_dir();
+        assert_eq!(dir(pe::IMAGE_FILE_MACHINE_I386), "SysWOW64");
+        assert_eq!(dir(pe::IMAGE_FILE_MACHINE_ARMNT), "SysArm32");
+        assert_eq!(dir(pe::IMAGE_FILE_MACHINE_AMD64), "System32");
+        assert_eq!(dir(pe::IMAGE_FILE_MACHINE_ARM64), "System32");
+        assert_eq!(dir(pe::IMAGE_FILE_MACHINE_ARM64X), "System32");
     }
 
     // A candidate of the wrong machine is skipped, which is what tells the

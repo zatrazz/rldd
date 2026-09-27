@@ -13,6 +13,7 @@ use object::{FileKind, LittleEndian as LE};
 use crate::deptree::*;
 use crate::pathutils;
 use crate::search_path;
+use machine::Wow64;
 
 mod apiset;
 mod knowndlls;
@@ -124,9 +125,9 @@ const IMAGE_FILE_EXECUTION_OPTIONS_KEY: &str =
 pub struct PeContext {
     apiset: apiset::ApiSetMap,
     knowndlls: knowndlls::KnownDlls,
-    // The known DLL sections of the 64 and the 32 bit images, built on first
-    // use.
-    known_sections: [OnceCell<HashSet<String>>; 2],
+    // The known DLL sections of the native, the x86 and the 32 bit ARM
+    // images, built on first use.
+    known_sections: [OnceCell<HashSet<String>>; 3],
     winsxs: sxs::WinSxs,
     windows_dir: String,
     safe_search: bool,
@@ -160,7 +161,7 @@ impl PeContext {
     // The system state, with the default settings.
     fn new(safe_search: bool) -> Self {
         let windows_dir = search_dirs::windows_dir();
-        let apiset = apiset::load(&search_dirs::system_dir(&windows_dir, false));
+        let apiset = apiset::load(&search_dirs::system_dir(&windows_dir, Wow64::Native));
         let native_machine = native_machine(&windows_dir);
         Self {
             apiset,
@@ -185,19 +186,24 @@ impl PeContext {
     // The directories the known DLLs are resolved from.  The registry values
     // are gone on the recent Windows versions, where the loader creates the
     // known DLLs from the system directories.
-    fn knowndll_dirs(&self, is_32bit: bool) -> Vec<String> {
-        match self.knowndlls.directory(is_32bit) {
+    fn knowndll_dirs(&self, wow64: Wow64) -> Vec<String> {
+        let dir = match wow64 {
+            Wow64::Native => self.knowndlls.directory(false),
+            Wow64::X86 => self.knowndlls.directory(true),
+            Wow64::Arm32 => None,
+        };
+        match dir {
             Some(dir) => vec![dir.to_string()],
-            None => search_dirs::system_dirs(&self.windows_dir, is_32bit),
+            None => search_dirs::system_dirs(&self.windows_dir, wow64),
         }
     }
 
-    // The known DLL sections for a 32 or a 64 bit image, built the way smss
-    // does from the registry list and the static imports of the modules on
-    // the known DLLs directory.
-    fn known_dlls(&self, is_32bit: bool) -> &HashSet<String> {
-        self.known_sections[usize::from(is_32bit)].get_or_init(|| {
-            let dirs = self.knowndll_dirs(is_32bit);
+    // The known DLL sections for an image, built the way smss does from the
+    // registry list and the static imports of the modules on the known DLLs
+    // directory.
+    fn known_dlls(&self, wow64: Wow64) -> &HashSet<String> {
+        self.known_sections[wow64 as usize].get_or_init(|| {
+            let dirs = self.knowndll_dirs(wow64);
             knowndlls::sections(self.knowndlls.names(), |name| {
                 let deps = dirs
                     .iter()
@@ -215,8 +221,8 @@ impl PeContext {
         })
     }
 
-    fn is_known_dll(&self, name: &str, is_32bit: bool) -> bool {
-        self.known_dlls(is_32bit).contains(&name.to_lowercase())
+    fn is_known_dll(&self, name: &str, wow64: Wow64) -> bool {
+        self.known_dlls(wow64).contains(&name.to_lowercase())
     }
 }
 
@@ -243,7 +249,7 @@ pub fn resolve_binary(ctx: &mut PeContext, arg: &str) -> Result<DepTree, std::io
         application.as_deref(),
         &ctx.dll_directory,
         &ctx.windows_dir,
-        machine::is_32bit(pei.machine),
+        Wow64::of(pei.machine),
         ctx.safe_search,
     );
 
@@ -309,7 +315,7 @@ fn print_object_information(
     ));
     lines.push(format!(
         "  known dlls: {} modules",
-        ctx.known_dlls(machine::is_32bit(pei.machine)).len()
+        ctx.known_dlls(Wow64::of(pei.machine)).len()
     ));
     lines.push(format!(
         "  winsxs: {}",
@@ -739,11 +745,8 @@ fn find_dependency(
         return Some((info, pathutils::get_path(&path)?, DepMode::Direct));
     }
 
-    if config
-        .ctx
-        .is_known_dll(name, machine::is_32bit(config.machine))
-    {
-        let known = config.ctx.knowndll_dirs(machine::is_32bit(config.machine));
+    if config.ctx.is_known_dll(name, Wow64::of(config.machine)) {
+        let known = config.ctx.knowndll_dirs(Wow64::of(config.machine));
         let known = known.iter().map(|dir| (dir.as_str(), DepMode::LdCache));
         if let Some(found) = find_in(config, name, known, searched) {
             return Some(found);
@@ -783,7 +786,7 @@ fn open_object<P: AsRef<Path>>(
 // The machine of the system ntdll, which is the one a native process runs as:
 // ARM64 on Windows on ARM, even when rldd itself runs emulated there.
 fn native_machine(windows_dir: &str) -> pe::Machine {
-    let ntdll = Path::new(&search_dirs::system_dir(windows_dir, false)).join("ntdll.dll");
+    let ntdll = Path::new(&search_dirs::system_dir(windows_dir, Wow64::Native)).join("ntdll.dll");
     let machine = pathutils::map_file(&ntdll).ok().and_then(|mmap| {
         let file = PeFile::<pe::ImageNtHeaders64>::parse(&*mmap).ok()?;
         Some(file.nt_headers().file_header().machine.get(LE))
@@ -1144,7 +1147,8 @@ mod tests {
         }
 
         // An object that runs resolves every dependency from the system.
-        let system = search_dirs::system_dir(&search_dirs::windows_dir(), false).to_lowercase();
+        let system =
+            search_dirs::system_dir(&search_dirs::windows_dir(), Wow64::Native).to_lowercase();
         assert!(
             deptree.arena[1..].iter().any(|node| node
                 .val
@@ -1196,7 +1200,7 @@ mod tests {
 
     #[test]
     fn parse_a_system_library() {
-        let system = search_dirs::system_dir(&search_dirs::windows_dir(), false);
+        let system = search_dirs::system_dir(&search_dirs::windows_dir(), Wow64::Native);
         let pei = open_pe_file(&Path::new(&system).join("kernel32.dll")).unwrap();
         assert!(pei.is_dll);
         assert!(!pei.exports.names.is_empty());
@@ -1210,7 +1214,7 @@ mod tests {
     #[test]
     #[cfg(target_arch = "aarch64")]
     fn system_modules_are_hybrid() {
-        let system = search_dirs::system_dir(&search_dirs::windows_dir(), false);
+        let system = search_dirs::system_dir(&search_dirs::windows_dir(), Wow64::Native);
         let pei = open_pe_file(&Path::new(&system).join("kernel32.dll")).unwrap();
         assert_eq!(pei.machine, pe::IMAGE_FILE_MACHINE_ARM64X);
         assert!(machine::compatible(
@@ -1236,24 +1240,24 @@ mod tests {
     #[test]
     fn known_dlls_from_the_registry() {
         let ctx = PeContext::new(true);
-        for is_32bit in [false, true] {
-            assert!(ctx.is_known_dll("KERNEL32.dll", is_32bit));
+        for wow64 in [Wow64::Native, Wow64::X86] {
+            assert!(ctx.is_known_dll("KERNEL32.dll", wow64));
             // Not on the registry list, but imported by kernel32.
-            assert!(ctx.is_known_dll("ntdll.dll", is_32bit));
-            assert!(ctx.is_known_dll("KernelBase.dll", is_32bit));
-            assert!(!ctx.is_known_dll("rldd-not-a-known.dll", is_32bit));
+            assert!(ctx.is_known_dll("ntdll.dll", wow64));
+            assert!(ctx.is_known_dll("KernelBase.dll", wow64));
+            assert!(!ctx.is_known_dll("rldd-not-a-known.dll", wow64));
         }
         // The WOW64 layer only exists as 64 bit modules.
-        let system = search_dirs::system_dir(&search_dirs::windows_dir(), false);
+        let system = search_dirs::system_dir(&search_dirs::windows_dir(), Wow64::Native);
         if Path::new(&system).join("wow64.dll").exists() {
-            assert!(ctx.is_known_dll("wow64.dll", false));
-            assert!(!ctx.is_known_dll("wow64.dll", true));
+            assert!(ctx.is_known_dll("wow64.dll", Wow64::Native));
+            assert!(!ctx.is_known_dll("wow64.dll", Wow64::X86));
         }
     }
 
     #[test]
     fn api_set_schema_from_the_system() {
-        let system = search_dirs::system_dir(&search_dirs::windows_dir(), false);
+        let system = search_dirs::system_dir(&search_dirs::windows_dir(), Wow64::Native);
         let schema = apiset::load(&system);
         assert!(!schema.is_empty());
         assert_eq!(schema.version(), 6);
@@ -1434,7 +1438,7 @@ mod tests {
         let i386 = pe::IMAGE_FILE_MACHINE_I386;
 
         assert_eq!(machine(clr_image(i386, ilonly)), ctx.native_machine);
-        assert!(!machine::is_32bit(ctx.native_machine));
+        assert_eq!(Wow64::of(ctx.native_machine), Wow64::Native);
         assert_eq!(machine(clr_image(i386, ilonly | required)), i386);
         assert_eq!(
             machine(clr_image(i386, ilonly | required | preferred)),
