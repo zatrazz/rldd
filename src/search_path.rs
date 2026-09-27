@@ -133,6 +133,7 @@ pub fn from_string<S: AsRef<str>>(string: S, delim: &[char]) -> SearchPathVec {
 // a regular dependency, so the entries are kept as given.  The list is
 // separated by colons or whitespace on every loader.
 #[cfg(unix)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn from_preload<S: AsRef<str>>(string: S) -> Vec<String> {
     string
         .as_ref()

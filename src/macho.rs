@@ -82,7 +82,7 @@ pub fn create_context(opts: &crate::Options) -> Result<MachOContext, String> {
     Ok(MachOContext {
         cache,
         arch,
-        preload: search_path::from_preload(&opts.preload),
+        preload: insert_libraries(&opts.preload),
         env: DyldEnv {
             library_path: search_path::from_string(&opts.library_path, &[':']),
             framework_path: search_path::from_string(&opts.framework_path, &[':']),
@@ -98,6 +98,16 @@ pub fn create_context(opts: &crate::Options) -> Result<MachOContext, String> {
         depth: opts.depth,
         ignore_prefix: opts.ignore_prefix.clone(),
     })
+}
+
+// The DYLD_INSERT_LIBRARIES entries.  Unlike the ELF loaders, dyld splits
+// the list on colons only (PathOverrides::forEachInColonList), so a path
+// with spaces is a single entry.
+fn insert_libraries(list: &str) -> Vec<String> {
+    list.split(':')
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 pub fn resolve_binary(ctx: &mut MachOContext, arg: &str) -> Result<DepTree, std::io::Error> {
@@ -1057,6 +1067,19 @@ mod tests {
 
     fn x86_64_dylib(cmds: &[Vec<u8>]) -> Vec<u8> {
         macho(CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL.0, MH_DYLIB, cmds)
+    }
+
+    #[test]
+    fn insert_libraries_list() {
+        assert_eq!(insert_libraries(""), Vec::<String>::new());
+        assert_eq!(
+            insert_libraries("/Library/Application Support/X/libx.dylib:/usr/lib/liby.dylib"),
+            [
+                "/Library/Application Support/X/libx.dylib",
+                "/usr/lib/liby.dylib"
+            ]
+        );
+        assert_eq!(insert_libraries("::a b::c:"), ["a b", "c"]);
     }
 
     #[test]
