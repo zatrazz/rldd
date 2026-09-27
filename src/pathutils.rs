@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{Error, Result};
+use std::io::{Error, ErrorKind, Result};
 use std::path::Path;
 
 use memmap2::Mmap;
@@ -24,22 +24,32 @@ pub fn join(dir: &str, name: &str) -> String {
     format!("{dir}{}{name}", std::path::MAIN_SEPARATOR)
 }
 
-// Map the whole FILE in memory for reading.
+// Map the whole FILE in memory for reading.  A directory, which unix opens
+// but does not map (the error would be ENODEV on Linux), is reported as
+// such.
 pub fn map(file: &fs::File) -> Result<Mmap> {
+    if file.metadata()?.is_dir() {
+        return Err(Error::from(ErrorKind::IsADirectory));
+    }
     // SAFETY: the mapping is only read.  Another process modifying the file
     // while it is mapped changes the data underneath (and truncating it may
     // fault), which is accepted for a diagnostic tool.
-    unsafe { Mmap::map(file) }.map_err(|_| Error::other("Failed to map file"))
+    unsafe { Mmap::map(file) }
 }
 
-// Open and map FILENAME, returning the open error as is.
+// Open and map FILENAME, returning the open error as is, except for a
+// directory, which Windows does not open (access denied).
 // Unused by the Android and BSD backends.
 #[cfg_attr(
     all(unix, not(any(target_os = "linux", target_os = "macos"))),
     allow(dead_code)
 )]
 pub fn map_file<P: AsRef<Path>>(filename: &P) -> Result<Mmap> {
-    map(&fs::File::open(filename)?)
+    let file = fs::File::open(filename).map_err(|err| match fs::metadata(filename) {
+        Ok(metadata) if metadata.is_dir() => Error::from(ErrorKind::IsADirectory),
+        _ => err,
+    })?;
+    map(&file)
 }
 
 // Whether PATH starts with any of PREFIXES (the --ignore-prefix option).  The
@@ -88,10 +98,25 @@ pub fn strip_verbatim(path: &str) -> String {
     path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn map_errors() {
+        let dir = std::env::temp_dir();
+        assert_eq!(map_file(&dir).unwrap_err().kind(), ErrorKind::IsADirectory);
+        // Unlike Windows, unix opens a directory.
+        #[cfg(unix)]
+        assert_eq!(
+            map(&fs::File::open(&dir).unwrap()).unwrap_err().kind(),
+            ErrorKind::IsADirectory
+        );
+        let missing = dir.join("rldd-missing-file");
+        assert_eq!(map_file(&missing).unwrap_err().kind(), ErrorKind::NotFound);
+    }
+
+    #[cfg(windows)]
     #[test]
     fn ignore_prefix() {
         let prefixes = [r"C:\Windows".to_string()];
@@ -103,6 +128,7 @@ mod tests {
         assert!(!has_prefix("C:\\é", &[r"C:\x".to_string()]));
     }
 
+    #[cfg(windows)]
     #[test]
     fn verbatim_prefix() {
         assert_eq!(strip_verbatim(r"\\?\C:\Windows"), r"C:\Windows");
