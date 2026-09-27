@@ -1,4 +1,6 @@
-use argh::FromArgs;
+use std::ffi::OsString;
+
+use argh::{ArgsInfo, FromArgs};
 
 #[macro_use]
 mod output;
@@ -92,7 +94,7 @@ fn print_deps_children(p: &Printer, deps: &DepTree, children: &[usize], deptrace
     }
 }
 
-#[derive(FromArgs)]
+#[derive(FromArgs, ArgsInfo)]
 /// Print shared object dependencies
 // A 'help' trigger would take a file named help as the request for the usage.
 #[argh(help_triggers("-h", "--help"))]
@@ -234,12 +236,96 @@ fn print_version_errors(arg: &str, errors: &[elf::VersionError]) {
     }
 }
 
-fn print_error(arg: &String, err: std::io::Error) -> String {
+fn print_error(arg: &str, err: std::io::Error) -> String {
     match err.kind() {
         std::io::ErrorKind::NotFound => format!("{arg}: no such file or directory"),
         std::io::ErrorKind::PermissionDenied => format!("{arg}: permission denied"),
         _ => format!("{arg}: {err}"),
     }
+}
+
+// The command line split in the options, which argh parses, and the files.
+struct CommandLine {
+    options: Vec<String>,
+    files: Vec<OsString>,
+}
+
+// Split ARGS, the command line without the program name, the way argh parses
+// it: the files start after '--' or at the first argument that is neither an
+// option nor an option value, and every argument from there on is a file (the
+// files are greedy).  argh requires valid UTF-8 for the whole command line,
+// while the files are kept here as given, so a file name that is not valid
+// UTF-8 fails for that file only.
+fn split_command_line(
+    args: impl IntoIterator<Item = OsString>,
+    flags: &[argh::FlagInfo],
+) -> Result<CommandLine, String> {
+    // Whether OPTION takes a value, which is the argument following it.
+    let takes_value = |option: &str| {
+        flags.iter().any(|flag| {
+            let short = flag.short.map(|short| format!("-{short}"));
+            matches!(flag.kind, argh::FlagInfoKind::Option { .. })
+                && (flag.long == option || short.as_deref() == Some(option))
+        })
+    };
+
+    let mut options = Vec::new();
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            break;
+        }
+        if !arg.as_encoded_bytes().starts_with(b"-") {
+            let files = std::iter::once(arg).chain(args).collect();
+            return Ok(CommandLine { options, files });
+        }
+
+        let option = arg
+            .into_string()
+            .map_err(|arg| format!("Unrecognized argument: {}\n", arg.to_string_lossy()))?;
+        let value = match takes_value(&option).then(|| args.next()).flatten() {
+            Some(value) => Some(
+                value
+                    .into_string()
+                    .map_err(|value| invalid_value(&option, &value.to_string_lossy()))?,
+            ),
+            // A missing value is left for argh to report.
+            None => None,
+        };
+        options.push(option);
+        options.extend(value);
+    }
+    let files = args.collect();
+    Ok(CommandLine { options, files })
+}
+
+fn invalid_value(option: &str, value: &str) -> String {
+    format!("Error parsing option '{option}' with value '{value}': not valid UTF-8\n")
+}
+
+// Parse ARGS, the command line without the program name, returning the
+// options along with the files as given.
+fn parse(
+    cmd: &str,
+    args: impl IntoIterator<Item = OsString>,
+) -> Result<(Options, Vec<OsString>), argh::EarlyExit> {
+    let command_line = split_command_line(args, Options::get_args_info().flags)?;
+
+    // After a '--', argh takes every argument as a file, even one that looks
+    // like an option.
+    let files: Vec<String> = command_line
+        .files
+        .iter()
+        .map(|file| file.to_string_lossy().into_owned())
+        .collect();
+    let mut args: Vec<&str> = command_line.options.iter().map(String::as_str).collect();
+    if !files.is_empty() {
+        args.push("--");
+        args.extend(files.iter().map(String::as_str));
+    }
+
+    let opts = Options::from_args(&[cmd], &args)?;
+    Ok((opts, command_line.files))
 }
 
 // Report a command line error the way argh does, and exit.
@@ -251,7 +337,7 @@ fn usage_error(cmd: &str, message: &str) -> ! {
 // Parse the command line.  Unlike argh::from_env, which prints with println!
 // and eprintln!, the usage and the errors go through the output helpers,
 // which do not panic when the output is closed.
-fn parse_args() -> Options {
+fn parse_args() -> (Options, Vec<OsString>) {
     let mut args = std::env::args_os();
     let program = args.next().unwrap_or_default();
     let cmd = std::path::Path::new(&program)
@@ -259,16 +345,8 @@ fn parse_args() -> Options {
         .and_then(|name| name.to_str())
         .unwrap_or(env!("CARGO_PKG_NAME"));
 
-    let args = args
-        .map(|arg| arg.into_string())
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap_or_else(|arg| {
-            usage_error(cmd, &format!("Invalid utf8: {}", arg.to_string_lossy()))
-        });
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-
-    match Options::from_args(&[cmd], &args) {
-        Ok(opts) => opts,
+    match parse(cmd, args) {
+        Ok(parsed) => parsed,
         Err(early_exit) => match early_exit.status {
             Ok(()) => {
                 outln!("{}", early_exit.output);
@@ -280,7 +358,7 @@ fn parse_args() -> Options {
 }
 
 fn main() {
-    let opts = parse_args();
+    let (opts, files) = parse_args();
 
     // On macOS the dependencies are always shown with their full resolved path.
     let printer = printer::create(
@@ -307,15 +385,24 @@ fn main() {
         std::process::exit(1);
     };
 
-    for arg in opts.args {
-        match resolve_binary(&mut ctx, &arg) {
+    // ARG is the file name as argh parsed it, which is lossy for a name that
+    // is not valid UTF-8.
+    for (arg, file) in opts.args.iter().zip(&files) {
+        // The backends take the file name as a string.
+        if file.to_str().is_none() {
+            errln!("error: {arg}: path is not valid UTF-8");
+            output::set_exit_status(1);
+            continue;
+        }
+
+        match resolve_binary(&mut ctx, arg) {
             Ok(deptree) => {
                 // Mimic ldd, where --unused suppress both the dependency listing
                 // and the undefined symbols report.
                 #[cfg(target_os = "linux")]
                 if opts.unused {
                     let relocs = check_relocations(&deptree, true, true);
-                    print_version_errors(&arg, &relocs.version_errors);
+                    print_version_errors(arg, &relocs.version_errors);
                     if !relocs.unused.is_empty() {
                         outln!("Unused direct dependencies:");
                         for path in relocs.unused {
@@ -333,7 +420,7 @@ fn main() {
                         let relocs = check_relocations(&deptree, opts.function_relocs, false);
                         // The loader prints the version check errors before the
                         // dependency listing.
-                        print_version_errors(&arg, &relocs.version_errors);
+                        print_version_errors(arg, &relocs.version_errors);
                         relocs.undefined
                     };
                     #[cfg(windows)]
@@ -365,11 +452,153 @@ fn main() {
                 }
             }
             Err(e) => {
-                errln!("error: {}", print_error(&arg, e));
+                errln!("error: {}", print_error(arg, e));
                 output::set_exit_status(1);
             }
         }
     }
 
     std::process::exit(output::exit_status());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // An option with a value and a switch, whatever the target options are.
+    const FLAGS: &[argh::FlagInfo] = &[
+        argh::FlagInfo {
+            kind: argh::FlagInfoKind::Option { arg_name: "depth" },
+            optionality: argh::Optionality::Optional,
+            long: "--depth",
+            short: Some('D'),
+            description: "",
+            hidden: false,
+        },
+        argh::FlagInfo {
+            kind: argh::FlagInfoKind::Switch,
+            optionality: argh::Optionality::Optional,
+            long: "--verbose",
+            short: Some('v'),
+            description: "",
+            hidden: false,
+        },
+    ];
+
+    fn split(args: &[&str]) -> (Vec<String>, Vec<OsString>) {
+        let command_line = split_command_line(args.iter().map(OsString::from), FLAGS).unwrap();
+        (command_line.options, command_line.files)
+    }
+
+    fn parse_ok(args: &[&str]) -> (Options, Vec<OsString>) {
+        parse("rldd", args.iter().map(OsString::from)).unwrap()
+    }
+
+    #[test]
+    fn options_and_files() {
+        assert_eq!(
+            split(&["-v", "a", "b"]),
+            (vec!["-v".into()], vec!["a".into(), "b".into()])
+        );
+        assert_eq!(
+            split(&["--depth", "0", "-v"]),
+            (vec!["--depth".into(), "0".into(), "-v".into()], vec![])
+        );
+        assert_eq!(
+            split(&["-D", "0", "a"]),
+            (vec!["-D".into(), "0".into()], vec!["a".into()])
+        );
+        // An option value is not a file, even when it looks like an option.
+        assert_eq!(
+            split(&["--depth", "-v", "a"]),
+            (vec!["--depth".into(), "-v".into()], vec!["a".into()])
+        );
+        // A missing value is left for argh to report.
+        assert_eq!(split(&["--depth"]), (vec!["--depth".into()], vec![]));
+        // The files start after '--', and take every argument that follows.
+        assert_eq!(
+            split(&["a", "-v", "--"]),
+            (vec![], vec!["a".into(), "-v".into(), "--".into()])
+        );
+        assert_eq!(
+            split(&["-v", "--", "-v", "--"]),
+            (vec!["-v".into()], vec!["-v".into(), "--".into()])
+        );
+        // An unknown option is left for argh to report.
+        assert_eq!(
+            split(&["--other", "a"]),
+            (vec!["--other".into()], vec!["a".into()])
+        );
+    }
+
+    #[test]
+    fn help_triggers() {
+        for help in ["-h", "--help"] {
+            let early_exit = parse("rldd", [OsString::from(help)]).err().unwrap();
+            assert_eq!(early_exit.status, Ok(()));
+        }
+        // A file named help is inspected.
+        let (opts, files) = parse_ok(&["help"]);
+        assert_eq!(opts.args, ["help"]);
+        assert_eq!(files, ["help"]);
+        // So is a file named like a help trigger, after the first file or '--'.
+        assert_eq!(parse_ok(&["a", "--help"]).0.args, ["a", "--help"]);
+        assert_eq!(parse_ok(&["--", "-h"]).0.args, ["-h"]);
+    }
+
+    #[test]
+    fn argh_errors() {
+        for args in [
+            &["--other", "a"][..],
+            &["--library-path"],
+            &["-h", "--other"],
+        ] {
+            let early_exit = parse("rldd", args.iter().map(OsString::from))
+                .err()
+                .unwrap();
+            assert_eq!(early_exit.status, Err(()));
+        }
+    }
+
+    // A name that is not valid UTF-8: a lone continuation byte on unix, and
+    // an unpaired surrogate on Windows.
+    #[cfg(unix)]
+    fn invalid(prefix: &str) -> OsString {
+        use std::os::unix::ffi::OsStringExt;
+        let mut name = prefix.as_bytes().to_vec();
+        name.push(0xff);
+        OsString::from_vec(name)
+    }
+
+    #[cfg(windows)]
+    fn invalid(prefix: &str) -> OsString {
+        use std::os::windows::ffi::OsStringExt;
+        let mut name: Vec<u16> = prefix.encode_utf16().collect();
+        name.push(0xd800);
+        OsString::from_wide(&name)
+    }
+
+    #[test]
+    fn invalid_utf8() {
+        let lossy = invalid("bin").to_string_lossy().into_owned();
+
+        // A file name is kept as given, and only fails for that file.
+        let (opts, files) = parse("rldd", [OsString::from("a"), invalid("bin")]).unwrap();
+        assert_eq!(opts.args, ["a".to_string(), lossy.clone()]);
+        assert_eq!(files, [OsString::from("a"), invalid("bin")]);
+
+        // An option or an option value is an error.
+        let error = |args: Vec<OsString>| split_command_line(args, FLAGS).err().unwrap();
+        assert_eq!(
+            error(vec!["--depth".into(), invalid("bin")]),
+            format!("Error parsing option '--depth' with value '{lossy}': not valid UTF-8\n")
+        );
+        assert_eq!(
+            error(vec![invalid("-")]),
+            format!(
+                "Unrecognized argument: {}\n",
+                invalid("-").to_string_lossy()
+            )
+        );
+    }
 }
