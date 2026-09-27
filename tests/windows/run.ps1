@@ -444,19 +444,12 @@ function Get-StaticModules($Tree, [switch]$Loose) {
 # executable (STRICT and LOOSE, as Get-StaticModules builds them) and the
 # modules the loader mapped.  The loader always maps ntdll, kernel32 and
 # kernelbase, and a 32 bit process has the native WOW64 layer (System32) too,
-# none of which needs an import.  Two things rldd does not read are kept
-# apart: the assemblies the system default activation context redirects to,
-# the comctl32 version 5.82 and the gdiplus version 1.1 ones, even without a
-# manifest (rldd resolves them through the system directory), and the
-# application compatibility shims, which bring apphelp.dll and the modules of
-# the shims along with what they import.
+# none of which needs an import.  The application compatibility shims, which
+# rldd does not read, are kept apart: they bring apphelp.dll and the modules
+# of the shims along with what they import.
 function Compare-Paths($Loader, $Strict, $Loose) {
     $system32 = (Join-Path $env:SystemRoot 'System32\').ToLowerInvariant()
     $always = @('ntdll.dll', 'kernel32.dll', 'kernelbase.dll')
-    $redirected = @{
-        'comctl32.dll' = '\\winsxs\\[^\\]*_microsoft\.windows\.common-controls_[^\\]*_5\.82\.'
-        'gdiplus.dll'  = '\\winsxs\\[^\\]*_microsoft\.windows\.gdiplus_[^\\]*_1\.1\.'
-    }
     $mapped = @{}
     foreach ($path in $Loader.Modules) {
         $lower = $path.ToLowerInvariant()
@@ -467,7 +460,6 @@ function Compare-Paths($Loader, $Strict, $Loose) {
     }
 
     $differences = [System.Collections.Generic.List[string]]::new()
-    $default = 0
     $shims = 0
     foreach ($name in $Loose.Modules.Keys) {
         $resolved = $Loose.Modules[$name]
@@ -479,10 +471,6 @@ function Compare-Paths($Loader, $Strict, $Loose) {
         }
         $path = $mapped[$name]
         if ($path -ieq $resolved) {
-            continue
-        }
-        if ($redirected.ContainsKey($name) -and $path -match $redirected[$name]) {
-            $default++
             continue
         }
         $differences.Add("rldd resolves $resolved, the loader maps $path")
@@ -501,7 +489,7 @@ function Compare-Paths($Loader, $Strict, $Loose) {
     foreach ($name in $Strict.Missing) {
         $differences.Add("rldd does not resolve $name, and the process starts")
     }
-    [pscustomobject]@{ Differences = $differences.ToArray(); SystemDefault = $default; Shims = [int]($shims -gt 0) }
+    [pscustomobject]@{ Differences = $differences.ToArray(); Shims = [int]($shims -gt 0) }
 }
 
 # The NTSTATUS exception codes a process killed by an exception exits with,
@@ -593,7 +581,6 @@ $unreadable = 0
 $refused = 0
 $compared = 0
 $started = 0
-$systemDefault = 0
 $shimmed = 0
 
 Write-Host "Sweeping $($binaries.Count) objects with $Dumpbin"
@@ -716,7 +703,6 @@ try {
             }
             $started++
             $comparison = Compare-Paths $output.Loader $output.Strict $output.Loose
-            $systemDefault += $comparison.SystemDefault
             $shimmed += $comparison.Shims
             foreach ($difference in $comparison.Differences) {
                 $pathDiffs.Add("$($output.File): $difference")
@@ -760,9 +746,6 @@ if ($notFound.Count) {
     foreach ($name in $names) { Write-Detail "    $($name.Count)  $($name.Name)" }
 }
 if ($Paths) {
-    if ($systemDefault) {
-        Write-Detail "$systemDefault comctl32 or gdiplus mapped from the assembly of the system default activation context"
-    }
     if ($shimmed) {
         Write-Detail "$shimmed executables with the application compatibility shims mapped"
     }

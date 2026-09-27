@@ -116,13 +116,6 @@ apphelp.dll and the modules of the shims (AcLayers.dll, with shlwapi.dll, for
 msiexec.exe and regsvr32.exe) along; when apphelp.dll is mapped, the modules
 only the loader maps are counted apart.
 
-**The system default activation context.**  The loader maps comctl32 from the
-version 5.82 assembly of WinSxS, and gdiplus from the version 1.1 one, when no
-manifest asks for another version, even for an executable without a manifest,
-while rldd resolves them through the system directory (the WinSxS manifests of
-the system default context are compressed, so rldd does not read it).  Those
-are counted apart.
-
 **Objects the reference tool cannot read.**  dumpbin refuses some objects rldd
 reads (a packed executable whose section table it cannot seek, an optional
 header it rejects), and reports the files that are not a PE object at all as an
