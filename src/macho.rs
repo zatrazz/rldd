@@ -40,6 +40,10 @@ struct MachOInfo {
     platform: Option<String>,
     // The LC_UUID value.
     uuid: Option<String>,
+    // The Mach-O header architecture and file type.
+    cputype: CpuType,
+    cpusubtype: CpuSubtype,
+    filetype: FileType,
 }
 
 // The DYLD_* environment search paths and image suffix, mimicked with
@@ -52,12 +56,14 @@ struct DyldEnv {
     image_suffix: Option<String>,
 }
 
-// The resolution context: the dyld shared cache along with the architecture
-// used to select Mach-O slices and the cache flavor, and the command line
-// settings.
+// The resolution context: the architecture selecting the input slice (the
+// one requested or the host one), the dyld shared caches, and the command
+// line settings.
 pub struct MachOContext {
-    cache: DyldCache,
     arch: Arch,
+    // The dyld shared caches loaded so far, along with their names, since
+    // each input selects the cache flavor of its architecture.
+    caches: Vec<(&'static [&'static str], DyldCache)>,
     preload: Vec<String>,
     env: DyldEnv,
     all: bool,
@@ -67,24 +73,35 @@ pub struct MachOContext {
 }
 
 impl MachOContext {
-    // Retrieve a dynamic object information from the dyld system cache.
-    fn get(&self, name: &str, executable_path: &str) -> Option<MachOInfo> {
-        match self.cache.image(name)? {
-            Some((data, offset)) => {
-                let loader_path = pathutils::get_path(&Path::new(name)).unwrap_or_default();
-                parse_thin(data, offset, &self.arch, executable_path, &loader_path).ok()
+    // The index of the dyld shared cache with the NAMES flavor, loaded on
+    // its first use.
+    fn load_cache(&mut self, names: &'static [&'static str]) -> usize {
+        match self.caches.iter().position(|(cached, _)| *cached == names) {
+            Some(idx) => idx,
+            None => {
+                self.caches.push((names, dyldcache::load(names)));
+                self.caches.len() - 1
             }
-            None => Some(MachOInfo::default()),
         }
+    }
+}
+
+// Retrieve a dynamic object information from the dyld shared cache.
+fn cache_image(cache: &DyldCache, name: &str, executable_path: &str) -> Option<MachOInfo> {
+    match cache.image(name)? {
+        Some((data, offset)) => {
+            let loader_path = pathutils::get_path(&Path::new(name)).unwrap_or_default();
+            parse_thin(data, offset, Check::Cache, executable_path, &loader_path).ok()
+        }
+        None => Some(MachOInfo::default()),
     }
 }
 
 pub fn create_context(opts: &crate::Options) -> Result<MachOContext, String> {
     let arch = Arch::new(opts.arch.as_deref())?;
-    let cache = dyldcache::load(arch.cache_names());
     Ok(MachOContext {
-        cache,
         arch,
+        caches: Vec::new(),
         preload: insert_libraries(&opts.preload),
         env: DyldEnv {
             library_path: search_path::from_string(&opts.library_path, &[':']),
@@ -114,34 +131,44 @@ fn insert_libraries(list: &str) -> Vec<String> {
 }
 
 pub fn resolve_binary(ctx: &mut MachOContext, arg: &str) -> Result<DepTree, std::io::Error> {
-    let ctx: &MachOContext = ctx;
-
     // Mach-O images may exist only inside the dyld shared cache (macOS 11+),
     // so fall back to a cache lookup by the install name when the file is not
-    // present.
+    // present, on the cache of the requested or the host architecture.
     let (filename, omf) = match Path::new(arg).canonicalize() {
         Ok(filename) => {
             let executable_path = pathutils::get_path(&filename).ok_or(std::io::Error::other(
                 format!("failed to get path of input file {arg}"),
             ))?;
-            let omf = open_macho_file(&filename, &ctx.arch, &executable_path)?;
+            let omf = open_macho_file(&filename, Check::Input(&ctx.arch), &executable_path)?;
             (filename, omf)
         }
-        Err(err) => match ctx.get(
-            arg,
-            &pathutils::get_path(&Path::new(arg)).unwrap_or_default(),
-        ) {
-            Some(omf) => (Path::new(arg).to_path_buf(), omf),
-            None => return Err(err),
-        },
+        Err(err) => {
+            let cache = ctx.load_cache(ctx.arch.cache_names());
+            match cache_image(
+                &ctx.caches[cache].1,
+                arg,
+                &pathutils::get_path(&Path::new(arg)).unwrap_or_default(),
+            ) {
+                Some(omf) => (Path::new(arg).to_path_buf(), omf),
+                None => return Err(err),
+            }
+        }
     };
+
+    // Like dyld, which grades the dependency slices by the main executable
+    // architecture, the input slice sets the process architecture every
+    // dependency has to match, along with the dyld cache flavor.
+    let arch = Arch::process(omf.cputype, omf.cpusubtype, omf.filetype);
+    let cache = ctx.load_cache(arch.cache_names());
+    let ctx: &MachOContext = ctx;
+    let cache = &ctx.caches[cache].1;
 
     let executable_path = pathutils::get_path(&filename).ok_or(std::io::Error::other(format!(
         "failed to get path of input file {arg}"
     )))?;
 
     if ctx.verbose {
-        print_object_information(ctx, &ctx.env, &filename, &omf);
+        print_object_information(&arch, cache, &ctx.env, &filename, &omf);
     }
 
     let mut deptree = DepTree::new();
@@ -152,7 +179,8 @@ pub fn resolve_binary(ctx: &mut MachOContext, arg: &str) -> Result<DepTree, std:
     ));
 
     let config = Config {
-        ctx,
+        arch: &arch,
+        cache,
         executable_path: &executable_path,
         env: &ctx.env,
         all: ctx.all,
@@ -196,9 +224,15 @@ pub fn resolve_binary(ctx: &mut MachOContext, arg: &str) -> Result<DepTree, std:
 
 // The verbose object information: the object metadata from the load
 // commands along with the search path lists used for the resolution.
-fn print_object_information(ctx: &MachOContext, env: &DyldEnv, filename: &Path, omf: &MachOInfo) {
+fn print_object_information(
+    arch: &Arch,
+    cache: &DyldCache,
+    env: &DyldEnv,
+    filename: &Path,
+    omf: &MachOInfo,
+) {
     let mut lines = vec![format!("{}: object information", filename.display())];
-    lines.push(format!("  arch: {}", ctx.arch.name()));
+    lines.push(format!("  arch: {}", arch.name()));
     if let Some(id) = &omf.id {
         lines.push(format!("  install name: {id}"));
     }
@@ -227,17 +261,19 @@ fn print_object_information(ctx: &MachOContext, env: &DyldEnv, filename: &Path, 
     }
     lines.push(format!(
         "  dyld cache: {}",
-        if ctx.cache.is_empty() {
+        if cache.is_empty() {
             "not found".to_string()
         } else {
-            format!("{} images", ctx.cache.len())
+            format!("{} images", cache.len())
         }
     ));
     outln!("{}", lines.join("\n"));
 }
 
 struct Config<'a> {
-    ctx: &'a MachOContext,
+    // The process architecture, which the dependencies have to match.
+    arch: &'a Arch,
+    cache: &'a DyldCache,
     executable_path: &'a str,
     env: &'a DyldEnv,
     all: bool,
@@ -503,7 +539,7 @@ fn searched_locations(
         }
     }
     searched.push(
-        if config.ctx.cache.is_empty() {
+        if config.cache.is_empty() {
             "dyld cache (not loaded)"
         } else {
             "dyld cache"
@@ -577,7 +613,7 @@ fn resolve_cache(
     if check_already_resolved(config, name, dep, deptree, depp) {
         return ResolveResult::Skip;
     }
-    let Some(elc) = config.ctx.get(name, config.executable_path) else {
+    let Some(elc) = cache_image(config.cache, name, config.executable_path) else {
         return ResolveResult::Miss;
     };
     add_found(elc, Path::new(name), DepMode::LdCache, dep, deptree, depp)
@@ -598,7 +634,11 @@ fn resolve_file(
     if check_already_resolved(config, &path.to_string_lossy(), dep, deptree, depp) {
         return ResolveResult::Skip;
     }
-    let Ok(elc) = open_macho_file(&path, &config.ctx.arch, config.executable_path) else {
+    let Ok(elc) = open_macho_file(
+        &path,
+        Check::Dependency(config.arch),
+        config.executable_path,
+    ) else {
         return ResolveResult::Miss;
     };
     add_found(elc, &path, mode, dep, deptree, depp)
@@ -625,22 +665,52 @@ fn add_found(
     ResolveResult::Found((elc, depd, dir.unwrap_or_default()))
 }
 
+// How the architecture of a Mach-O image is checked.
+#[derive(Clone, Copy)]
+enum Check<'a> {
+    // The input file, whose slice the requested or the host architecture
+    // selects (Arch::input_slice).
+    Input(&'a Arch),
+    // A dependency, which dyld only loads from a slice the process
+    // architecture grades (MachOFile::compatibleSlice), so a candidate
+    // without one is rejected and the search continues.
+    Dependency(&'a Arch),
+    // A dyld cache image, built for the cache architecture.
+    Cache,
+}
+
+impl Check<'_> {
+    // The index of the slice to parse, among the architectures of a
+    // universal file or the only one of a thin file.
+    fn slice(&self, slices: &[(CpuType, CpuSubtype)]) -> Result<usize, String> {
+        match self {
+            Check::Input(arch) => arch
+                .input_slice(slices)
+                .ok_or_else(|| format!("file does not contain architecture {}", arch.name())),
+            Check::Dependency(arch) => arch
+                .best_slice(slices)
+                .ok_or_else(|| format!("incompatible architecture (need {})", arch.name())),
+            Check::Cache => Ok(0),
+        }
+    }
+}
+
 fn open_macho_file<P: AsRef<Path>>(
     filename: &P,
-    arch: &Arch,
+    check: Check,
     executable_path: &str,
 ) -> Result<MachOInfo, std::io::Error> {
     let mmap = pathutils::map_file(filename)?;
 
     let loader_path = pathutils::get_path(filename).unwrap_or_default();
-    parse_object(&mmap, arch, executable_path, &loader_path).map_err(Error::other)
+    parse_object(&mmap, check, executable_path, &loader_path).map_err(Error::other)
 }
 
 // Parse a Mach-O file, either a thin image or a universal (FAT) file whose
-// slice for the architecture is then parsed.
+// selected slice is then parsed.
 fn parse_object(
     data: &[u8],
-    arch: &Arch,
+    check: Check,
     executable_path: &str,
     loader_path: &str,
 ) -> Result<MachOInfo, String> {
@@ -648,14 +718,14 @@ fn parse_object(
         object::FileKind::MachOFat32 => {
             let fat = MachOFatFile32::parse(data)
                 .map_err(|_| "Invalid FAT Mach-O 32 object".to_string())?;
-            parse_macho_fat(data, fat.arches(), arch, executable_path, loader_path)
+            parse_macho_fat(data, fat.arches(), check, executable_path, loader_path)
         }
         object::FileKind::MachOFat64 => {
             let fat = MachOFatFile64::parse(data)
                 .map_err(|_| "Invalid FAT Mach-O 64 object".to_string())?;
-            parse_macho_fat(data, fat.arches(), arch, executable_path, loader_path)
+            parse_macho_fat(data, fat.arches(), check, executable_path, loader_path)
         }
-        _ => parse_thin(data, 0, arch, executable_path, loader_path),
+        _ => parse_thin(data, 0, check, executable_path, loader_path),
     }
 }
 
@@ -667,7 +737,7 @@ fn parse_object(
 fn parse_thin(
     data: &[u8],
     offset: u64,
-    arch: &Arch,
+    check: Check,
     executable_path: &str,
     loader_path: &str,
 ) -> Result<MachOInfo, String> {
@@ -677,12 +747,12 @@ fn parse_thin(
         object::FileKind::MachO32 => {
             let header = MachHeader32::parse(data, offset)
                 .map_err(|_| "Invalid Mach-O 32 object".to_string())?;
-            parse_macho(header, data, offset, arch, executable_path, loader_path)
+            parse_macho(header, data, offset, check, executable_path, loader_path)
         }
         object::FileKind::MachO64 => {
             let header = MachHeader64::parse(data, offset)
                 .map_err(|_| "Invalid Mach-O 64 object".to_string())?;
-            parse_macho(header, data, offset, arch, executable_path, loader_path)
+            parse_macho(header, data, offset, check, executable_path, loader_path)
         }
         object::FileKind::MachOFat32 | object::FileKind::MachOFat64 => {
             Err("slice is not a valid Mach-O image".to_string())
@@ -694,45 +764,39 @@ fn parse_thin(
 fn parse_macho_fat<FatArch: object::read::macho::FatArch>(
     data: &[u8],
     arches: &[FatArch],
-    arch: &Arch,
+    check: Check,
     executable_path: &str,
     loader_path: &str,
 ) -> Result<MachOInfo, String> {
-    // Prefer the slice with the exact requested subtype, then any slice with
-    // a matching cpu type (a lenient version of the dyld slice grading).
-    for exact in [true, false] {
-        for slice in arches {
-            if arch.matches_slice(slice.cputype(), slice.cpusubtype(), exact) {
-                if let Ok(fatdata) = slice.data(data) {
-                    return parse_thin(fatdata, 0, arch, executable_path, loader_path);
-                }
-            }
-        }
-    }
-    // Like the thin objects, a FAT file without a host architecture slice is
-    // still inspected when the architecture was not explicitly requested.
-    if !arch.explicit() {
-        let fallback = arches
-            .iter()
-            .find(|slice| arch.translated_cputype(slice.cputype()))
-            .or_else(|| arches.first());
-        if let Some(slice) = fallback {
-            if let Ok(fatdata) = slice.data(data) {
-                return parse_thin(fatdata, 0, arch, executable_path, loader_path);
-            }
-        }
-    }
-    Err(format!(
-        "file does not contain architecture {}",
-        arch.name()
-    ))
+    // Like dyld (Universal::valid), a slice past the end of the file makes
+    // the whole file invalid.
+    let slices = arches
+        .iter()
+        .map(|slice| slice.data(data))
+        .collect::<Result<Vec<&[u8]>, _>>()
+        .map_err(|_| "slice extends beyond the end of the file".to_string())?;
+    // The slice is selected by the architecture recorded on the FAT header,
+    // where libtool leaves out the ABI version bits of an arm64e slice, which
+    // dyld then takes as the versioned arm64e (Universal::forEachSlice).
+    let archs: Vec<(CpuType, CpuSubtype)> = arches
+        .iter()
+        .map(|slice| match (slice.cputype(), slice.cpusubtype()) {
+            (CPU_TYPE_ARM64, subtype) if subtype.0 == CPU_SUBTYPE_ARM64E.0 => (
+                CPU_TYPE_ARM64,
+                CpuSubtype(subtype.0 | CPU_SUBTYPE_PTRAUTH_ABI.0),
+            ),
+            arch => arch,
+        })
+        .collect();
+    let idx = check.slice(&archs)?;
+    parse_thin(slices[idx], 0, check, executable_path, loader_path)
 }
 
 fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
     header: &Mach,
     data: &[u8],
     offset: u64,
-    arch: &Arch,
+    check: Check,
     executable_path: &str,
     loader_path: &str,
 ) -> Result<MachOInfo, String> {
@@ -742,15 +806,14 @@ fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
     let endian = header
         .endian()
         .map_err(|_| "Invalid Mach-O object".to_string())?;
-    // Thin objects are only checked when the architecture was explicitly
-    // requested, so foreign binaries (e.g. x86_64 ones under Rosetta) can
-    // still be inspected without the --arch option.
-    if arch.explicit() && !arch.matches_cputype(header.cputype(endian)) {
-        return Err(format!(
-            "file does not contain architecture {}",
-            arch.name()
-        ));
-    }
+    // The image architecture is checked as well, which for a slice is the
+    // one recorded on its own header (dyld checks both).  Without the --arch
+    // option, the input is inspected whatever its architecture, so a foreign
+    // binary (an x86_64 one under Rosetta, for instance) can be listed.
+    info.cputype = header.cputype(endian);
+    info.cpusubtype = header.cpusubtype(endian);
+    info.filetype = header.filetype(endian);
+    check.slice(&[(info.cputype, info.cpusubtype)])?;
     // Like dyld (UnsafeHeader::validStructureLoadCommands), a load command
     // table past the end of the image, a command smaller than its header or
     // extending past the table, and a string outside its command make the
@@ -1066,7 +1129,7 @@ mod tests {
     }
 
     fn parse(data: &[u8], arch: &Arch) -> Result<MachOInfo, String> {
-        parse_object(data, arch, "/exe", "/loader")
+        parse_object(data, Check::Input(arch), "/exe", "/loader")
     }
 
     fn dep_names(info: &MachOInfo) -> Vec<&str> {
@@ -1075,6 +1138,231 @@ mod tests {
 
     fn x86_64_dylib(cmds: &[Vec<u8>]) -> Vec<u8> {
         macho(CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL.0, MH_DYLIB, cmds)
+    }
+
+    const ARM64E: u32 = CPU_SUBTYPE_PTRAUTH_ABI.0 | CPU_SUBTYPE_ARM64E.0;
+
+    // A dylib linking against DEP.
+    fn dylib(cputype: CpuType, cpusubtype: u32, dep: &str) -> Vec<u8> {
+        macho(
+            cputype,
+            cpusubtype,
+            MH_DYLIB,
+            &[dylib_command(LC_LOAD_DYLIB, dep)],
+        )
+    }
+
+    // A scratch directory for the files a test resolves, removed on drop.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Scratch {
+            let dir =
+                std::env::temp_dir().join(format!("rldd-macho-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir.canonicalize().unwrap())
+        }
+
+        fn path(&self, name: &str) -> String {
+            self.0.join(name).to_string_lossy().into_owned()
+        }
+
+        // Write the file NAME, returning its full path.
+        fn write(&self, name: &str, data: &[u8]) -> String {
+            let path = self.0.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, data).unwrap();
+            self.path(name)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    // A context resolving the whole tree, with the -a option, and with an
+    // empty dyld cache so the host one is not loaded.
+    fn context(arch: Option<&str>) -> MachOContext {
+        let mut ctx = MachOContext {
+            arch: Arch::new(arch).unwrap(),
+            caches: Vec::new(),
+            preload: Vec::new(),
+            env: DyldEnv {
+                library_path: Vec::new(),
+                framework_path: Vec::new(),
+                fallback_library_path: Vec::new(),
+                fallback_framework_path: Vec::new(),
+                image_suffix: None,
+            },
+            all: true,
+            verbose: false,
+            depth: 0,
+            ignore_prefix: Vec::new(),
+        };
+        let archs = [
+            Arch::process(CPU_TYPE_ARM64, CpuSubtype(0), MH_EXECUTE),
+            Arch::process(CPU_TYPE_X86_64, CpuSubtype(3), MH_EXECUTE),
+            Arch::process(CPU_TYPE_X86_64, CpuSubtype(8), MH_EXECUTE),
+        ];
+        for arch in archs.iter().chain([&ctx.arch]) {
+            ctx.caches.push((arch.cache_names(), DyldCache::default()));
+        }
+        ctx
+    }
+
+    // The nodes below the root: the full path of a resolved one or the name
+    // of one not found, its mode, and whether it repeats an earlier one.
+    fn resolve(ctx: &mut MachOContext, input: &str) -> Vec<(String, DepMode, bool)> {
+        let tree = resolve_binary(ctx, input).unwrap();
+        tree.arena[1..]
+            .iter()
+            .map(|node| {
+                let node = &node.val;
+                let name = match &node.path {
+                    Some(path) => pathutils::join(path, &node.name),
+                    None => node.name.clone(),
+                };
+                (name, node.mode, node.found)
+            })
+            .collect()
+    }
+
+    fn node(name: &str, mode: DepMode) -> (String, DepMode, bool) {
+        (name.to_string(), mode, false)
+    }
+
+    #[test]
+    fn dependency_architecture() {
+        let keys_off = Arch::process(CPU_TYPE_ARM64, CpuSubtype(0), MH_EXECUTE);
+        let x86_64 = Arch::process(CPU_TYPE_X86_64, CpuSubtype(3), MH_EXECUTE);
+        let dependency = |data: &[u8], arch| {
+            parse_object(data, Check::Dependency(arch), "/exe", "/loader")
+                .map(|info| dep_names(&info).join(":"))
+        };
+        let x86_64_lib = dylib(CPU_TYPE_X86_64, 3, "/x86_64");
+        let arm64_lib = dylib(CPU_TYPE_ARM64, 0, "/arm64");
+        let arm64e_lib = dylib(CPU_TYPE_ARM64, ARM64E, "/arm64e");
+
+        // A thin file of another architecture is rejected as a dependency,
+        // while it is inspected as the input.
+        assert!(dependency(&x86_64_lib, &keys_off).is_err());
+        assert!(dependency(&arm64_lib, &x86_64).is_err());
+        assert!(parse(&x86_64_lib, &Arch::new(None).unwrap()).is_ok());
+        assert_eq!(dependency(&arm64_lib, &keys_off).unwrap(), "/arm64");
+
+        // The slice of a universal file is the one the process grades best,
+        // whatever the FAT header order.
+        for fat64 in [false, true] {
+            let file = fat(
+                &[
+                    (CPU_TYPE_X86_64, 3, &x86_64_lib),
+                    (CPU_TYPE_ARM64, 0, &arm64_lib),
+                    (CPU_TYPE_ARM64, ARM64E, &arm64e_lib),
+                ],
+                fat64,
+            );
+            assert_eq!(dependency(&file, &keys_off).unwrap(), "/arm64e");
+            assert_eq!(dependency(&file, &x86_64).unwrap(), "/x86_64");
+            let file = fat(&[(CPU_TYPE_X86_64, 3, &x86_64_lib)], fat64);
+            assert!(dependency(&file, &keys_off).is_err());
+        }
+
+        // libtool leaves out the ABI version of the arm64e slice on the
+        // 32-bit FAT header.
+        let file = fat(
+            &[
+                (CPU_TYPE_ARM64, 0, &arm64_lib),
+                (CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64E.0, &arm64e_lib),
+            ],
+            false,
+        );
+        assert_eq!(dependency(&file, &keys_off).unwrap(), "/arm64e");
+
+        // A slice past the end of the file.
+        let mut file = fat(&[(CPU_TYPE_ARM64, 0, &arm64_lib)], false);
+        file.truncate(file.len() - 1);
+        assert!(dependency(&file, &keys_off).is_err());
+    }
+
+    #[test]
+    fn dependency_of_another_architecture() {
+        // An arm64 executable linking against an Intel only library, with an
+        // arm64 one on the fallback path.
+        let dir = Scratch::new("arch");
+        let intel = dir.write("usr/local/lib/libfoo.dylib", &x86_64_dylib(&[]));
+        let arm64 = dir.write(
+            "fallback/libfoo.dylib",
+            &macho(CPU_TYPE_ARM64, 0, MH_DYLIB, &[]),
+        );
+        let exe = dir.write(
+            "bin/exe",
+            &macho(
+                CPU_TYPE_ARM64,
+                0,
+                MH_EXECUTE,
+                &[dylib_command(LC_LOAD_DYLIB, &intel)],
+            ),
+        );
+        let mut ctx = context(None);
+        assert_eq!(resolve(&mut ctx, &exe), [node(&intel, DepMode::NotFound)]);
+        ctx.env.fallback_library_path = search_path::from_string(dir.path("fallback"), &[':']);
+        assert_eq!(
+            resolve(&mut ctx, &exe),
+            [node(&arm64, DepMode::LdFallbackLibraryPath)]
+        );
+    }
+
+    #[test]
+    fn process_architecture_from_input() {
+        // A universal library whose slices link against different paths,
+        // and the executables of each architecture linking against it.
+        let dir = Scratch::new("process");
+        let libfoo = dir.write(
+            "lib/libfoo.dylib",
+            &fat(
+                &[
+                    (
+                        CPU_TYPE_ARM64,
+                        ARM64E,
+                        &dylib(CPU_TYPE_ARM64, ARM64E, "/arm64e"),
+                    ),
+                    (CPU_TYPE_X86_64, 3, &dylib(CPU_TYPE_X86_64, 3, "/x86_64")),
+                ],
+                false,
+            ),
+        );
+        let exe = |cputype, cpusubtype| {
+            macho(
+                cputype,
+                cpusubtype,
+                MH_EXECUTE,
+                &[dylib_command(LC_LOAD_DYLIB, &libfoo)],
+            )
+        };
+        let x86_64 = dir.write("bin/x86_64", &exe(CPU_TYPE_X86_64, 3));
+        let arm64 = dir.write("bin/arm64", &exe(CPU_TYPE_ARM64, 0));
+        let universal = dir.write(
+            "bin/universal",
+            &fat(
+                &[
+                    (CPU_TYPE_ARM64, 0, &exe(CPU_TYPE_ARM64, 0)),
+                    (CPU_TYPE_X86_64, 3, &exe(CPU_TYPE_X86_64, 3)),
+                ],
+                false,
+            ),
+        );
+
+        let tree = |dep| [node(&libfoo, DepMode::Direct), node(dep, DepMode::NotFound)];
+        let mut ctx = context(None);
+        assert_eq!(resolve(&mut ctx, &x86_64), tree("/x86_64"));
+        assert_eq!(resolve(&mut ctx, &arm64), tree("/arm64e"));
+        let mut ctx = context(Some("x86_64"));
+        assert_eq!(resolve(&mut ctx, &universal), tree("/x86_64"));
+        let mut ctx = context(Some("arm64"));
+        assert_eq!(resolve(&mut ctx, &universal), tree("/arm64e"));
     }
 
     #[test]
