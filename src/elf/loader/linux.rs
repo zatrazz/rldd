@@ -24,7 +24,13 @@ impl Loader for Linux {
             *ld_cache = ld_so_cache::parse_ld_so_cache(&Path::new("/etc/ld.so.cache")).ok();
         }
         if let Some(cache) = ld_cache {
-            cache.select(elc.ei_class, elc.ei_data, elc.e_machine, elc.e_flags);
+            cache.select(
+                elc.ei_class,
+                elc.ei_data,
+                elc.e_machine,
+                elc.e_flags,
+                elc.interp.as_deref(),
+            );
         }
     }
 

@@ -13,6 +13,54 @@ pub struct LoaderHwcaps {
     // which must include the one a glibc-hwcaps cache entry requires.  None
     // for the loaders that do not check it.
     pub isa_levels: Option<u32>,
+    // The legacy hwcap bits the loaders before glibc 2.40 take.
+    pub legacy: LegacyHwcaps,
+}
+
+// The TLS pseudo hwcap bit, set for the libraries of a tls subdirectory.
+const HWCAP_TLS: u64 = 1 << 63;
+
+// The legacy hwcap bits of the regular cache entries a loader before glibc
+// 2.40 takes (search_cache hwcap_exclude): the AT_HWCAP bits the loader has
+// and uses, the platform ones, and the TLS one, with the platform bit of an
+// entry, if any, being the one of the machine.  ldconfig wrote them up to
+// glibc 2.36 for the libraries of the legacy hwcaps subdirectories (tls,
+// x86_64, haswell, and the like), while the loaders since 2.40 skip every
+// entry with any of them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LegacyHwcaps {
+    accepted: u64,
+    platform_mask: u64,
+    // The bit of the machine platform (GLRO(dl_platform)), all of them if
+    // there is none.
+    platform: u64,
+}
+
+impl LegacyHwcaps {
+    // The bits of a loader with the HWCAP bits (GLRO(dl_hwcap)), of which it
+    // uses the IMPORTANT ones (the glibc.cpu.hwcap_mask default), the platform
+    // bits of PLATFORM_MASK (_DL_HWCAP_PLATFORM), and the PLATFORM of the
+    // machine, if any.
+    pub fn new(hwcap: u64, important: u64, platform_mask: u64, platform: Option<u64>) -> Self {
+        LegacyHwcaps {
+            accepted: (hwcap & important) | platform_mask | HWCAP_TLS,
+            platform_mask,
+            platform: platform.unwrap_or(u64::MAX),
+        }
+    }
+
+    // Whether the loader takes a regular entry with the HWCAP field.
+    pub fn check(&self, hwcap: u64) -> bool {
+        let platform = hwcap & self.platform_mask;
+        hwcap & !self.accepted == 0 && (platform == 0 || platform == self.platform)
+    }
+}
+
+// The loaders whose hwcap bits are not known take the TLS one only.
+impl Default for LegacyHwcaps {
+    fn default() -> Self {
+        LegacyHwcaps::new(0, 0, 0, None)
+    }
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -28,7 +76,11 @@ mod cpuid {
         GNU_PROPERTY_X86_ISA_1_V4,
     };
 
-    use super::LoaderHwcaps;
+    use super::{LegacyHwcaps, LoaderHwcaps};
+
+    // The CPUID.(EAX=0) vendor of an Intel CPU, "GenuineIntel" on EBX, EDX
+    // and ECX.
+    const VENDOR_INTEL: [u32; 3] = [0x756e_6547, 0x4965_6e69, 0x6c65_746e];
 
     // CPUID.(EAX=1):EDX
     const CPUID_1_EDX_FPU: u32 = 1 << 0;
@@ -58,6 +110,8 @@ mod cpuid {
     const CPUID_7_EBX_BMI2: u32 = 1 << 8;
     const CPUID_7_EBX_AVX512F: u32 = 1 << 16;
     const CPUID_7_EBX_AVX512DQ: u32 = 1 << 17;
+    const CPUID_7_EBX_AVX512PF: u32 = 1 << 26;
+    const CPUID_7_EBX_AVX512ER: u32 = 1 << 27;
     const CPUID_7_EBX_AVX512CD: u32 = 1 << 28;
     const CPUID_7_EBX_AVX512BW: u32 = 1 << 30;
     const CPUID_7_EBX_AVX512VL: u32 = 1 << 31;
@@ -75,9 +129,20 @@ mod cpuid {
     const XSTATE_ZMM_HI256: u64 = 1 << 6;
     const XSTATE_HI16_ZMM: u64 = 1 << 7;
 
+    // The legacy hwcap bits of the x86 loaders (sysdeps/x86/dl-hwcap.h), and
+    // their platforms (_dl_x86_platforms, from _DL_FIRST_PLATFORM).
+    const HWCAP_X86_SSE2: u64 = 1 << 0;
+    const HWCAP_X86_64: u64 = 1 << 1;
+    const HWCAP_X86_AVX512_1: u64 = 1 << 2;
+    const PLATFORM_I586: u64 = 1 << 48;
+    const PLATFORM_I686: u64 = 1 << 49;
+    const PLATFORM_HASWELL: u64 = 1 << 50;
+    const PLATFORM_XEON_PHI: u64 = 1 << 51;
+
     // The feature registers required by the x86-64 microarchitecture levels,
-    // zeroed when the CPU does not report the leaf, and the state components
-    // the OS enables (zero without XSAVE enabled).
+    // zeroed when the CPU does not report the leaf, the state components
+    // the OS enables (zero without XSAVE enabled), and whether it is an Intel
+    // CPU.
     #[derive(Clone, Copy, Debug, Default)]
     struct Features {
         leaf1_edx: u32,
@@ -85,13 +150,15 @@ mod cpuid {
         leaf7_ebx: u32,
         ext1_ecx: u32,
         xcr0: u64,
+        intel: bool,
     }
 
     impl Features {
         fn read() -> Self {
             // CPUID is unconditionally available on x86-64 and on the i686
             // baseline, so the leaf 0 query needs no prior check.
-            let max_basic = __cpuid(0).eax;
+            let leaf0 = __cpuid(0);
+            let max_basic = leaf0.eax;
             let (leaf1_edx, leaf1_ecx) = if max_basic >= 1 {
                 let r = __cpuid(1);
                 (r.edx, r.ecx)
@@ -122,6 +189,7 @@ mod cpuid {
                 leaf7_ebx,
                 ext1_ecx,
                 xcr0,
+                intel: [leaf0.ebx, leaf0.edx, leaf0.ecx] == VENDOR_INTEL,
             }
         }
 
@@ -146,9 +214,72 @@ mod cpuid {
                     | CPUID_7_EBX_AVX512BW
                     | CPUID_7_EBX_AVX512CD
                     | CPUID_7_EBX_AVX512DQ
+                    | CPUID_7_EBX_AVX512ER
+                    | CPUID_7_EBX_AVX512PF
                     | CPUID_7_EBX_AVX512VL);
             }
             r
+        }
+
+        // The legacy hwcap bits of the x86-64 and x32 loaders
+        // (init_cpu_features before glibc 2.40): x86_64 always, avx512_1 on an
+        // Intel CPU with AVX-512 other than a Xeon Phi, and the xeon_phi or
+        // haswell platform on an Intel CPU with their features.
+        fn legacy_x86_64(self) -> LegacyHwcaps {
+            const AVX512_1: u32 =
+                CPUID_7_EBX_AVX512BW | CPUID_7_EBX_AVX512DQ | CPUID_7_EBX_AVX512VL;
+            const HASWELL_LEAF1: u32 = CPUID_1_ECX_FMA | CPUID_1_ECX_MOVBE | CPUID_1_ECX_POPCNT;
+            const HASWELL_LEAF7: u32 = CPUID_7_EBX_AVX2 | CPUID_7_EBX_BMI1 | CPUID_7_EBX_BMI2;
+            let usable = self.usable();
+            let mut hwcap = HWCAP_X86_64;
+            let mut platform = None;
+            if self.intel {
+                if usable.leaf7_ebx & CPUID_7_EBX_AVX512CD != 0 {
+                    if usable.leaf7_ebx & CPUID_7_EBX_AVX512ER != 0 {
+                        if usable.leaf7_ebx & CPUID_7_EBX_AVX512PF != 0 {
+                            platform = Some(PLATFORM_XEON_PHI);
+                        }
+                    } else if usable.leaf7_ebx & AVX512_1 == AVX512_1 {
+                        hwcap |= HWCAP_X86_AVX512_1;
+                    }
+                }
+                if platform.is_none()
+                    && usable.leaf1_ecx & HASWELL_LEAF1 == HASWELL_LEAF1
+                    && usable.leaf7_ebx & HASWELL_LEAF7 == HASWELL_LEAF7
+                    && usable.ext1_ecx & CPUID_EXT1_ECX_LZCNT != 0
+                {
+                    platform = Some(PLATFORM_HASWELL);
+                }
+            }
+            LegacyHwcaps::new(
+                hwcap,
+                HWCAP_X86_64 | HWCAP_X86_AVX512_1,
+                PLATFORM_I586 | PLATFORM_I686 | PLATFORM_HASWELL | PLATFORM_XEON_PHI,
+                platform,
+            )
+        }
+
+        // The legacy hwcap bits of the i386 loader: sse2, and the i686 (with
+        // CMOV) or i586 (with CMPXCHG8B) platform.
+        fn legacy_i386(self) -> LegacyHwcaps {
+            let hwcap = if self.leaf1_edx & CPUID_1_EDX_SSE2 != 0 {
+                HWCAP_X86_SSE2
+            } else {
+                0
+            };
+            let platform = if self.leaf1_edx & CPUID_1_EDX_CMOV != 0 {
+                Some(PLATFORM_I686)
+            } else if self.leaf1_edx & CPUID_1_EDX_CX8 != 0 {
+                Some(PLATFORM_I586)
+            } else {
+                None
+            };
+            LegacyHwcaps::new(
+                hwcap,
+                HWCAP_X86_SSE2,
+                PLATFORM_I586 | PLATFORM_I686,
+                platform,
+            )
         }
 
         fn check_basic(&self) -> bool {
@@ -235,15 +366,21 @@ mod cpuid {
         if ei_data != ELFDATA2LSB || !(x86_64 || i386) {
             return LoaderHwcaps::default();
         }
-        let isa_level = Features::read().isa_level();
-        LoaderHwcaps {
-            // Priority sorted, best-fit first (the glibc _dl_hwcaps_subdirs order).
-            subdirs: if x86_64 {
-                subdirs(isa_level)
-            } else {
-                Vec::new()
-            },
-            isa_levels: Some(isa_level),
+        let features = Features::read();
+        let isa_level = features.isa_level();
+        if x86_64 {
+            LoaderHwcaps {
+                // Priority sorted, best-fit first (the glibc _dl_hwcaps_subdirs order).
+                subdirs: subdirs(isa_level),
+                isa_levels: Some(isa_level),
+                legacy: features.legacy_x86_64(),
+            }
+        } else {
+            LoaderHwcaps {
+                subdirs: Vec::new(),
+                isa_levels: Some(isa_level),
+                legacy: features.legacy_i386(),
+            }
         }
     }
 
@@ -337,6 +474,49 @@ mod cpuid {
                 ..cpu(4)
             };
             assert_eq!(levels(f), ["x86-64-v2"]);
+        }
+
+        #[test]
+        fn legacy_hwcaps() {
+            const TLS: u64 = super::super::HWCAP_TLS;
+            // Any CPU has the x86_64 bit, and the TLS one is always taken.
+            let amd = cpu(4).legacy_x86_64();
+            assert!(amd.check(0) && amd.check(TLS) && amd.check(HWCAP_X86_64 | TLS));
+            // Neither the i386 bit, nor an Intel only one, nor a platform
+            // (there is none), nor any unknown one.
+            for hwcap in [
+                HWCAP_X86_SSE2,
+                HWCAP_X86_AVX512_1,
+                PLATFORM_HASWELL,
+                PLATFORM_I686,
+                1 << 3,
+            ] {
+                assert!(!amd.check(hwcap));
+            }
+
+            // An Intel CPU with AVX-512 has the avx512_1 bit and the haswell
+            // platform, and the Xeon Phi one the xeon_phi platform instead.
+            let intel = Features {
+                intel: true,
+                ..cpu(4)
+            };
+            let skylake = intel.legacy_x86_64();
+            assert!(skylake.check(HWCAP_X86_64 | HWCAP_X86_AVX512_1 | PLATFORM_HASWELL));
+            assert!(!skylake.check(PLATFORM_XEON_PHI));
+            let mut knl = intel;
+            knl.leaf7_ebx |= CPUID_7_EBX_AVX512ER | CPUID_7_EBX_AVX512PF;
+            let knl = knl.legacy_x86_64();
+            assert!(knl.check(PLATFORM_XEON_PHI));
+            assert!(!knl.check(HWCAP_X86_AVX512_1) && !knl.check(PLATFORM_HASWELL));
+            // Without the AVX state, neither.
+            let legacy = Features { xcr0: 0, ..intel }.legacy_x86_64();
+            assert!(!legacy.check(HWCAP_X86_AVX512_1) && !legacy.check(PLATFORM_HASWELL));
+
+            // The i386 loader has the sse2 bit and the i686 platform.
+            let i386 = cpu(1).legacy_i386();
+            assert!(i386.check(HWCAP_X86_SSE2 | PLATFORM_I686 | TLS));
+            assert!(!i386.check(PLATFORM_I586));
+            assert!(!i386.check(HWCAP_X86_64) && !i386.check(PLATFORM_HASWELL));
         }
 
         #[test]

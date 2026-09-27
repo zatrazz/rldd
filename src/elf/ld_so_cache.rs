@@ -553,16 +553,19 @@ fn check_isa_level(hwcap: u64, isa_levels: Option<u32>) -> bool {
 // skipping the ones for a subdirectory the loader does not search (for
 // instance one the CPU does not support) or requiring an ISA level the CPU
 // does not support.  Otherwise the first regular entry is taken on the new
-// format, while the old format one keeps searching for an entry with the
-// loader default flags (the generic FLAG_ELF_LIBC6 over FLAG_ELF, or the ARM
-// unmarked entries over the float ABI ones).  The result is the directory of
-// the library path for each name.
+// format, skipping the ones with legacy hwcap bits the loader does not take
+// (any of them when LEGACY is false, since glibc 2.40), while the old format
+// one keeps searching for an entry with the loader default flags (the
+// generic FLAG_ELF_LIBC6 over FLAG_ELF, or the ARM unmarked entries over the
+// float ABI ones).  The result is the directory of the library path for each
+// name.
 fn select_entries(
     file: &CacheFile,
     ei_class: FileClass,
     e_machine: Machine,
     e_flags: FileFlags,
     hwcaps: &hwcap::LoaderHwcaps,
+    legacy: bool,
 ) -> HashMap<String, String> {
     let Some(flags) = CacheFlags::new(ei_class, e_machine, e_flags) else {
         return HashMap::new();
@@ -588,6 +591,9 @@ fn select_entries(
             // far wins.
             if !named_hwcap && search.best.is_some() {
                 search.done = true;
+                continue;
+            }
+            if !named_hwcap && entry.hwcap != 0 && !(legacy && hwcaps.legacy.check(entry.hwcap)) {
                 continue;
             }
             if named_hwcap {
@@ -619,8 +625,26 @@ fn select_entries(
         .collect()
 }
 
-// The object ABI the entries are selected for.
-type Abi = (FileClass, DataEncoding, Machine, FileFlags);
+// The glibc release of the LOADER, from the version banner ld.so has since
+// glibc 2.33 ("ld.so (GNU libc) stable release version 2.39."), None for an
+// older or an unreadable one.
+fn glibc_release<P: AsRef<Path>>(loader: &P) -> Option<(u32, u32)> {
+    glibc_release_in(&pathutils::map_file(loader).ok()?)
+}
+
+fn glibc_release_in(data: &[u8]) -> Option<(u32, u32)> {
+    const BANNER: &[u8] = b" release version ";
+    let start = data.windows(BANNER.len()).position(|w| w == BANNER)? + BANNER.len();
+    let version = data[start..]
+        .split(|c| !c.is_ascii_digit() && *c != b'.')
+        .next()?;
+    let mut numbers = str::from_utf8(version).ok()?.split('.').map(str::parse);
+    Some((numbers.next()?.ok()?, numbers.next()?.ok()?))
+}
+
+// The object ABI the entries are selected for, and whether its loader takes
+// the legacy hwcap bits.
+type Abi = (FileClass, DataEncoding, Machine, FileFlags, bool);
 
 // The loader cache, read once and shared by all objects, with the entries
 // selected for the ABI of the last object given to select.
@@ -641,15 +665,23 @@ impl LdCache {
 
     // Select the entries for the object ABI: each object runs with the
     // loader built for its ABI, which takes only the entries of that ABI and
-    // has its own glibc-hwcaps subdirectories.
+    // has its own glibc-hwcaps subdirectories.  The LOADER path (the object
+    // PT_INTERP) tells its glibc release, since the ones before 2.40 take
+    // the entries with the legacy hwcap bits of the machine.  An unknown
+    // release is taken as an older one, since only ldconfig up to 2.36
+    // writes such entries.
     pub fn select(
         &mut self,
         ei_class: FileClass,
         ei_data: DataEncoding,
         e_machine: Machine,
         e_flags: FileFlags,
+        loader: Option<&str>,
     ) {
-        let abi = Some((ei_class, ei_data, e_machine, e_flags));
+        let legacy = !loader
+            .and_then(|loader| glibc_release(&loader))
+            .is_some_and(|release| release >= (2, 40));
+        let abi = Some((ei_class, ei_data, e_machine, e_flags, legacy));
         if self.abi == abi {
             return;
         }
@@ -657,7 +689,7 @@ impl LdCache {
         // A machine whose capabilities can not be read has no glibc-hwcaps
         // subdirectory, which still leaves the regular entries.
         let hwcaps = hwcap::loader_hwcaps(e_machine, ei_class, ei_data);
-        self.entries = select_entries(&self.file, ei_class, e_machine, e_flags, &hwcaps);
+        self.entries = select_entries(&self.file, ei_class, e_machine, e_flags, &hwcaps, legacy);
         self.abi = abi;
     }
 
@@ -849,12 +881,17 @@ mod tests {
                 subdirs: supported.to_vec(),
                 ..Default::default()
             },
+            true,
         )
     }
 
-    fn select_hwcaps(cache: &[u8], hwcaps: &hwcap::LoaderHwcaps) -> HashMap<String, String> {
+    fn select_hwcaps(
+        cache: &[u8],
+        hwcaps: &hwcap::LoaderHwcaps,
+        legacy: bool,
+    ) -> HashMap<String, String> {
         let file = parse_cache(cache).unwrap();
-        select_entries(&file, ELFCLASS64, EM_X86_64, FileFlags(0), hwcaps)
+        select_entries(&file, ELFCLASS64, EM_X86_64, FileFlags(0), hwcaps, legacy)
     }
 
     #[test]
@@ -1027,11 +1064,73 @@ mod tests {
             let hwcaps = hwcap::LoaderHwcaps {
                 subdirs: vec!["x86-64-v3", "x86-64-v2"],
                 isa_levels,
+                ..Default::default()
             };
-            assert_eq!(select_hwcaps(&cache, &hwcaps)["liblzma.so.5"], dir);
+            assert_eq!(select_hwcaps(&cache, &hwcaps, true)["liblzma.so.5"], dir);
         }
         // A level out of the 32-bit ISA bits.
         assert!(!check_isa_level(named(0) | isa_level(40), Some(u32::MAX)));
+    }
+
+    #[test]
+    fn legacy_hwcap_entries() {
+        // A regular entry with legacy hwcap bits (ldconfig up to 2.36, for a
+        // library of a tls, x86_64 or haswell subdirectory) sorts before the
+        // one without them.
+        const TLS: u64 = 1 << 63;
+        const X86_64_BIT: u64 = 1 << 1;
+        const SSE2_BIT: u64 = 1 << 0;
+        const HASWELL: u64 = 1 << 50;
+        let x86_64 = hwcap::LoaderHwcaps {
+            legacy: hwcap::LegacyHwcaps::new(X86_64_BIT, X86_64_BIT | 1 << 2, 0xf << 48, None),
+            ..Default::default()
+        };
+        let haswell = hwcap::LoaderHwcaps {
+            legacy: hwcap::LegacyHwcaps::new(
+                X86_64_BIT,
+                X86_64_BIT | 1 << 2,
+                0xf << 48,
+                Some(HASWELL),
+            ),
+            ..Default::default()
+        };
+        let unknown = hwcap::LoaderHwcaps::default();
+        for (hwcap, legacy, taken) in [
+            (TLS, &unknown, true),
+            (X86_64_BIT, &unknown, false),
+            (X86_64_BIT | TLS, &x86_64, true),
+            (SSE2_BIT, &x86_64, false),
+            (HASWELL, &x86_64, false),
+            (HASWELL | X86_64_BIT, &haswell, true),
+            (1 << 51, &haswell, false),
+        ] {
+            let cache = build_cache(
+                &[
+                    (X86_64, "libfoo.so.1", "/opt/legacy/libfoo.so.1", hwcap),
+                    (X86_64, "libfoo.so.1", "/usr/lib/libfoo.so.1", 0),
+                ],
+                &[],
+            );
+            let dir = if taken { "/opt/legacy" } else { "/usr/lib" };
+            assert_eq!(select_hwcaps(&cache, legacy, true)["libfoo.so.1"], dir);
+            // The loaders since 2.40 skip any of them.
+            assert_eq!(
+                select_hwcaps(&cache, legacy, false)["libfoo.so.1"],
+                "/usr/lib"
+            );
+        }
+    }
+
+    #[test]
+    fn loader_release() {
+        // The banner of a loader since 2.33, and none before.
+        let banner =
+            b"\x7fELF\0ld.so (Ubuntu GLIBC 2.39-0ubuntu8.9) stable release version 2.39.\n";
+        assert_eq!(glibc_release_in(banner), Some((2, 39)));
+        let banner = b"\0ld.so (GNU libc) development release version 2.43.9000.\n";
+        assert_eq!(glibc_release_in(banner), Some((2, 43)));
+        assert_eq!(glibc_release_in(b"\x7fELF\0ld-linux-x86-64.so.2\0"), None);
+        assert_eq!(glibc_release(&"/nonexistent/ld.so"), None);
     }
 
     #[test]
@@ -1089,7 +1188,14 @@ mod tests {
         e_flags: FileFlags,
     ) -> HashMap<String, String> {
         let file = parse_cache(cache).unwrap();
-        select_entries(&file, ei_class, e_machine, e_flags, &Default::default())
+        select_entries(
+            &file,
+            ei_class,
+            e_machine,
+            e_flags,
+            &Default::default(),
+            true,
+        )
     }
 
     #[test]
@@ -1111,12 +1217,12 @@ mod tests {
         ))
         .unwrap();
         for _ in 0..2 {
-            cache.select(ELFCLASS64, ELFDATA2LSB, EM_X86_64, FileFlags(0));
+            cache.select(ELFCLASS64, ELFDATA2LSB, EM_X86_64, FileFlags(0), None);
             assert_eq!(cache.len(), 2);
             assert_eq!(cache.get("libc.so.6").unwrap(), "/usr/lib64");
             assert_eq!(cache.get("libnoneed.so.1"), None);
 
-            cache.select(ELFCLASS32, ELFDATA2LSB, EM_386, FileFlags(0));
+            cache.select(ELFCLASS32, ELFDATA2LSB, EM_386, FileFlags(0), None);
             assert_eq!(cache.len(), 2);
             assert_eq!(cache.get("libc.so.6").unwrap(), "/usr/lib32");
             assert_eq!(cache.get("libnoneed.so.1").unwrap(), "/usr/lib32");
