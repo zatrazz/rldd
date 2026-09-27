@@ -55,6 +55,9 @@ impl NamespaceConfig {
 
 const DEFAULT_NAME_CONFIG: &str = "default";
 
+// The ${SDK_VER} when no '.version' file sets the target SDK version.
+const ANDROID_API_FUTURE: i64 = 10000;
+
 pub type LdCacheNs = HashMap<String, NamespaceConfig>;
 
 #[derive(Debug)]
@@ -356,9 +359,10 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
         }
     }
 
-    // The '.version' file is only read for the sections that opt in, the
-    // running release is used otherwise.
-    properties.target_sdk_version = release.to_string();
+    // The '.version' file is only read for the sections that opt in.  The
+    // default is not the running release but the loader own __ANDROID_API__,
+    // which the platform build defines as __ANDROID_API_FUTURE__.
+    properties.target_sdk_version = ANDROID_API_FUTURE.to_string();
     if properties.get_bool("enable.target.sdk.version") {
         if let Some(version) = read_version_file(binary)? {
             properties.target_sdk_version = version.to_string();
@@ -1059,7 +1063,7 @@ mod tests {
     #[test]
     fn version_file() -> Result<(), Error> {
         let fixture = Fixture::new()?;
-        for dir in ["sdk26", "sdk31"] {
+        for dir in ["sdk26", "sdk31", "sdk10000"] {
             fs::create_dir(fixture.path(dir))?;
         }
         let config = "dir.test = {base}/bin\n\
@@ -1068,11 +1072,20 @@ mod tests {
                       namespace.default.search.paths = {base}/sdk${SDK_VER}\n";
         let version = fixture.path("bin/.version");
 
-        // Without the file, the default version applies.
+        // Without the file, the loader own API level applies rather than the
+        // device release (31), and so it does without the versioning.
         let ldcache = fixture.parse(config).map_err(Error::other)?;
         assert_eq!(
             search_paths(&ldcache, "default"),
-            vec![fixture.path("sdk31")]
+            vec![fixture.path("sdk10000")]
+        );
+        fs::write(&version, "26\n")?;
+        let ldcache = fixture
+            .parse(&config.replace("enable.target.sdk.version = true", ""))
+            .map_err(Error::other)?;
+        assert_eq!(
+            search_paths(&ldcache, "default"),
+            vec![fixture.path("sdk10000")]
         );
 
         // The content is trimmed.
