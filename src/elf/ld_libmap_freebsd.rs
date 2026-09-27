@@ -5,6 +5,8 @@
 // used as fallback.
 
 use std::fs;
+use std::io::Read;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use crate::pathutils;
@@ -52,6 +54,9 @@ impl Constraint {
 pub struct LibMap {
     default: Vec<(String, String)>,
     constraints: Vec<Constraint>,
+    // The files (by path, and by device and inode) and the directories (by
+    // path) already parsed.
+    parsed: Vec<(String, Option<(u64, u64)>)>,
 }
 
 fn find_mapping<'a>(mappings: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -93,9 +98,7 @@ impl LibMap {
     }
 }
 
-const MAX_INCLUDE_DEPTH: usize = 32;
-
-fn parse_content(libmap: &mut LibMap, content: &str, depth: usize) {
+fn parse_content(libmap: &mut LibMap, content: &str) {
     // The constraint state is local to each parsed file.
     let mut constraint: Option<String> = None;
 
@@ -128,37 +131,58 @@ fn parse_content(libmap: &mut LibMap, content: &str, depth: usize) {
         };
 
         match from {
-            "includedir" => parse_dir(libmap, to, depth + 1),
-            "include" => parse_file(libmap, &Path::new(to), depth + 1),
+            "includedir" => parse_dir(libmap, to),
+            "include" => parse_file(libmap, to),
             _ => libmap.add_mapping(&constraint, from, to),
         }
     }
 }
 
-fn parse_file<P: AsRef<Path>>(libmap: &mut LibMap, filename: &P, depth: usize) {
-    if depth > MAX_INCLUDE_DEPTH {
+// Like lmc_parse_file, a file already parsed (with the same path, or the same
+// device and inode) is skipped, which also ends an include loop.  A file is
+// recorded once read, so one that fails to open might be tried again.
+fn parse_file(libmap: &mut LibMap, filename: &str) {
+    if libmap.parsed.iter().any(|(path, _)| path == filename) {
         return;
     }
-    if let Ok(content) = fs::read_to_string(filename) {
-        parse_content(libmap, &content, depth);
+    let Ok(mut file) = fs::File::open(filename) else {
+        return;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return;
+    };
+    let id = Some((metadata.dev(), metadata.ino()));
+    if libmap.parsed.iter().any(|(_, parsed)| *parsed == id) {
+        return;
     }
+    let mut content = String::new();
+    if file.read_to_string(&mut content).is_err() {
+        return;
+    }
+    libmap.parsed.push((filename.to_string(), id));
+    parse_content(libmap, &content);
 }
 
-fn parse_dir(libmap: &mut LibMap, dirname: &str, depth: usize) {
-    if depth > MAX_INCLUDE_DEPTH {
+// Like lmc_parse_dir, a directory already parsed (with the same path) is
+// skipped.
+fn parse_dir(libmap: &mut LibMap, dirname: &str) {
+    if libmap.parsed.iter().any(|(path, _)| path == dirname) {
         return;
     }
     let entries = match fs::read_dir(dirname) {
         Ok(entries) => entries,
         Err(_) => return,
     };
+    libmap.parsed.push((dirname.to_string(), None));
     let mut paths: Vec<_> = entries
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .filter(|path| !pathutils::get_name(path).starts_with('.') && path.is_file())
         .collect();
     paths.sort();
     for path in paths {
-        parse_file(libmap, &path, depth);
+        if let Some(path) = path.to_str() {
+            parse_file(libmap, path);
+        }
     }
 }
 
@@ -167,7 +191,7 @@ pub fn parse_libmap<P: AsRef<Path>>(filename: &P) -> Option<LibMap> {
         return None;
     }
     let mut libmap = LibMap::default();
-    parse_file(&mut libmap, filename, 0);
+    parse_file(&mut libmap, &filename.as_ref().to_string_lossy());
     Some(libmap)
 }
 
@@ -178,7 +202,7 @@ mod tests {
 
     fn parse_str(content: &str) -> LibMap {
         let mut libmap = LibMap::default();
-        parse_content(&mut libmap, content, 0);
+        parse_content(&mut libmap, content);
         libmap
     }
 
@@ -264,6 +288,52 @@ mod tests {
             Some("libincluded.so.1")
         );
         assert!(parse_libmap(&tmpdir.path().join("missing.conf")).is_none());
+        Ok(())
+    }
+
+    // Each file and directory is parsed once, however many times (and through
+    // whatever loop) it is included.
+    #[test]
+    fn parse_include_loop() -> std::io::Result<()> {
+        let tmpdir = TempDir::new()?;
+        let dir = tmpdir.path().display();
+        let conf = tmpdir.path().join("libmap.conf");
+        let included = tmpdir.path().join("included.conf");
+        fs::write(
+            &included,
+            format!(
+                "libbar.so.1 libincluded.so.1\n\
+                 include {conf}\n\
+                 include {included}\n\
+                 includedir {dir}\n",
+                conf = conf.display(),
+                included = included.display(),
+            ),
+        )?;
+        let include = format!("include {}\n", conf.display());
+        fs::write(
+            &conf,
+            format!(
+                "libfoo.so.1 libmain.so.1\n\
+                 {include}{include}{include}{include}\
+                 include {}\n\
+                 includedir {dir}\n\
+                 includedir {dir}\n\
+                 include {dir}/./libmap.conf\n",
+                included.display(),
+            ),
+        )?;
+
+        let libmap = parse_libmap(&conf).unwrap();
+        assert_eq!(
+            libmap.lookup("/bin/prog", "libfoo.so.1"),
+            Some("libmain.so.1")
+        );
+        assert_eq!(
+            libmap.lookup("/bin/prog", "libbar.so.1"),
+            Some("libincluded.so.1")
+        );
+        assert_eq!(libmap.parsed.len(), 3);
         Ok(())
     }
 }
