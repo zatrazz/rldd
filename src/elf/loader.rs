@@ -182,9 +182,21 @@ pub(super) trait Loader {
         }
     }
 
-    // Remap the dependency name for the referencing object path.
-    fn libmap_dependency(_config: &Config, _refpath: &str, dependency: &String) -> String {
-        dependency.to_string()
+    // Resolve DEPENDENCY, not already loaded, for ELC, the object at REFPATH
+    // requesting it (the input object for a PRELOAD entry).  Most loaders
+    // open a name with a slash as is, and search the other ones on the
+    // search_order steps.  The Android linker searches the namespaces
+    // instead (Android::find_library).
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    fn resolve_dependency<'a>(
+        dependency: &'a String,
+        config: &'a Config,
+        elc: &'a ElfInfo,
+        _refpath: &str,
+        namespace: &ObjectNamespace,
+        preload: bool,
+    ) -> Option<Resolution<'a>> {
+        resolve_dependency_1(dependency, config, elc, namespace, preload)
     }
 
     // The input file actually inspected, which the loader might redirect.
@@ -263,6 +275,13 @@ pub(super) trait SearchCache {
         elc: &'a ElfInfo,
         namespace: &Self::Namespace,
     ) -> Option<Resolution<'a>>;
+
+    // The directory list of a hints or configuration file, which some
+    // loaders walk on their own (the FreeBSD one maps each directory).
+    #[cfg_attr(not(target_os = "freebsd"), allow(dead_code))]
+    fn directories(&self) -> Option<&search_path::SearchPathVec> {
+        None
+    }
 }
 
 // The loaders without linker namespaces.
@@ -293,6 +312,10 @@ impl SearchCache for search_path::SearchPathVec {
             DepMode::LdCache,
             &Default::default(),
         )
+    }
+
+    fn directories(&self) -> Option<&search_path::SearchPathVec> {
+        Some(self)
     }
 }
 

@@ -303,7 +303,7 @@ impl SearchCache for ld_so_cache::LdCache {
         // an entry is not searched for them.
         let dir = self.get(dtneeded)?;
         search_dir(
-            Cow::Borrowed(dir),
+            dir.as_str(),
             dtneeded,
             elc,
             platform,

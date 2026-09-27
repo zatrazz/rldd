@@ -1,5 +1,7 @@
 // The FreeBSD run-time linker.
 
+use std::borrow::Cow;
+
 use super::*;
 
 pub(in crate::elf) struct FreeBsd;
@@ -100,17 +102,69 @@ impl Loader for FreeBsd {
         }
     }
 
-    // Remap the dependency name using the libmap.conf mappings for the referencing
-    // object path.
-    fn libmap_dependency(config: &Config, refpath: &str, dependency: &String) -> String {
-        match &config.libmap {
-            Some(libmap) => libmap
-                .lookup(refpath, dependency)
-                .map(|target| target.to_string())
-                .unwrap_or_else(|| dependency.to_string()),
-            None => dependency.to_string(),
+    // find_library: rtld maps the dependency name with libmap.conf for the
+    // requesting object once it knows no object is loaded under that name
+    // (load_object), and opens a name with a slash as is.  Otherwise it
+    // searches each list with each directory mapped by libmap.conf too
+    // (path_enumerate).  A preloaded object has no requesting object, so its
+    // name is not mapped (the directories only get the unconstrained
+    // mappings), and only the LD_LIBRARY_PATH and hints directories are
+    // searched.
+    fn resolve_dependency<'a>(
+        dependency: &'a String,
+        config: &'a Config,
+        elc: &'a ElfInfo,
+        refpath: &str,
+        namespace: &ObjectNamespace,
+        preload: bool,
+    ) -> Option<Resolution<'a>> {
+        let refobj = (!preload).then_some(refpath);
+        let name = match refobj.and_then(|refpath| libmap_find(config, Some(refpath), dependency)) {
+            // The tokens of a name mapped to a path are expanded too.
+            Some(name) => Cow::Owned(
+                Self::expand_tokens(&name, TokenSite::Needed, elc, config.platform).unwrap_or(name),
+            ),
+            None => Cow::Borrowed(dependency.as_str()),
+        };
+        if name.contains('/') {
+            return Some(open_path_dependency(name, config, elc, namespace, preload));
         }
+
+        let search = |list: &'a search_path::SearchPathVec, mode: DepMode| {
+            list.iter().find_map(|dir| {
+                let dir = match libmap_find(config, refobj, &dir.path) {
+                    Some(mapped) => Cow::Owned(mapped),
+                    None => Cow::Borrowed(dir.path.as_str()),
+                };
+                search_dir(dir, &name, elc, config.platform, mode, namespace)
+            })
+        };
+        // DF_1_NODEFLIB skips the hints and the standard directories.
+        let nodeflib = !preload && elc.nodeflibs;
+        let hints = config
+            .ld_cache
+            .as_ref()
+            .and_then(|cache| cache.directories());
+        let lists = [
+            ((!preload).then_some(&elc.rpath), DepMode::DtRpath),
+            (Some(&config.ld_library_path), DepMode::LdLibraryPath),
+            ((!preload).then_some(&elc.runpath), DepMode::DtRunpath),
+            (hints.filter(|_| !nodeflib), DepMode::LdCache),
+            (
+                (!preload && !nodeflib).then_some(&config.system_dirs),
+                DepMode::SystemDirs,
+            ),
+        ];
+        lists
+            .into_iter()
+            .find_map(|(list, mode)| list.and_then(|list| search(list, mode)))
     }
+}
+
+// The lm_find mapping of NAME, a library name or a search directory, for the
+// REFOBJ object path (None for no object), when the libmap.conf has one.
+fn libmap_find(config: &Config, refobj: Option<&str>, name: &str) -> Option<String> {
+    config.libmap.as_ref()?.borrow_mut().find(refobj, name)
 }
 
 // Whether ELC is loaded by the 32-bit compat rtld of a 64-bit system
@@ -151,6 +205,104 @@ fn uname_values() -> &'static [Option<String>; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tempdir::TempDir;
+    use std::cell::RefCell;
+
+    // The search configuration with the LIBRARY_PATH directories and the
+    // LIBMAP contents.
+    fn config<'a>(
+        tmpdir: &TempDir,
+        ld_cache: &'a Option<LoaderCache>,
+        library_path: &[&Path],
+        libmap: &str,
+    ) -> std::io::Result<Config<'a>> {
+        use search_path::SearchPathVecExt;
+        let conf = tmpdir.path().join("libmap.conf");
+        fs::write(&conf, libmap)?;
+        let mut ld_library_path = search_path::SearchPathVec::new();
+        for dir in library_path {
+            ld_library_path.add_path(dir.to_str().unwrap());
+        }
+        Ok(Config {
+            ld_preload: &[],
+            ld_library_path,
+            ld_cache,
+            system_dirs: search_path::SearchPathVec::new(),
+            platform: None,
+            all: false,
+            libmap: ld_libmap_freebsd::parse_libmap(&conf).map(RefCell::new),
+        })
+    }
+
+    // The candidate file for NAME the FreeBSD rules take for the REFPATH
+    // object: the fixture files are empty, which the candidate check fails
+    // on, reporting their path.
+    fn candidate(config: &Config, refpath: &str, name: &str, preload: bool) -> Option<String> {
+        let elc = ElfInfo::for_test(EM_X86_64, FileFlags(0));
+        let name = name.to_string();
+        let dep =
+            FreeBsd::resolve_dependency(&name, config, &elc, refpath, &Default::default(), preload);
+        match dep? {
+            Err(e) => e.split(": ").next().map(str::to_string),
+            Ok(dep) => panic!("{} resolved", dep.filename),
+        }
+    }
+
+    // The dependency names and the search directories are mapped for the
+    // requesting object, and a mapping of its section then applies to every
+    // object, while a preloaded object name is not mapped.
+    #[test]
+    fn libmap_names_and_directories() -> std::io::Result<()> {
+        let tmpdir = TempDir::new()?;
+        let (a, b) = (tmpdir.path().join("a"), tmpdir.path().join("b"));
+        fs::create_dir(&a)?;
+        fs::create_dir(&b)?;
+        fs::write(a.join("libbar.so.1"), [])?;
+        fs::write(b.join("libbaz.so.1"), [])?;
+        let (a, b) = (a.to_str().unwrap(), b.to_str().unwrap());
+
+        let ld_cache = None;
+        let config = config(
+            &tmpdir,
+            &ld_cache,
+            &[Path::new(a)],
+            &format!(
+                "[/bin/prog]\n\
+                 libfoo.so.1 libbar.so.1\n\
+                 libpath.so.1 {a}/libbar.so.1\n\
+                 [/bin/dirprog]\n\
+                 {a} {b}\n"
+            ),
+        )?;
+        let bar = format!("{a}/libbar.so.1");
+        let baz = format!("{b}/libbaz.so.1");
+
+        assert_eq!(candidate(&config, "/bin/other", "libfoo.so.1", false), None);
+        assert_eq!(
+            candidate(&config, "/bin/prog", "libfoo.so.1", false),
+            Some(bar.clone())
+        );
+        assert_eq!(
+            candidate(&config, "/bin/other", "libfoo.so.1", false),
+            Some(bar.clone())
+        );
+        assert_eq!(candidate(&config, "/bin/prog", "libfoo.so.1", true), None);
+        assert_eq!(
+            candidate(&config, "/bin/prog", "libpath.so.1", false),
+            Some(bar)
+        );
+
+        assert_eq!(candidate(&config, "/bin/other", "libbaz.so.1", false), None);
+        assert_eq!(
+            candidate(&config, "/bin/dirprog", "libbaz.so.1", false),
+            Some(baz.clone())
+        );
+        assert_eq!(
+            candidate(&config, "/bin/other", "libbaz.so.1", true),
+            Some(baz)
+        );
+        Ok(())
+    }
 
     #[test]
     fn origin_subst_tokens() {

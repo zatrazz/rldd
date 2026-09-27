@@ -85,15 +85,31 @@ impl LibMap {
         self.sections.iter().rev().find(|c| c.matches(path))
     }
 
-    // The lm_find mapping of NAME for the object REFPATH.  On a constrained
-    // hit rtld also adds the result as an unconstrained mapping, which a
-    // library name never uses again (the object is loaded under that name,
-    // which rtld matches before mapping it), so it is left out.
+    // The mapping of NAME for the object REFPATH, without the side effect of
+    // find.
+    #[cfg(test)]
     pub fn lookup<'a>(&'a self, refpath: &str, name: &str) -> Option<&'a str> {
         if let Some(target) = self.section(refpath).and_then(|c| c.find(name)) {
             return Some(target);
         }
         self.section(DEFAULT_SECTION).and_then(|c| c.find(name))
+    }
+
+    // The lm_find mapping of NAME, a library name or a search directory, for
+    // the object REFPATH (None for no object, a preloaded one).  A mapping of
+    // the object section also becomes an unconstrained one (lm_add(NULL,
+    // ...)), which any object then gets for NAME.
+    pub fn find(&mut self, refpath: Option<&str>, name: &str) -> Option<String> {
+        if let Some(refpath) = refpath {
+            if let Some(target) = self.section(refpath).and_then(|c| c.find(name)) {
+                let target = target.to_string();
+                self.add_mapping(&None, name, &target);
+                return Some(target);
+            }
+        }
+        self.section(DEFAULT_SECTION)
+            .and_then(|c| c.find(name))
+            .map(str::to_string)
     }
 
     // Like lm_add, the section is found with the lmp_find matching, so a
@@ -372,6 +388,27 @@ mod tests {
         let mut libmap = LibMap::default();
         parse_content(&mut libmap, b"# caf\xe9\nlibfoo.so.1 libbar.so.1\n");
         assert_eq!(libmap.lookup("/bin/x", "libfoo.so.1"), Some("libbar.so.1"));
+    }
+
+    // A mapping of the object section also becomes an unconstrained one,
+    // while no object only gets the unconstrained ones.
+    #[test]
+    fn find_adds_the_constrained_mapping() {
+        let mut libmap = parse_str("[prog]\nlibfoo.so.1 libbar.so.1\n");
+        assert_eq!(libmap.find(Some("/bin/other"), "libfoo.so.1"), None);
+        assert_eq!(libmap.find(None, "libfoo.so.1"), None);
+        assert_eq!(
+            libmap.find(Some("/bin/prog"), "libfoo.so.1").as_deref(),
+            Some("libbar.so.1")
+        );
+        assert_eq!(
+            libmap.find(Some("/bin/other"), "libfoo.so.1").as_deref(),
+            Some("libbar.so.1")
+        );
+        assert_eq!(
+            libmap.find(None, "libfoo.so.1").as_deref(),
+            Some("libbar.so.1")
+        );
     }
 
     #[test]

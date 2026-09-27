@@ -586,8 +586,9 @@ struct Config<'a> {
     system_dirs: search_path::SearchPathVec,
     platform: Option<&'a String>,
     all: bool,
+    // The FreeBSD libmap.conf, which rtld adds mappings to while it resolves.
     #[cfg(any(target_os = "freebsd", all(test, target_os = "linux")))]
-    libmap: Option<ld_libmap_freebsd::LibMap>,
+    libmap: Option<std::cell::RefCell<ld_libmap_freebsd::LibMap>>,
 }
 
 fn push_searched(r: &mut Vec<String>, name: &str, searchpaths: &search_path::SearchPathVec) {
@@ -894,7 +895,8 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
         platform: ctx.platform.as_ref(),
         all: ctx.all,
         #[cfg(target_os = "freebsd")]
-        libmap: ld_libmap_freebsd::parse_libmap(&Path::new("/etc/libmap.conf")),
+        libmap: ld_libmap_freebsd::parse_libmap(&Path::new("/etc/libmap.conf"))
+            .map(std::cell::RefCell::new),
         #[cfg(all(test, target_os = "linux"))]
         libmap: None,
     };
@@ -919,8 +921,10 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
 #[derive(Debug)]
 struct ResolvedDependency<'a> {
     elc: ElfInfo,
-    // The directory, which a search subdirectory makes another one than the
-    // search path entry.
+    // The directory the object was found at, which a search subdirectory
+    // makes another one than the search path entry, or the path of a
+    // dependency naming one (owned when the loader maps it, like the FreeBSD
+    // libmap).
     path: Cow<'a, str>,
     // The resolved file name, which might differ from the DT_NEEDED entry
     // (for instance on OpenBSD minor version matching).
@@ -985,6 +989,8 @@ fn resolve_dependencies(
     // each device and inode.
     let mut sonames: HashMap<String, usize> = HashMap::new();
     let mut file_ids: HashMap<(u64, u64), usize> = HashMap::new();
+    // The tree node of the object loaded for each name requested.
+    let mut requested: HashMap<String, usize> = HashMap::new();
 
     let mut queue = VecDeque::new();
     // The glibc loader trace prints 'statically linked' for an object without
@@ -1061,10 +1067,6 @@ fn resolve_dependencies(
             item.dependency.clone()
         };
 
-        // FreeBSD libmap.conf may remap the dependency name based on the
-        // referencing object path.
-        let dependency = Rtld::libmap_dependency(config, refpath, &dependency);
-
         #[cfg(target_os = "openbsd")]
         let dependency = match &openbsd_libc {
             Some(libc) if dependency.starts_with("libc.so.") => libc.clone(),
@@ -1139,9 +1141,13 @@ fn resolve_dependencies(
         // module fails on resolves for a library with the run path.
         // A dependency referring back to the root object by its path is
         // resolved too, since the loader records the name on it and the
-        // trace lists it once.
+        // trace lists it once.  The names are matched as requested, before
+        // the loader maps them (the FreeBSD libmap), since they are the ones
+        // it records.
         #[cfg(not(target_os = "android"))]
-        let loaded = found.find(deptree, dependency);
+        let loaded = found
+            .find(deptree, dependency)
+            .or_else(|| requested.get(dependency.as_str()).copied());
         #[cfg(target_os = "linux")]
         let loaded = loaded.or_else(|| {
             if elc.is_musl {
@@ -1195,10 +1201,11 @@ fn resolve_dependencies(
             if !item.preload && interp::is_glibc_name(dependency) && root_elc.interp.is_none() {
                 resolve_loader(config, elc, dependency)
             } else {
-                resolve_dependency_1(dependency, config, elc, namespace, item.preload)
+                Rtld::resolve_dependency(dependency, config, elc, refpath, namespace, item.preload)
             };
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        let resolved = resolve_dependency_1(dependency, config, elc, namespace, item.preload);
+        let resolved =
+            Rtld::resolve_dependency(dependency, config, elc, refpath, namespace, item.preload);
         let mut dep = match resolved {
             Some(Ok(dep)) => dep,
             // The loader fails the load on the file it found (it is not an
@@ -1230,7 +1237,7 @@ fn resolve_dependencies(
             // default mode.  The preload entries given as a file path are
             // resolved with the full path, so they are decomposed the same
             // way.
-            let p = Path::new(dependency);
+            let p = Path::new(dep.path.as_ref());
             (pathutils::get_path(&p), pathutils::get_name(&p))
         } else {
             (Some(dep.path.to_string()), dep.filename.clone())
@@ -1249,19 +1256,21 @@ fn resolve_dependencies(
         // the namespaces (Android::find_library).
         let file_id = fs::metadata(&depref).ok().map(|m| (m.dev(), m.ino()));
         #[cfg(not(target_os = "android"))]
-        if let Some(node) = file_id.and_then(|id| file_ids.get(&id)) {
-            let entry = deptree.arena[*node].val.clone();
+        if let Some(&node) = file_id.and_then(|id| file_ids.get(&id)) {
+            let entry = deptree.arena[node].val.clone();
             deptree.add_repeated(
                 config.all,
                 DepNode::repeat_of(&entry, pathutils::get_name(&Path::new(dependency))),
                 item.depp,
             );
+            requested.entry(dependency.clone()).or_insert(node);
             continue;
         }
         let c = deptree.addnode(Rtld::loaded_node(r.0, r.1, dep.mode, dependency), item.depp);
         if let Some(id) = file_id {
             file_ids.entry(id).or_insert(c);
         }
+        requested.entry(dependency.clone()).or_insert(c);
         if let Some(soname) = &dep.elc.soname {
             sonames.entry(soname.clone()).or_insert(c);
         }
@@ -1344,13 +1353,14 @@ fn resolve_loader<'a>(
 // matches the requesting ELC one, or the error when the loader fails the
 // load on it.
 fn search_dir<'a>(
-    dir: Cow<'a, str>,
+    dir: impl Into<Cow<'a, str>>,
     dtneeded: &str,
     elc: &ElfInfo,
     platform: Option<&String>,
     mode: DepMode,
     namespace: &ObjectNamespace,
 ) -> Option<Resolution<'a>> {
+    let dir = dir.into();
     let path = Rtld::dependency_path(&dir, dtneeded);
     match open_dependency(&path, elc, platform) {
         Ok(elc) => Some(Ok(ResolvedDependency {
@@ -1383,16 +1393,49 @@ fn search_dirs<'a>(
         elc.search_subdirs
             .iter()
             .find_map(|subdir| {
-                let subdir = Cow::Owned(subdir_path(dir, subdir));
-                search_dir(subdir, dtneeded, elc, platform, mode, namespace)
+                search_dir(
+                    subdir_path(dir, subdir),
+                    dtneeded,
+                    elc,
+                    platform,
+                    mode,
+                    namespace,
+                )
             })
-            .or_else(|| search_dir(Cow::Borrowed(dir), dtneeded, elc, platform, mode, namespace))
+            .or_else(|| search_dir(dir.as_str(), dtneeded, elc, platform, mode, namespace))
     })
 }
 
 // The SUBDIR subdirectory of the DIR search directory.
 fn subdir_path(dir: &str, subdir: &str) -> String {
     format!("{}/{subdir}", dir.strip_suffix('/').unwrap_or(dir))
+}
+
+// Open the NAME file path, relative to the current directory when it is not
+// absolute, as a dependency (or a preload entry) of ELC: it is not searched.
+fn open_path_dependency<'a>(
+    name: Cow<'a, str>,
+    config: &Config,
+    elc: &ElfInfo,
+    namespace: &ObjectNamespace,
+    preload: bool,
+) -> Resolution<'a> {
+    let path = Path::new(name.as_ref());
+    // The preload entries go through the same checks.
+    match open_dependency(&path, elc, config.platform) {
+        Ok(elc) => Ok(ResolvedDependency {
+            elc,
+            filename: pathutils::get_name(&path),
+            path: name,
+            mode: if preload {
+                DepMode::Preload
+            } else {
+                DepMode::Direct
+            },
+            namespace: namespace.clone(),
+        }),
+        Err(Rejection::Skip(e) | Rejection::Fatal(e)) => Err(format!("{name}: {e}")),
+    }
 }
 
 // The Android dependencies are searched on the linker namespaces instead
@@ -1406,31 +1449,20 @@ fn resolve_dependency_1<'a>(
     namespace: &ObjectNamespace,
     preload: bool,
 ) -> Option<Resolution<'a>> {
-    let path = Path::new(&dtneeded);
-
-    // A name containing a slash is a file path, relative to the current
-    // directory when it is not absolute, and is not searched. The glibc
-    // loaderonly search the bare names, for the dependencies as for the
-    // preload entries.
+    // A name containing a slash is a file path, which is not searched. The
+    // glibc loader only search the bare names, for the dependencies as for
+    // the preload entries.
     // The NetBSD loader opens every preload entry as a file path.
     let is_path =
         dtneeded.contains(std::path::MAIN_SEPARATOR) || (preload && cfg!(target_os = "netbsd"));
     if is_path {
-        // The preload entries go through the same checks.
-        return Some(match open_dependency(&path, elc, config.platform) {
-            Ok(elc) => Ok(ResolvedDependency {
-                elc,
-                path: Cow::Borrowed(dtneeded),
-                filename: pathutils::get_name(&path),
-                mode: if preload {
-                    DepMode::Preload
-                } else {
-                    DepMode::Direct
-                },
-                namespace: namespace.clone(),
-            }),
-            Err(Rejection::Skip(e) | Rejection::Fatal(e)) => Err(format!("{dtneeded}: {e}")),
-        });
+        return Some(open_path_dependency(
+            dtneeded.into(),
+            config,
+            elc,
+            namespace,
+            preload,
+        ));
     }
 
     let search = |searchpaths: &'a search_path::SearchPathVec, mode: DepMode| {
