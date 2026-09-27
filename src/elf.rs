@@ -1499,11 +1499,20 @@ fn deptree_node_path(node: &DepNode) -> Option<String> {
     })
 }
 
+// The parsing of the objects of the scope: symbols::parse, or
+// symbols::parse_versions for the version check alone.
+#[cfg(target_os = "linux")]
+type SymbolParser = fn(&String) -> Option<symbols::ObjectSymbols>;
+
 // Build the loader global search scope: the resolved objects from the dependency
 // tree in breadth-first order (the order the loader uses for symbol resolution),
-// with each object dynamic symbol table and relocation references parsed.
+// with each object dynamic symbol table and relocation references parsed by
+// PARSE.
 #[cfg(target_os = "linux")]
-fn build_symbol_scope(deptree: &DepTree) -> Vec<(String, symbols::ObjectSymbols)> {
+fn build_symbol_scope(
+    deptree: &DepTree,
+    parse: SymbolParser,
+) -> Vec<(String, symbols::ObjectSymbols)> {
     use std::collections::{HashSet, VecDeque};
 
     let mut scope = Vec::new();
@@ -1526,7 +1535,7 @@ fn build_symbol_scope(deptree: &DepTree) -> Vec<(String, symbols::ObjectSymbols)
         if !seen.insert(path.clone()) {
             continue;
         }
-        if let Some(obj) = symbols::parse(&path) {
+        if let Some(obj) = parse(&path) {
             scope.push((path, obj));
         }
     }
@@ -1549,7 +1558,11 @@ fn open_root_elf(deptree: &DepTree) -> Option<ElfInfo> {
 // loader provides, like _rtld_global), however it might not be present in the
 // dependency tree if no object lists it as an explicit dependency.
 #[cfg(target_os = "linux")]
-fn append_interp_to_scope(scope: &mut Vec<(String, symbols::ObjectSymbols)>, elc: &ElfInfo) {
+fn append_interp_to_scope(
+    scope: &mut Vec<(String, symbols::ObjectSymbols)>,
+    elc: &ElfInfo,
+    parse: SymbolParser,
+) {
     if let Some(interp) = &elc.interp {
         let name = pathutils::get_name(&Path::new(interp));
         if scope
@@ -1558,10 +1571,63 @@ fn append_interp_to_scope(scope: &mut Vec<(String, symbols::ObjectSymbols)>, elc
         {
             return;
         }
-        if let Some(obj) = symbols::parse(interp) {
+        if let Some(obj) = parse(interp) {
             scope.push((interp.to_string(), obj));
         }
     }
+}
+
+// The loader version check of the objects of SCOPE (mimicking
+// _dl_check_all_versions): for each required version, check whether the
+// object providing it (matched by file name) actually defines it.  The
+// loader reports a missing weak version, and an object without any version
+// definition, as warnings (it always checks the versions in verbose mode,
+// even for a plain trace).
+#[cfg(target_os = "linux")]
+fn check_version_needs(scope: &[(String, symbols::ObjectSymbols)]) -> Vec<VersionError> {
+    let mut r = Vec::new();
+    for (opath, obj) in scope {
+        for need in &obj.verneeded {
+            let Some((dpath, dobj)) = scope
+                .iter()
+                .find(|(path, _)| pathutils::get_name(&Path::new(path)) == need.file)
+            else {
+                continue;
+            };
+            let kind = if !dobj.has_verdef {
+                VersionErrorKind::NoVersionInformation
+            } else if dobj.verdef_names.contains(&need.version) {
+                continue;
+            } else if need.weak {
+                VersionErrorKind::WeakNotFound
+            } else {
+                VersionErrorKind::NotFound
+            };
+            r.push(VersionError {
+                object: dpath.clone(),
+                version: need.version.clone(),
+                required_by: opath.clone(),
+                kind,
+            });
+        }
+    }
+    r
+}
+
+// The loader version check alone, which the glibc loader makes whenever it
+// loads a program, before the relocations (dl_main), so ldd reports the
+// failures before any listing.  The musl loader has none.
+#[cfg(target_os = "linux")]
+pub fn check_versions(deptree: &DepTree) -> Vec<VersionError> {
+    let Some(root_elc) = open_root_elf(deptree) else {
+        return Vec::new();
+    };
+    if root_elc.is_musl {
+        return Vec::new();
+    }
+    let mut scope = build_symbol_scope(deptree, symbols::parse_versions);
+    append_interp_to_scope(&mut scope, &root_elc, symbols::parse_versions);
+    check_version_needs(&scope)
 }
 
 // Mimic the musl loader relocation processing, which the musl ldd always
@@ -1578,11 +1644,11 @@ pub fn check_musl_relocations(deptree: &DepTree) -> Option<Vec<UndefinedSymbol>>
         return None;
     }
 
-    let mut scope = build_symbol_scope(deptree);
+    let mut scope = build_symbol_scope(deptree, symbols::parse);
 
     let libc_linked = deptree.arena.iter().any(|n| n.val.alias.is_some());
     if libc_linked {
-        append_interp_to_scope(&mut scope, &root_elc);
+        append_interp_to_scope(&mut scope, &root_elc, symbols::parse);
     } else if let Some(loader) = musl_loader_path(&root_elc) {
         scope.retain(|(path, _)| *path != loader);
     }
@@ -1678,40 +1744,14 @@ pub fn check_relocations(
 
     let root_elc = open_root_elf(deptree);
 
-    let mut scope = build_symbol_scope(deptree);
+    let mut scope = build_symbol_scope(deptree, symbols::parse);
     if let Some(root_elc) = &root_elc {
-        append_interp_to_scope(&mut scope, root_elc);
+        append_interp_to_scope(&mut scope, root_elc, symbols::parse);
     }
 
-    // The loader version check (mimicking _dl_check_all_versions): for each
-    // required version, check whether the object providing it (matched by file
-    // name) actually defines it.  The loader reports a missing weak version,
-    // and an object without any version definition, as warnings (it always
-    // checks the versions in verbose mode, even for a plain trace).
-    for (opath, obj) in &scope {
-        for need in &obj.verneeded {
-            let Some((dpath, dobj)) = scope
-                .iter()
-                .find(|(path, _)| pathutils::get_name(&Path::new(path)) == need.file)
-            else {
-                continue;
-            };
-            let kind = if !dobj.has_verdef {
-                VersionErrorKind::NoVersionInformation
-            } else if dobj.verdef_names.contains(&need.version) {
-                continue;
-            } else if need.weak {
-                VersionErrorKind::WeakNotFound
-            } else {
-                VersionErrorKind::NotFound
-            };
-            r.version_errors.push(VersionError {
-                object: dpath.clone(),
-                version: need.version.clone(),
-                required_by: opath.clone(),
-                kind,
-            });
-        }
+    // The musl loader has no version check.
+    if !root_elc.as_ref().is_some_and(|elc| elc.is_musl) {
+        r.version_errors = check_version_needs(&scope);
     }
 
     // The loader relocates the objects in the inverse scope order, with the

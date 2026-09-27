@@ -147,6 +147,7 @@ ldd_listing() { # ldd_listing FILE [ENV=VALUE...]
         { sub(/^[ \t]+/, ""); sub(/ \(0x[0-9a-fA-F]+\)$/, "") }
         / => / { split($0, a, " => "); print base(a[1]) "\t" a[2]; next }
         /^statically linked$/ { next }
+        / \(required by .*\)$/ { next }
         { print base($0) "\t" $0 }' | resolve
 }
 
@@ -217,11 +218,19 @@ relocation_lines() {
 }
 
 # check_relocs NAME OPTION FILE: the -d or -r diagnostics of rldd match the
-# ldd ones.
+# ldd ones.  With an empty OPTION, the version diagnostics of a plain trace
+# (both the rldd -l and the default output).
 check_relocs() {
     name=$1 option=$2 file=$3
-    want=$(ldd "$option" "$file" 2>&1 | relocation_lines)
-    got=$("$RLDD" "$option" "$file" 2>&1 | relocation_lines)
+    want=$(ldd ${option:+"$option"} "$file" 2>&1 | relocation_lines)
+    if [ -n "$option" ]; then
+        got=$("$RLDD" "$option" "$file" 2>&1 | relocation_lines)
+    else
+        got=$("$RLDD" -l "$file" 2>&1 | relocation_lines)
+        plain=$("$RLDD" "$file" 2>&1 | relocation_lines)
+        [ "$got" = "$plain" ] || got="$got
+(default output) $plain"
+    fi
     if [ -z "$want" ]; then
         fail "$name: ldd reports nothing for $file"
     elif [ "$want" = "$got" ]; then
@@ -497,6 +506,7 @@ case_versions() {
     prog versions/main main.c -Lversions/v -lfoo -Wl,-rpath,'$ORIGIN/nov' \
         -Wl,--disable-new-dtags
     check_relocs "no version information available" -r versions/main
+    check_relocs "no version information available (plain trace)" "" versions/main
     # An unversioned reference does not bind to a hidden only definition.
     cat > foohidden.c <<'EOF'
 int foo_impl(void) { return 1; }
@@ -516,6 +526,10 @@ EOF
     echo 'int foo(void), bar(void); int main(void) { return foo() + bar(); }' > main2.c
     prog versions/main3 main2.c -Lversions/v2 -lfoo -Wl,-rpath,'$ORIGIN/v' -Wl,--disable-new-dtags
     check_relocs "version not found" -r versions/main3
+    check_relocs "version not found (plain trace)" "" versions/main3
+    # The symbol lookups are only for -d and -r.
+    check_no_output "no symbol lookup in a plain trace" "undefined symbol|version \`V2'" \
+        -l versions/main2
 }
 
 # The musl rules, with a program naming a musl loader of the machine

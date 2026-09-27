@@ -75,6 +75,31 @@ pub struct ObjectSymbols {
     pub bind_now: bool,
 }
 
+// Parse only the version definitions and needs of FILENAME, for the loader
+// version check.
+pub fn parse_versions<P: AsRef<Path>>(filename: &P) -> Option<ObjectSymbols> {
+    let mmap = crate::pathutils::map_file(filename).ok()?;
+    let data: &[u8] = &mmap;
+
+    fn versions<Elf: FileHeader<Endian = Endianness>>(
+        elf: &Elf,
+        data: &[u8],
+    ) -> Option<ObjectSymbols> {
+        let endian = elf.endian().ok()?;
+        let sections = elf.sections(endian, data).ok()?;
+        let mut obj = ObjectSymbols::default();
+        parse_verdef(&mut obj, endian, &sections, data);
+        parse_verneed(&mut obj, endian, &sections, data);
+        Some(obj)
+    }
+
+    match object::FileKind::parse(data).ok()? {
+        object::FileKind::Elf32 => versions(FileHeader32::<Endianness>::parse(data).ok()?, data),
+        object::FileKind::Elf64 => versions(FileHeader64::<Endianness>::parse(data).ok()?, data),
+        _ => None,
+    }
+}
+
 pub fn parse<P: AsRef<Path>>(filename: &P) -> Option<ObjectSymbols> {
     let mmap = crate::pathutils::map_file(filename).ok()?;
     let data: &[u8] = &mmap;

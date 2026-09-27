@@ -14,7 +14,7 @@ The report lines are tab separated:
   UNREADABLE-DIRS n  directories the walk could not enter
   PANIC path what    the object made rldd panic, crash, or time out
   REFUSED path what  ldd traces the object, rldd refused it
-  DIFF path what     the two listings differ
+  DIFF path what     the two listings, or version diagnostics, differ
   UNRESOLVED path name
                      both tools report the dependency as not found
 """
@@ -248,27 +248,47 @@ def ldd_flavor():
 # The musl ldd reports a missing library on stderr, with the listing so far
 # on stdout, where the glibc one lists it as not found.
 MUSL_NOT_FOUND = re.compile(r"^Error loading shared library (.+?): .* \(needed by .*\)$")
+# The version check diagnostics the glibc loader prints before the listing
+# (both tools): 'FILE: OBJECT: version `V' not found (required by OBJECT)',
+# and the 'weak version' and 'no version information available' warnings.
+VERSION_DIAG = re.compile(r"^.+?: (.+?): ((?:weak )?version `[^']*' not found"
+                          r"|no version information available) \(required by (.+)\)$")
+
+
+def version_diag(line):
+    """The (object, message, required by) of a version check diagnostic,
+    with the objects resolved through realpath, or None."""
+    m = VERSION_DIAG.match(line)
+    if not m:
+        return None
+    return realpath(m.group(1)), m.group(2), realpath(m.group(3))
 
 
 def parse_ldd(rc, out, err):
-    """(status, deps, bare): 'ok', 'static' or the failure reason, the
-    (name, path or 'not found') set, and the paths listed without a name."""
+    """(status, deps, bare, versions): 'ok', 'static' or the failure reason,
+    the (name, path or 'not found') set, the paths listed without a name, and
+    the version check diagnostics."""
     deps = set()
     bare = []
+    versions = set()
     for line in err.split("\n") + out.split("\n"):
         line = line.strip()
         if line == "statically linked":
-            return "static", deps, bare
+            return "static", deps, bare, versions
         if line == "not a dynamic executable" or line.endswith("Not a valid dynamic program"):
-            return line, deps, bare
+            return line, deps, bare, versions
         m = MUSL_NOT_FOUND.match(line)
         if m:
             deps.add((m.group(1), NOT_FOUND))
     if rc != 0 and not out.strip():
-        return (err.strip() or "exit status %s" % rc).split("\n")[0], deps, bare
+        return (err.strip() or "exit status %s" % rc).split("\n")[0], deps, bare, versions
     for line in out.split("\n"):
         line = line.strip()
         if not line:
+            continue
+        diag = version_diag(line)
+        if diag:
+            versions.add(diag)
             continue
         m = LDD_DEP.match(line)
         if m:
@@ -282,23 +302,29 @@ def parse_ldd(rc, out, err):
         if m and "/" in m.group(1):
             bare.append(m.group(1))
         elif not m or not m.group(1).startswith(VDSO):
-            return "unexpected line: " + line, deps, bare
-    return "ok", deps, bare
+            return "unexpected line: " + line, deps, bare, versions
+    return "ok", deps, bare, versions
 
 
 def parse_rldd(out):
+    """(status, deps, versions), as parse_ldd."""
     deps = set()
+    versions = set()
     for line in out.split("\n"):
         line = line.strip()
         if not line:
             continue
         if line == "statically linked":
-            return "static", deps
+            return "static", deps, versions
+        diag = version_diag(line)
+        if diag:
+            versions.add(diag)
+            continue
         m = RLDD_DEP.match(line)
         if not m:
-            return "unexpected line: " + line, deps
+            return "unexpected line: " + line, deps, versions
         deps.add((m.group(1), m.group(2)))
-    return "ok", deps
+    return "ok", deps, versions
 
 
 def realpath(path):
@@ -382,16 +408,16 @@ def check(path):
             what = err.strip()
         return [("PANIC", path, what)]
     if rc != 0 and not out:
-        rldd_status, rldd_deps = "error", set()
+        rldd_status, rldd_deps, rldd_versions = "error", set(), set()
         refused = err.strip().split("\n")[0] if err.strip() else "exit status %s" % rc
     else:
-        rldd_status, rldd_deps = parse_rldd(out)
+        rldd_status, rldd_deps, rldd_versions = parse_rldd(out)
         refused = rldd_status
 
     rc, out, err = run(["ldd", path])
     if rc is None and err == "timeout":
         return [("PANIC", path, "ldd timeout")]
-    ldd_status, ldd_deps, ldd_bare = parse_ldd(rc, out, err)
+    ldd_status, ldd_deps, ldd_bare, ldd_versions = parse_ldd(rc, out, err)
     if ldd_status not in ("ok", "static"):
         return [("UNTRACED",)]
 
@@ -403,6 +429,10 @@ def check(path):
 
     lines = [("COMPARED",)]
     diffs = compare(interp, ldd_deps, ldd_bare, rldd_deps)
+    for obj, what, needed_by in sorted(ldd_versions - rldd_versions):
+        diffs.append("%s: %s (required by %s) only from ldd" % (obj, what, needed_by))
+    for obj, what, needed_by in sorted(rldd_versions - ldd_versions):
+        diffs.append("%s: %s (required by %s) only from rldd" % (obj, what, needed_by))
     if diffs:
         lines.append(("DIFF", path, "; ".join(diffs)))
     for name, resolved in sorted(ldd_deps & rldd_deps):

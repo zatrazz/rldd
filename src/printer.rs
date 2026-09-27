@@ -155,10 +155,23 @@ impl Printer {
         out!("{line}");
     }
 
-    // Print the DEPS dependency tree, starting with the root object.
-    pub fn print_deps(&self, deps: &DepTree) {
+    // Print the DEPS dependency tree, starting with the root object, along
+    // with the DIAGNOSTICS lines of the loader about it, which come after the
+    // file header on the ldd like output (where ldd prints them), and before
+    // the tree otherwise.
+    pub fn print_deps(&self, deps: &DepTree, diagnostics: &[String]) {
         let bin = deps.arena.first().unwrap();
+        if !self.ldd {
+            for line in diagnostics {
+                self.flush(&format!("{line}\n"));
+            }
+        }
         self.print_executable(&bin.val.path, &bin.val.name);
+        if self.ldd {
+            for line in diagnostics {
+                self.flush(&format!("{line}\n"));
+            }
+        }
 
         #[cfg(all(target_family = "unix", not(target_os = "macos")))]
         if bin.children.is_empty() {
@@ -482,6 +495,18 @@ mod tests {
 
     // The tree printed with the PP, LDD, ONE, and VERBOSE settings.
     fn print(pp: bool, ldd: bool, one: bool, verbose: bool, deps: &DepTree) -> String {
+        print_with(pp, ldd, one, verbose, deps, &[])
+    }
+
+    // Likewise, with the loader DIAGNOSTICS.
+    fn print_with(
+        pp: bool,
+        ldd: bool,
+        one: bool,
+        verbose: bool,
+        deps: &DepTree,
+        diagnostics: &[String],
+    ) -> String {
         let printer = Printer {
             pp,
             ldd,
@@ -489,7 +514,7 @@ mod tests {
             verbose,
             ..printer(false)
         };
-        printer.print_deps(deps);
+        printer.print_deps(deps, diagnostics);
         printer.captured.unwrap().take()
     }
 
@@ -624,6 +649,20 @@ mod tests {
              \\_ libb.dylib [direct]\n   \
                 \\_ liba.dylib [direct]\n"
         );
+    }
+
+    // The loader diagnostics come after the file header on the ldd like
+    // output, the way ldd prints them, and before the tree otherwise.
+    #[test]
+    fn diagnostics_placement() {
+        let diagnostics = ["prog: liba.so: no version information available".to_string()];
+        let line = &diagnostics[0];
+        let out = print_with(false, false, false, false, &tree(), &diagnostics);
+        assert!(out.starts_with(&format!("{line}\nprog\n")));
+        let ldd = print_with(false, true, false, false, &tree(), &diagnostics);
+        assert!(ldd.starts_with(&format!("prog:\n{line}\n        liba.so => ")));
+        let ldd = print_with(false, true, true, false, &tree(), &diagnostics);
+        assert!(ldd.starts_with(&format!("{line}\n        liba.so => ")));
     }
 
     #[cfg(all(target_family = "unix", not(target_os = "macos")))]

@@ -62,6 +62,7 @@ one `name => path` per line.
 | Check | What it covers |
 | --- | --- |
 | dependency lists | every object lists the same dependencies as `ldd`, each one resolved to the same file |
+| version diagnostics | the glibc loader version check failures (`version ... not found`, `no version information available`) printed before the listing are the same, the objects matched through `realpath` |
 | panics | no object makes rldd panic, crash (a signal, such as a stack overflow) or time out, and rldd reads every object ldd traces |
 
 The order of the listing is not compared: ldd prints the objects in load order
@@ -141,8 +142,8 @@ Prerequisites: the glibc `ldd`, `gcc`, `readelf`, `objcopy`, `realpath`,
 Most cases compare the `rldd -l` listing with the `ldd` one (with the same
 `LD_PRELOAD` or `LD_LIBRARY_PATH` as the rldd option), each dependency
 resolved through `realpath`, and the loader and vDSO lines left out.  The
-`-d`/`-r` cases compare the version and undefined symbol diagnostics, with
-the directories left out.  The other cases check the rldd output against the
+`-d`/`-r` cases compare the version and undefined symbol diagnostics, and the
+plain trace ones the version diagnostics, with the directories left out.  The other cases check the rldd output against the
 expected result, where ldd can not tell:
 
 * the objects the glibc loader fails the whole load on (a candidate of

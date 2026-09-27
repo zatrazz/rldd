@@ -178,11 +178,33 @@ struct Options {
     args: Vec<String>,
 }
 
+// The loader version check diagnostics the way ldd prints them: prefixed with
+// the ARG file name, which also names the input object of DEPTREE (the loader
+// knows it by the name it was given).
 #[cfg(target_os = "linux")]
-fn print_version_errors(arg: &str, errors: &[elf::VersionError]) {
-    for error in errors {
-        outln!("{arg}: {error}");
-    }
+fn version_diagnostics(
+    arg: &str,
+    deptree: &deptree::DepTree,
+    errors: &[elf::VersionError],
+) -> Vec<String> {
+    let root = deptree.arena.first().and_then(|root| {
+        let path = root.val.path.as_ref()?;
+        Some(pathutils::join(path, &root.val.name))
+    });
+    let name = |object: &String| match &root {
+        Some(root) if root == object => arg.to_string(),
+        _ => object.clone(),
+    };
+    errors
+        .iter()
+        .map(|error| elf::VersionError {
+            object: name(&error.object),
+            version: error.version.clone(),
+            required_by: name(&error.required_by),
+            kind: error.kind,
+        })
+        .map(|error| format!("{arg}: {error}"))
+        .collect()
 }
 
 fn print_error(arg: &str, err: std::io::Error) -> String {
@@ -445,7 +467,9 @@ fn main() {
                 #[cfg(target_os = "linux")]
                 if opts.unused {
                     let relocs = check_relocations(&deptree, true, true);
-                    print_version_errors(arg, &relocs.version_errors);
+                    for line in version_diagnostics(arg, &deptree, &relocs.version_errors) {
+                        outln!("{line}");
+                    }
                     if !relocs.unused.is_empty() {
                         outln!("Unused direct dependencies:");
                         for path in relocs.unused {
@@ -458,24 +482,36 @@ fn main() {
 
                 #[cfg(any(target_os = "linux", windows))]
                 if opts.data_relocs || opts.function_relocs {
+                    // The loader prints the version check diagnostics before
+                    // the dependency listing.
                     #[cfg(target_os = "linux")]
-                    let undefined = {
+                    let (undefined, diagnostics) = {
                         let relocs = check_relocations(&deptree, opts.function_relocs, false);
-                        // The loader prints the version check errors before the
-                        // dependency listing.
-                        print_version_errors(arg, &relocs.version_errors);
-                        relocs.undefined
+                        let diagnostics =
+                            version_diagnostics(arg, &deptree, &relocs.version_errors);
+                        (relocs.undefined, diagnostics)
                     };
                     #[cfg(windows)]
-                    let undefined = check_imports(&ctx, &deptree, opts.function_relocs);
-                    printer.print_deps(&deptree);
+                    let (undefined, diagnostics) = (
+                        check_imports(&ctx, &deptree, opts.function_relocs),
+                        Vec::new(),
+                    );
+                    printer.print_deps(&deptree, &diagnostics);
                     for undef in undefined {
                         outln!("undefined symbol: {undef}\t({})", undef.object);
                     }
                     continue;
                 }
 
-                printer.print_deps(&deptree);
+                // The glibc loader checks the versions the objects need
+                // whenever it loads them, so ldd reports the failures even
+                // without the relocation processing, before the listing (the
+                // exit status does not change).
+                #[cfg(target_os = "linux")]
+                let diagnostics = version_diagnostics(arg, &deptree, &check_versions(&deptree));
+                #[cfg(not(target_os = "linux"))]
+                let diagnostics = Vec::new();
+                printer.print_deps(&deptree, &diagnostics);
 
                 // The musl ldd always processes the relocations (musl has no
                 // lazy binding), reporting the unresolved references after
