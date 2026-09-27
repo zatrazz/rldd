@@ -250,14 +250,30 @@ fn align_cache(value: usize) -> usize {
     (value + (align_of::<cache_file_new>() - 1)) & !(align_of::<cache_file_new>() - 1)
 }
 
+// The directory of the library path for each name the loader resolves through
+// the cache.
 pub type LdCache = HashMap<String, String>;
 
-fn parse_ld_so_cache_old(
-    data: &[u8],
-    ei_class: FileClass,
-    e_machine: Machine,
-    e_flags: FileFlags,
-) -> Result<LdCache> {
+// A cache entry.
+#[derive(Debug)]
+struct CacheEntry {
+    flags: i32,
+    name: String,
+    path: String,
+    // The file_entry_new hwcap field, zero on the old format.
+    hwcap: u64,
+}
+
+// The cache file contents: the entries in the file order (sorted by name, the
+// glibc-hwcaps ones first) and the glibc-hwcaps subdirectory names the
+// extension entries index.
+#[derive(Debug, Default)]
+struct CacheFile {
+    entries: Vec<CacheEntry>,
+    hwcaps: Vec<String>,
+}
+
+fn parse_ld_so_cache_old(data: &[u8]) -> Result<CacheFile> {
     let hdr: cache_file = read_at(data, 0).ok_or(Error::other("Invalid cache file"))?;
 
     // Check for corruption, avoiding overflow (glibc _dl_load_cache_lookup).
@@ -271,35 +287,31 @@ fn parse_ld_so_cache_old(
     let strings = CACHE_FILE_LEN + nlibs * FILE_ENTRY_LEN;
     let offset = align_cache(strings);
     if data.len() > (offset + CACHE_FILE_NEW_LEN) {
-        return parse_ld_so_cache_new(data, offset, ei_class, e_machine, e_flags);
+        return parse_ld_so_cache_new(data, offset);
     }
 
     if hdr.magic != CACHEMAGIC.as_bytes() {
         return Err(Error::other("Invalid magic"));
     }
 
-    let mut ldsocache = LdCache::new();
+    let mut entries = Vec::new();
     for i in 0..nlibs {
         let entry: file_entry = read_at(data, CACHE_FILE_LEN + i * FILE_ENTRY_LEN)
             .ok_or(Error::other("Invalid cache entry"))?;
-        if !check_file_entry_flags(entry.flags, ei_class, e_machine, e_flags) {
-            continue;
-        }
-        let key = read_string(data, strings, entry.key)?;
-        let value = read_string(data, strings, entry.value)?;
-
-        ldsocache.insert(key, value);
+        entries.push(CacheEntry {
+            flags: entry.flags,
+            name: read_string(data, strings, entry.key)?,
+            path: read_string(data, strings, entry.value)?,
+            hwcap: 0,
+        });
     }
-    Ok(ldsocache)
+    Ok(CacheFile {
+        entries,
+        hwcaps: Vec::new(),
+    })
 }
 
-fn parse_ld_so_cache_new(
-    data: &[u8],
-    initial: usize,
-    ei_class: FileClass,
-    e_machine: Machine,
-    e_flags: FileFlags,
-) -> Result<LdCache> {
+fn parse_ld_so_cache_new(data: &[u8], initial: usize) -> Result<CacheFile> {
     let hdr: cache_file_new =
         read_at(data, initial).ok_or(Error::other("Invalid new cache header"))?;
 
@@ -315,101 +327,40 @@ fn parse_ld_so_cache_new(
 
     // Check for corruption, avoiding overflow (glibc _dl_load_cache_lookup).
     let nlibs = hdr.nlibs as usize;
-    let entries = initial + CACHE_FILE_NEW_LEN;
-    if (data.len() - entries) / FILE_ENTRY_NEW_LEN < nlibs {
+    let first = initial + CACHE_FILE_NEW_LEN;
+    if (data.len() - first) / FILE_ENTRY_NEW_LEN < nlibs {
         return Err(Error::other("Invalid new cache file"));
     }
 
-    // Return vector of defined glibc-hwcap subfolder defined in the extension headers.  For
-    // instance on x86_64 it mught return [x86-64-v2, x86-64-v3].
-    let hwcap_idxs = parse_ld_so_cache_glibc_hwcap(data, initial, hdr.extension_offset)?;
-
-    // And obtain the current machine supported glibc-hwcap subfolder.
-    let hwcap_supported = hwcap::hwcap_supported()?;
-
-    let mut ldsocache = LdCache::new();
-    // Keep track of the last glibc-hwcap value for the entry to allow check if the new entry is
-    // new best-fit value.  Using an extra map avoid the need to add an extra field on the
-    // returned ldsocache map.
-    let mut hwcapseen = HashMap::<String, usize>::new();
-
+    let mut entries = Vec::new();
     for i in 0..nlibs {
-        let entry: file_entry_new = read_at(data, entries + i * FILE_ENTRY_NEW_LEN)
+        let entry: file_entry_new = read_at(data, first + i * FILE_ENTRY_NEW_LEN)
             .ok_or(Error::other("Invalid new cache entry"))?;
-        // Skip not supported entries for the binary architecture, for instance x86_64/i686
-        // with multilib support.
-        if !check_file_entry_flags(entry.flags, ei_class, e_machine, e_flags) {
-            continue;
-        }
-        let hwcapidx = check_cache_hwcap_extension(entry.hwcap);
-
         // The strings are relative to the new format header.
-        let key = read_string(data, initial, entry.key)?;
-        let value = read_string(data, initial, entry.value)?;
-
-        // First check if there is an already found glibc-hwcap option for the entry.  In this case,
-        // also check if the newer entry has a glibc-hwcap index associated and if it is also the case
-        // check if the new glibc-hwcap is a better fit than the existent one.  This is done by
-        // comparing the index value, since the supported hwcasp are sorted in priority order (with
-        // the first entry being the better fit).
-        if let Some(seen_idx) = hwcapseen.get(&key) {
-            // It only makes sense to possible update a new entry if there is also a glibc-hwcap
-            // entry associated.
-            if let Some(new_idx) = check_hwcap_index(&hwcapidx, &hwcap_idxs, &hwcap_supported) {
-                if new_idx < *seen_idx {
-                    // If the entry is a newer best fit, update both the cache and the seen map.
-                    hwcapseen.insert(key.to_string(), new_idx);
-                    ldsocache.insert(
-                        key,
-                        pathutils::get_path(&value)
-                            .ok_or(Error::other("Invalid ld.so.cache entry"))?,
-                    );
-                }
-            }
-        } else {
-            let idx = check_hwcap_index(&hwcapidx, &hwcap_idxs, &hwcap_supported);
-            // The loader takes the first of the entries with the same name and
-            // flags.
-            if idx.is_none() && ldsocache.contains_key(&key) {
-                continue;
-            }
-            if let Some(idx) = idx {
-                hwcapseen.insert(key.to_string(), idx);
-            }
-            ldsocache.insert(
-                key,
-                pathutils::get_path(&value).ok_or(Error::other("Invalid ld.so.cache entry"))?,
-            );
-        }
+        entries.push(CacheEntry {
+            flags: entry.flags,
+            name: read_string(data, initial, entry.key)?,
+            path: read_string(data, initial, entry.value)?,
+            hwcap: entry.hwcap,
+        });
     }
 
-    Ok(ldsocache)
-}
-
-// Return a new best-fit index for HWCAP_SUPPORTED if the HWCAPIDX contains a valid value.
-fn check_hwcap_index(
-    hwcapidx: &Option<u32>,
-    hwcap_idxs: &[String],
-    hwcap_supported: &[&'static str],
-) -> Option<usize> {
-    let hwcap_value = hwcap_idxs.get((*hwcapidx)? as usize)?;
-    hwcap_supported.iter().position(|&r| r == hwcap_value)
+    Ok(CacheFile {
+        entries,
+        hwcaps: parse_ld_so_cache_glibc_hwcap(data, initial, hdr.extension_offset)?,
+    })
 }
 
 const DL_CACHE_HWCAP_ISA_LEVEL_COUNT: u64 = 10;
 const DL_CACHE_HWCAP_EXTENSION: u64 = 1u64 << 62;
 const DL_CACHE_HWCAP_ISA_LEVEL_MASK: u64 = (1 << DL_CACHE_HWCAP_ISA_LEVEL_COUNT) - 1;
 
-// The hwcap is an index on a string list, so return remove the unused high bits.
-fn check_cache_hwcap_extension(hwcap: u64) -> Option<u32> {
+// Whether the hwcap field names a glibc-hwcaps subdirectory, whose index on
+// the extension section is on the lower 32 bits (glibc dl_cache_hwcap_extension).
+fn check_cache_hwcap_extension(hwcap: u64) -> bool {
     // The hwcap extension is enabled iff the DL_CACHE_HWCAP_EXTENSION bit is set, ignoring the
     // lower 32 bits as well as the ISA level bits in the upper 32 bits.
-    let active: bool =
-        (hwcap >> 32) & !DL_CACHE_HWCAP_ISA_LEVEL_MASK == (DL_CACHE_HWCAP_EXTENSION >> 32);
-    match active {
-        true => Some(hwcap as u32),
-        false => None,
-    }
+    (hwcap >> 32) & !DL_CACHE_HWCAP_ISA_LEVEL_MASK == (DL_CACHE_HWCAP_EXTENSION >> 32)
 }
 
 // Return the possible glibc-hwcap subfolders used in optimized library selection.  The
@@ -464,6 +415,108 @@ fn parse_ld_so_cache_glibc_hwcap(
     Ok(r)
 }
 
+fn parse_cache(data: &[u8]) -> Result<CacheFile> {
+    if data.starts_with(CACHEMAGIC.as_bytes()) {
+        parse_ld_so_cache_old(data)
+    } else {
+        parse_ld_so_cache_new(data, 0)
+    }
+}
+
+// The priority of each glibc-hwcaps subdirectory of the cache for a loader
+// searching SUPPORTED (best first): its position on the list starting at one
+// (lower is better), or zero for one it does not search.  Both lists are
+// merged sorted by name, as glibc glibc_hwcaps_priorities_init does (the
+// cache lists them sorted).
+fn hwcaps_priorities(hwcaps: &[String], supported: &[&str]) -> Vec<u32> {
+    let mut active: Vec<(&str, u32)> = supported.iter().copied().zip(1..).collect();
+    active.sort_by(|a, b| a.0.cmp(b.0));
+    let mut active = active.into_iter().peekable();
+
+    hwcaps
+        .iter()
+        .map(|name| loop {
+            let Some((subdir, priority)) = active.peek() else {
+                break 0;
+            };
+            match name.as_str().cmp(subdir) {
+                std::cmp::Ordering::Equal => {
+                    let priority = *priority;
+                    active.next();
+                    break priority;
+                }
+                std::cmp::Ordering::Less => break 0,
+                std::cmp::Ordering::Greater => {
+                    active.next();
+                }
+            }
+        })
+        .collect()
+}
+
+// The search state of a name (glibc search_cache).
+#[derive(Default)]
+struct Search<'a> {
+    best: Option<&'a str>,
+    // The priority of the glibc-hwcaps entry selected, if any.
+    priority: u32,
+    done: bool,
+}
+
+// Select the entries the loader takes for the object ABI, with SUPPORTED the
+// glibc-hwcaps subdirectories it searches (best first), following glibc
+// search_cache.  The glibc-hwcaps entries of a name come first and the one
+// with the best priority wins, skipping the ones for a subdirectory the loader
+// does not search (for instance one the CPU does not support).  Otherwise the
+// first regular entry is taken.
+fn select_entries(
+    file: &CacheFile,
+    ei_class: FileClass,
+    e_machine: Machine,
+    e_flags: FileFlags,
+    supported: &[&str],
+) -> LdCache {
+    let priorities = hwcaps_priorities(&file.hwcaps, supported);
+
+    let mut searches = HashMap::<&str, Search>::new();
+    for entry in &file.entries {
+        let search = searches.entry(&entry.name).or_default();
+        // Skip not supported entries for the binary architecture, for instance
+        // x86_64/i686 with multilib support.
+        if search.done || !check_file_entry_flags(entry.flags, ei_class, e_machine, e_flags) {
+            continue;
+        }
+
+        let named_hwcap = check_cache_hwcap_extension(entry.hwcap);
+        // The glibc-hwcaps entries are exhausted, so the best one found so
+        // far wins.
+        if !named_hwcap && search.best.is_some() {
+            search.done = true;
+            continue;
+        }
+        if named_hwcap {
+            let priority = priorities
+                .get(entry.hwcap as u32 as usize)
+                .copied()
+                .unwrap_or(0);
+            // Either not usable at all, or not a better match than the one
+            // already found.
+            if priority == 0 || (search.best.is_some() && priority >= search.priority) {
+                continue;
+            }
+            search.priority = priority;
+        }
+
+        search.best = Some(&entry.path);
+        search.done = !named_hwcap;
+    }
+
+    searches
+        .into_iter()
+        .filter_map(|(name, search)| Some((name.to_string(), pathutils::get_path(&search.best?)?)))
+        .collect()
+}
+
 pub fn parse_ld_so_cache<P: AsRef<Path>>(
     filename: &P,
     ei_class: FileClass,
@@ -471,74 +524,135 @@ pub fn parse_ld_so_cache<P: AsRef<Path>>(
     e_flags: FileFlags,
 ) -> Result<LdCache> {
     // The file is small, and the loader maps it whole as well.
-    let data = fs::read(filename)?;
-
-    if data.starts_with(CACHEMAGIC.as_bytes()) {
-        parse_ld_so_cache_old(&data, ei_class, e_machine, e_flags)
-    } else {
-        parse_ld_so_cache_new(&data, 0, ei_class, e_machine, e_flags)
-    }
+    let file = parse_cache(&fs::read(filename)?)?;
+    // And obtain the current machine supported glibc-hwcap subfolder.
+    let supported = hwcap::hwcap_supported()?;
+    Ok(select_entries(
+        &file, ei_class, e_machine, e_flags, &supported,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // A new format cache holding the given (flags, name, path) entries in
-    // that order, without any extension.
-    fn build_cache(entries: &[(i32, &str, &str)]) -> Vec<u8> {
-        let mut strings = Vec::<u8>::new();
-        let mut offsets = Vec::new();
-        let base = CACHE_FILE_NEW_LEN + entries.len() * FILE_ENTRY_NEW_LEN;
-        for (_, name, path) in entries {
-            let key = base + strings.len();
-            strings.extend_from_slice(name.as_bytes());
-            strings.push(0);
-            let value = base + strings.len();
-            strings.extend_from_slice(path.as_bytes());
-            strings.push(0);
-            offsets.push((key as u32, value as u32));
-        }
+    const X86_64: i32 = FLAG_ELF_LIBC6 | FLAG_X8664_LIB64;
 
-        // No endianness, no extension.
-        let header = cache_file_new {
+    // The hwcap field of an entry on the INDEX glibc-hwcaps subdirectory.
+    fn named(index: u32) -> u64 {
+        DL_CACHE_HWCAP_EXTENSION | index as u64
+    }
+
+    // A new format cache holding the given (flags, name, path, hwcap) entries
+    // in that order, with an extension listing the HWCAPS subdirectories (if
+    // any).
+    fn build_cache(entries: &[(i32, &str, &str, u64)], hwcaps: &[&str]) -> Vec<u8> {
+        let mut strings = Vec::<u8>::new();
+        let base = CACHE_FILE_NEW_LEN + entries.len() * FILE_ENTRY_NEW_LEN;
+        let mut add = |s: &str| {
+            let offset = base + strings.len();
+            strings.extend_from_slice(s.as_bytes());
+            strings.push(0);
+            offset as u32
+        };
+        let offsets: Vec<(u32, u32)> = entries
+            .iter()
+            .map(|(_, name, path, _)| (add(name), add(path)))
+            .collect();
+        let hwcaps: Vec<u32> = hwcaps.iter().map(|s| add(s)).collect();
+
+        // No endianness.
+        let mut header = cache_file_new {
             magic: CACHEMAGIC_NEW.as_bytes().try_into().unwrap(),
             version: CACHE_VERSION.as_bytes().try_into().unwrap(),
             nlibs: entries.len() as u32,
             len_strings: strings.len() as u32,
             ..Default::default()
         };
+        if !hwcaps.is_empty() {
+            header.extension_offset = (base + strings.len()).next_multiple_of(4) as u32;
+        }
         let mut cache = object::pod::bytes_of(&header).to_vec();
-        for ((flags, _, _), (key, value)) in entries.iter().zip(offsets) {
+        for ((flags, _, _, hwcap), (key, value)) in entries.iter().zip(offsets) {
             let entry = file_entry_new {
                 flags: *flags,
                 key,
                 value,
+                hwcap: *hwcap,
                 ..Default::default()
             };
             cache.extend_from_slice(object::pod::bytes_of(&entry));
         }
         cache.extend_from_slice(&strings);
+
+        if !hwcaps.is_empty() {
+            cache.resize(header.extension_offset as usize, 0);
+            let ext = cache_extension {
+                magic: cache_extension_magic,
+                count: 1,
+            };
+            let section = cache_extension_section {
+                tag: CACHE_EXTENSION_TAG_GLIBC_HWCAPS,
+                flags: 0,
+                offset: header.extension_offset
+                    + (CACHE_EXTENSION_LEN + CACHE_EXTENSION_SECTION_LEN) as u32,
+                size: (hwcaps.len() * size_of::<u32>()) as u32,
+            };
+            cache.extend_from_slice(object::pod::bytes_of(&ext));
+            cache.extend_from_slice(object::pod::bytes_of(&section));
+            for offset in hwcaps {
+                cache.extend_from_slice(&offset.to_ne_bytes());
+            }
+        }
         cache
     }
 
-    fn parse(cache: Vec<u8>) -> LdCache {
-        parse_ld_so_cache_new(&cache, 0, ELFCLASS64, EM_X86_64, FileFlags(0)).unwrap()
+    fn select(cache: &[u8], supported: &[&str]) -> LdCache {
+        let file = parse_cache(cache).unwrap();
+        select_entries(&file, ELFCLASS64, EM_X86_64, FileFlags(0), supported)
     }
 
-    // Set the hwcap field of the INDEX entry of a new format CACHE.
-    fn set_hwcap(cache: &mut [u8], index: usize, hwcap: u64) {
-        let offset = CACHE_FILE_NEW_LEN + index * FILE_ENTRY_NEW_LEN + 16;
-        cache[offset..offset + 8].copy_from_slice(&hwcap.to_ne_bytes());
+    #[test]
+    fn first_of_the_duplicate_entries_wins() {
+        let cache = select(
+            &build_cache(
+                &[
+                    (
+                        FLAG_ELF_LIBC6,
+                        "libc.so.6",
+                        "/usr/lib/i386-linux-gnu/libc.so.6",
+                        0,
+                    ),
+                    (
+                        X86_64,
+                        "libc.so.6",
+                        "/usr/lib/x86_64-linux-gnu/libc.so.6",
+                        0,
+                    ),
+                    (X86_64, "libc.so.6", "/usr/lib64/libc.so.6", 0),
+                    (
+                        X86_64,
+                        "libm.so.6",
+                        "/usr/lib/x86_64-linux-gnu/libm.so.6",
+                        0,
+                    ),
+                ],
+                &[],
+            ),
+            &[],
+        );
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache["libc.so.6"], "/usr/lib/x86_64-linux-gnu");
+        assert_eq!(cache["libm.so.6"], "/usr/lib/x86_64-linux-gnu");
     }
 
     #[test]
     fn entry_count_beyond_the_file() {
         // The header claims more entries than the file holds, which must not
         // be trusted for any allocation.
-        let mut cache = build_cache(&[(FLAG_ELF_LIBC6, "libc.so.6", "/lib/libc.so.6")]);
+        let mut cache = build_cache(&[(X86_64, "libc.so.6", "/lib/libc.so.6", 0)], &[]);
         cache[20..24].copy_from_slice(&u32::MAX.to_ne_bytes());
-        assert!(parse_ld_so_cache_new(&cache, 0, ELFCLASS64, EM_X86_64, FileFlags(0)).is_err());
+        assert!(parse_cache(&cache).is_err());
 
         let mut old = object::pod::bytes_of(&cache_file {
             magic: CACHEMAGIC.as_bytes().try_into().unwrap(),
@@ -547,39 +661,88 @@ mod tests {
         })
         .to_vec();
         old.resize(76, 0);
-        assert!(parse_ld_so_cache_old(&old, ELFCLASS64, EM_X86_64, FileFlags(0)).is_err());
+        assert!(parse_cache(&old).is_err());
     }
 
     #[test]
-    fn hwcap_index_without_extension() {
-        let x86_64 = FLAG_ELF_LIBC6 | FLAG_X8664_LIB64;
-        let mut cache = build_cache(&[
-            (
-                x86_64,
-                "libz.so.1",
-                "/usr/lib/glibc-hwcaps/x86-64-v3/libz.so.1",
-            ),
-            (x86_64, "libz.so.1", "/usr/lib/libz.so.1"),
-        ]);
-        set_hwcap(&mut cache, 0, DL_CACHE_HWCAP_EXTENSION | 7);
-        parse(cache);
+    fn glibc_hwcaps_index_out_of_the_extension() {
+        // The loader takes an index without a subdirectory as priority zero,
+        // so the entry is not usable.
+        let entries = [
+            (X86_64, "libz.so.1", "/usr/lib/v3/libz.so.1", named(7)),
+            (X86_64, "libz.so.1", "/usr/lib/libz.so.1", 0),
+        ];
+        let supported = ["x86-64-v3", "x86-64-v2"];
+        for hwcaps in [&[][..], &["x86-64-v3"]] {
+            let cache = select(&build_cache(&entries, hwcaps), &supported);
+            assert_eq!(cache["libz.so.1"], "/usr/lib");
+        }
     }
 
     #[test]
-    fn first_of_the_duplicate_entries_wins() {
-        let x86_64 = FLAG_ELF_LIBC6 | FLAG_X8664_LIB64;
-        let cache = parse(build_cache(&[
+    fn unsupported_glibc_hwcaps_entry_sorting_first() {
+        // Only a x86-64-v4 variant besides the regular one, on a x86-64-v3
+        // machine (or one without glibc-hwcaps subdirectories).
+        let cache = build_cache(
+            &[
+                (
+                    X86_64,
+                    "libzstd.so.1",
+                    "/opt/glibc-hwcaps/x86-64-v4/libzstd.so.1",
+                    named(0),
+                ),
+                (X86_64, "libzstd.so.1", "/usr/lib/libzstd.so.1", 0),
+            ],
+            &["x86-64-v4"],
+        );
+        for supported in [&["x86-64-v3", "x86-64-v2"][..], &[]] {
+            assert_eq!(select(&cache, supported)["libzstd.so.1"], "/usr/lib");
+        }
+        assert_eq!(
+            select(&cache, &["x86-64-v4", "x86-64-v3", "x86-64-v2"])["libzstd.so.1"],
+            "/opt/glibc-hwcaps/x86-64-v4"
+        );
+    }
+
+    #[test]
+    fn best_glibc_hwcaps_entry() {
+        // The glibc-hwcaps entries are sorted by subdirectory name, and the
+        // best-fit one the machine supports wins.
+        let cache = build_cache(
+            &[
+                (
+                    X86_64,
+                    "liblzma.so.5",
+                    "/opt/x86-64-v2/liblzma.so.5",
+                    named(0),
+                ),
+                (
+                    X86_64,
+                    "liblzma.so.5",
+                    "/opt/x86-64-v3/liblzma.so.5",
+                    named(1),
+                ),
+                (
+                    X86_64,
+                    "liblzma.so.5",
+                    "/opt/x86-64-v4/liblzma.so.5",
+                    named(2),
+                ),
+                (X86_64, "liblzma.so.5", "/opt/liblzma.so.5", 0),
+                (X86_64, "liblzma.so.5", "/usr/lib/liblzma.so.5", 0),
+            ],
+            &["x86-64-v2", "x86-64-v3", "x86-64-v4"],
+        );
+        for (supported, dir) in [
             (
-                FLAG_ELF_LIBC6,
-                "libc.so.6",
-                "/usr/lib/i386-linux-gnu/libc.so.6",
+                &["x86-64-v4", "x86-64-v3", "x86-64-v2"][..],
+                "/opt/x86-64-v4",
             ),
-            (x86_64, "libc.so.6", "/usr/lib/x86_64-linux-gnu/libc.so.6"),
-            (x86_64, "libc.so.6", "/usr/lib64/libc.so.6"),
-            (x86_64, "libm.so.6", "/usr/lib/x86_64-linux-gnu/libm.so.6"),
-        ]));
-        assert_eq!(cache.len(), 2);
-        assert_eq!(cache["libc.so.6"], "/usr/lib/x86_64-linux-gnu");
-        assert_eq!(cache["libm.so.6"], "/usr/lib/x86_64-linux-gnu");
+            (&["x86-64-v3", "x86-64-v2"], "/opt/x86-64-v3"),
+            (&["x86-64-v2"], "/opt/x86-64-v2"),
+            (&[], "/opt"),
+        ] {
+            assert_eq!(select(&cache, supported)["liblzma.so.5"], dir);
+        }
     }
 }
