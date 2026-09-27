@@ -84,6 +84,10 @@ struct ElfInfo {
     // since non existent directories are filtered out while the loader semantics
     // (ignoring DT_RPATH) only depend on the tag presence.
     has_runpath: bool,
+    // Whether the last of the DT_RPATH and DT_RUNPATH entries is a DT_RUNPATH
+    // one, for the loaders where the last entry of either wins (NetBSD).
+    #[allow(dead_code)]
+    runpath_last: bool,
     // Whether the object has any DT_NEEDED entry.
     has_needed: bool,
     // DT_AUXILIARY and DT_FILTER entries.
@@ -219,14 +223,16 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
         let mut strsz = 0;
 
         // To obtain the DT_NEEDED name we first need to find the DT_STRTAB/DT_STRSZ.
-        dynamic.iter().for_each(|d| {
+        for d in dynamic {
             let tag = d.d_tag(endian);
-            if tag == DT_STRTAB {
+            if tag == DT_NULL {
+                break;
+            } else if tag == DT_STRTAB {
                 strtab = d.d_val(endian).into();
             } else if tag == DT_STRSZ {
                 strsz = d.d_val(endian).into();
             }
-        });
+        }
 
         let dynstr = match parse_elf_stringtable::<Elf>(endian, data, segments, strtab, strsz) {
             Some(dynstr) => dynstr,
@@ -247,7 +253,8 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
                 interp: None,
                 rpath: parse_elf_dyn_searchpath(endian, elf, &tags.rpath, origin, platform),
                 runpath: parse_elf_dyn_searchpath(endian, elf, &tags.runpath, origin, platform),
-                has_runpath: tags.runpath.is_some(),
+                has_runpath: tags.has_runpath,
+                runpath_last: tags.runpath_last,
                 soname: tags.soname,
                 nodeflibs,
                 deps: dtneeded,
@@ -282,12 +289,18 @@ fn dynamic_entries<'data, Elf: FileHeader>(
 }
 
 // The dynamic tags read up to DT_NULL, each one holding the value of its
-// first entry (the first one with a valid string for the string tags).
+// last entry, the way the loaders record them (elf_get_dynamic_info on
+// glibc).
 #[derive(Default)]
 struct DynamicTags {
     soname: Option<String>,
     rpath: Option<String>,
     runpath: Option<String>,
+    // Whether DT_RUNPATH is present, whatever its string.
+    has_runpath: bool,
+    // Whether the last of the DT_RPATH and DT_RUNPATH entries is a
+    // DT_RUNPATH one.
+    runpath_last: bool,
     flags_1: u64,
 }
 
@@ -298,7 +311,6 @@ impl DynamicTags {
         dynstr: StringTable,
     ) -> Self {
         let mut r = Self::default();
-        let mut flags_1 = None;
         for d in dynamic {
             let tag = d.d_tag(endian);
             if tag == DT_NULL {
@@ -309,23 +321,27 @@ impl DynamicTags {
             }
             let field = match tag {
                 DT_SONAME => &mut r.soname,
-                DT_RPATH => &mut r.rpath,
-                DT_RUNPATH => &mut r.runpath,
+                DT_RPATH => {
+                    r.runpath_last = false;
+                    &mut r.rpath
+                }
+                DT_RUNPATH => {
+                    r.has_runpath = true;
+                    r.runpath_last = true;
+                    &mut r.runpath
+                }
                 DT_FLAGS_1 => {
-                    flags_1.get_or_insert(d.d_val(endian).into());
+                    r.flags_1 = d.d_val(endian).into();
                     continue;
                 }
                 _ => continue,
             };
-            if field.is_none() {
-                *field = d
-                    .string(endian, dynstr)
-                    .ok()
-                    .and_then(|s| str::from_utf8(s).ok())
-                    .map(str::to_string);
-            }
+            *field = d
+                .string(endian, dynstr)
+                .ok()
+                .and_then(|s| str::from_utf8(s).ok())
+                .map(str::to_string);
         }
-        r.flags_1 = flags_1.unwrap_or(0);
         r
     }
 }
@@ -1434,4 +1450,55 @@ pub fn check_relocations(
         }
     }
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A dynamic section of TAGS, whose string values index STRINGS.
+    fn dynamic_tags(tags: &[(DynamicTag, u64)], strings: &[u8]) -> DynamicTags {
+        let endian = Endianness::Little;
+        let dynamic: Vec<Dyn64<Endianness>> = tags
+            .iter()
+            .map(|&(tag, val)| Dyn64 {
+                d_tag: object::I64::new(endian, tag),
+                d_val: object::U64::new(endian, val),
+            })
+            .collect();
+        let dynstr = StringTable::new(strings, 0, strings.len() as u64);
+        DynamicTags::parse::<FileHeader64<Endianness>>(endian, &dynamic, dynstr)
+    }
+
+    #[test]
+    fn dynamic_tags_last_entry_wins() {
+        let strings = b"\0/a\0/b\0liba.so\0libb.so\0";
+        let tags = dynamic_tags(
+            &[
+                (DT_SONAME, 7),
+                (DT_RPATH, 1),
+                (DT_RUNPATH, 1),
+                (DT_FLAGS_1, DF_1_NODEFLIB.0),
+                (DT_RPATH, 4),
+                (DT_SONAME, 15),
+                (DT_FLAGS_1, 0),
+                (DT_NULL, 0),
+                (DT_SONAME, 7),
+            ],
+            strings,
+        );
+        assert_eq!(tags.soname.as_deref(), Some("libb.so"));
+        assert_eq!(tags.rpath.as_deref(), Some("/b"));
+        assert_eq!(tags.runpath.as_deref(), Some("/a"));
+        assert!(tags.has_runpath);
+        assert!(!tags.runpath_last);
+        assert_eq!(tags.flags_1, 0);
+
+        let tags = dynamic_tags(&[(DT_RPATH, 1), (DT_RUNPATH, 4)], strings);
+        assert!(tags.runpath_last);
+        // The tag presence does not depend on its string.
+        let tags = dynamic_tags(&[(DT_RUNPATH, 100)], strings);
+        assert!(tags.has_runpath);
+        assert_eq!(tags.runpath, None);
+    }
 }
