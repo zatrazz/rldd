@@ -7,6 +7,17 @@ pub(in crate::elf) struct OpenBsd;
 impl Loader for OpenBsd {
     type Cache = search_path::SearchPathVec;
 
+    // The _dl_load_shlib order: the LD_LIBRARY_PATH directories, the requesting
+    // object DT_RUNPATH or, without one, its DT_RPATH followed by the main
+    // program one, and at last the hints and the default directories.
+    const SEARCH_ORDER: &'static [SearchStep] = &[
+        SearchStep::LibraryPath,
+        SearchStep::Runpath,
+        SearchStep::Rpath,
+        SearchStep::Cache,
+        SearchStep::SystemDirs,
+    ];
+
     fn load_so_cache<P: AsRef<Path>>(
         ld_cache: &mut Option<Self::Cache>,
         _binary: &P,
@@ -107,5 +118,11 @@ impl Loader for OpenBsd {
             }
         }
         Path::new(dir).join(dtneeded)
+    }
+
+    // An object with DT_RUNPATH only searches it: neither its own DT_RPATH nor
+    // the main program one inherited are searched.
+    fn rpath_search(elc: &ElfInfo) -> bool {
+        !elc.has_runpath
     }
 }
