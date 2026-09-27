@@ -460,15 +460,48 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
             continue;
         }
 
-        // The side-by-side redirection comes before the loaded-module list,
-        // so the same name may be loaded from more than one assembly.
+        // A recorded name with a path component resolves to the module FILE
+        // names, and is printed as an alias of it.  The '.local' redirection
+        // takes its base name, but the side-by-side one does not apply to it
+        // (with a manifest asking for the common controls version 6, an
+        // import of 'C:\Windows\System32\comctl32.dll' still maps version
+        // 5.82).
+        let file = pathutils::get_name(&Path::new(&name));
+        let path_name = file != name;
+        let alias = match path_name {
+            true => Some(item.dep.name.clone()),
+            false => alias,
+        };
+
+        // The redirection comes before the loaded-module list, so the same
+        // name may be loaded from more than one assembly.
         let mut searched = Vec::new();
-        let Ok(redirect) = find_in_dirs(config, &name, &item.redirect, &mut searched) else {
+        let redirect_dirs = item
+            .redirect
+            .iter()
+            .filter(|(_, mode)| !path_name || *mode == DepMode::DllRedirection)
+            .map(|(dir, mode)| (dir.path.as_str(), *mode));
+        let Ok(redirect) = find_in(config, &file, redirect_dirs, &mut searched) else {
             add_not_found(config, &item, deptree, searched, true);
             continue;
         };
-        let lookup = match &redirect {
-            Some((_, dir, _)) => pathutils::join(dir, &name),
+
+        // A plain name is checked against the loaded modules before the
+        // search order, while one with a path component is only known once
+        // resolved, since the loader compares the full path then.
+        let mut found = match redirect {
+            Some(found) => Some(found),
+            None if path_name => match find_dependency(config, &name, &mut searched) {
+                Ok(Some(found)) => Some(found),
+                result => {
+                    add_not_found(config, &item, deptree, searched, result.is_err());
+                    continue;
+                }
+            },
+            None => None,
+        };
+        let lookup = match &found {
+            Some((_, dir, _)) => pathutils::join(dir, &file),
             None => name.clone(),
         };
 
@@ -478,7 +511,7 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
                 config.all,
                 // The name this entry records, which only matches the one
                 // already on the tree without regard to case.
-                DepNode::repeat_of(&entry, name.clone())
+                DepNode::repeat_of(&entry, file.clone())
                     .with_alias(alias)
                     .with_attrs(item.dep.attrs.clone()),
                 item.depp,
@@ -514,29 +547,25 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
             continue;
         }
 
-        let found = match redirect {
+        let found = match found.take() {
             Some(found) => Ok(Some(found)),
             None => find_dependency(config, &name, &mut searched),
         };
         let (info, dir, mode) = match found {
             Ok(Some(found)) => found,
-            Ok(None) => {
-                add_not_found(config, &item, deptree, searched, false);
-                continue;
-            }
-            Err(BadImage) => {
-                add_not_found(config, &item, deptree, searched, true);
+            result => {
+                add_not_found(config, &item, deptree, searched, result.is_err());
                 continue;
             }
         };
 
-        let resolved = pathutils::join(&dir, &name);
+        let resolved = pathutils::join(&dir, &file);
         if ignored(config, &resolved) {
             continue;
         }
 
         let depd = deptree.addnode(
-            DepNode::new(Some(dir), name.clone(), mode)
+            DepNode::new(Some(dir), file.clone(), mode)
                 .with_alias(alias)
                 .with_attrs(item.dep.attrs.clone()),
             item.depp,
@@ -549,7 +578,7 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
         for dep in &info.deps {
             queue.push_back(WorkItem {
                 dep: dep.clone(),
-                importing: name.clone(),
+                importing: file.clone(),
                 redirect: sxs.clone(),
                 depp: depd,
                 level: item.level + 1,
@@ -564,7 +593,7 @@ fn resolve_dependencies(config: &Config, root: &PeInfo, deptree: &mut DepTree, r
                     attrs: vec!["forwarded"],
                     imports: Vec::new(),
                 },
-                importing: name.clone(),
+                importing: file.clone(),
                 redirect: sxs.clone(),
                 depp: depd,
                 level: item.level + 1,
@@ -654,7 +683,14 @@ pub fn check_imports(ctx: &PeContext, deptree: &DepTree, delay_load: bool) -> Ve
                 .children
                 .iter()
                 .map(|child| &deptree.arena[*child].val)
-                .find(|child| child.name.eq_ignore_ascii_case(&name))
+                .find(|child| {
+                    // A name with a path component is recorded as the alias.
+                    child.name.eq_ignore_ascii_case(&name)
+                        || child
+                            .alias
+                            .as_ref()
+                            .is_some_and(|alias| alias.eq_ignore_ascii_case(&name))
+                })
                 .cloned()
                 .or_else(|| {
                     sxs.iter()
@@ -766,6 +802,15 @@ fn find_in_dirs(
     find_in(config, name, dirs, searched)
 }
 
+// The directory and the file name PATH names, without the '.' components.
+fn split_path(path: &Path) -> Option<(String, String)> {
+    let path: std::path::PathBuf = path
+        .components()
+        .filter(|component| *component != std::path::Component::CurDir)
+        .collect();
+    Some((pathutils::get_path(&path)?, pathutils::get_name(&path)))
+}
+
 // Resolve NAME against the known DLLs and then the search directories, returning th
 // parsed object, the directory it was found at, and the mode.  A known DLL is
 // taken from the known DLLs directory whoever imports it, while any other
@@ -773,18 +818,31 @@ fn find_in_dirs(
 // import, follows the search order (the loader maps an application copy of
 // CRYPTBASE, which advapi32 forwards SystemFunction001 to).
 fn find_dependency(config: &Config, name: &str, searched: &mut Vec<String>) -> Search {
-    // A recorded name with a path component is taken as is.
+    // A recorded name with a path component is taken as it is when it starts
+    // at a root or a drive, and searched below each directory of the order
+    // otherwise, even when it starts with '.\'.  With 'p\my.dll' imported,
+    // the loader maps app\p\my.dll, or dir\p\my.dll for a PATH directory.
     if name.contains(['\\', '/']) {
         let path = Path::new(name);
-        let Some(dir) = pathutils::get_path(&path) else {
-            return Ok(None);
+        let candidates: Vec<(std::path::PathBuf, DepMode)> = match path.components().next() {
+            Some(std::path::Component::Prefix(_) | std::path::Component::RootDir) => {
+                vec![(path.to_path_buf(), DepMode::Direct)]
+            }
+            _ => config
+                .dirs
+                .iter()
+                .map(|(dir, mode)| (Path::new(&dir.path).join(path), *mode))
+                .collect(),
         };
-        return find_in(
-            config,
-            &pathutils::get_name(&path),
-            [(dir.as_str(), DepMode::Direct)],
-            searched,
-        );
+        for (candidate, mode) in candidates {
+            let Some((dir, file)) = split_path(&candidate) else {
+                continue;
+            };
+            if let Some(found) = find_in(config, &file, [(dir.as_str(), mode)], searched)? {
+                return Ok(Some(found));
+            }
+        }
+        return Ok(None);
     }
 
     if config.ctx.is_known_dll(name, Wow64::of(config.machine)) {
@@ -1581,6 +1639,47 @@ mod tests {
             "{}",
             searched[0]
         );
+    }
+
+    // A relative recorded name is searched below each directory of the
+    // order, and an absolute one taken as it is.
+    #[test]
+    fn names_with_a_path() {
+        let ctx = PeContext::new(true);
+        let mut config = config(&ctx, pe::IMAGE_FILE_MACHINE_AMD64);
+        let dir = crate::tempdir::TempDir::new().unwrap();
+        let (app, other) = (dir.path().join("app"), dir.path().join("other"));
+        fs::create_dir_all(other.join("p")).unwrap();
+        fs::create_dir(&app).unwrap();
+        let dll = testimage::Image::dll(pe::IMAGE_FILE_MACHINE_AMD64, true).build();
+        fs::write(other.join("p").join("m.dll"), &dll).unwrap();
+        search_dirs::add(
+            &mut config.dirs,
+            app.to_str().unwrap(),
+            DepMode::Application,
+        );
+        search_dirs::add(&mut config.dirs, other.to_str().unwrap(), DepMode::EnvPath);
+
+        let find = |name: &str| match find_dependency(&config, name, &mut Vec::new()) {
+            Ok(Some((_, dir, mode))) => Some((dir, mode)),
+            Ok(None) => None,
+            Err(BadImage) => panic!("bad image"),
+        };
+        let expected = other.join("p").to_string_lossy().into_owned();
+        assert_eq!(find(r"p\m.dll"), Some((expected.clone(), DepMode::EnvPath)));
+        assert_eq!(
+            find(r".\p\m.dll"),
+            Some((expected.clone(), DepMode::EnvPath))
+        );
+        assert_eq!(find("p/m.dll"), Some((expected.clone(), DepMode::EnvPath)));
+        assert_eq!(find(r"q\m.dll"), None);
+        let absolute = other.join("p").join("m.dll");
+        assert_eq!(
+            find(absolute.to_str().unwrap()),
+            Some((expected, DepMode::Direct))
+        );
+        // Not searched along the order.
+        assert_eq!(find(&format!(r"\{}", r"p\m.dll")), None);
     }
 
     #[test]
