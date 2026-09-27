@@ -28,11 +28,14 @@ type DepsVec = Vec<MachODep>;
 
 #[derive(Default, Debug)]
 struct MachOInfo {
-    // The LC_RPATH entries, with @executable_path and @loader_path expanded.
-    // Like dyld, an entry is kept whether or not its directory exists on
-    // the root filesystem, since the candidates it leads to may still be
-    // found in the dyld cache or below the OS cryptex mount.
+    // The LC_RPATH entries as recorded, expanded when the dependencies are
+    // loaded (see expand_rpaths).  Like dyld, an entry is kept whether or not
+    // its directory exists on the root filesystem, since the candidates it
+    // leads to may still be found in the dyld cache or below the OS cryptex
+    // mount.
     rpath: Vec<String>,
+    // Whether the image has a __RESTRICT,__restrict section.
+    restricted: bool,
     deps: DepsVec,
     // The LC_ID_DYLIB install name.
     id: Option<String>,
@@ -48,14 +51,83 @@ struct MachOInfo {
     filetype: FileType,
 }
 
-// The DYLD_* environment search paths and image suffix, mimicked with
-// command line options like the ELF backend does for LD_LIBRARY_PATH.
+// The DYLD_* environment variables, mimicked with command line options like
+// the ELF backend does for LD_LIBRARY_PATH, as given.
+#[derive(Default)]
+struct DyldVars {
+    library_path: String,
+    framework_path: String,
+    fallback_library_path: String,
+    fallback_framework_path: String,
+    insert_libraries: String,
+    image_suffix: Option<String>,
+}
+
+// The DYLD_* environment a process runs with: the search path lists, the
+// inserted libraries, and the image suffix.
 struct DyldEnv {
     library_path: search_path::SearchPathVec,
     framework_path: search_path::SearchPathVec,
     fallback_library_path: search_path::SearchPathVec,
     fallback_framework_path: search_path::SearchPathVec,
+    insert_libraries: Vec<String>,
     image_suffix: Option<String>,
+}
+
+impl DyldEnv {
+    fn new(vars: &DyldVars) -> DyldEnv {
+        let list = |list: &str| search_path::from_string(list, &[':']);
+        DyldEnv {
+            library_path: list(&vars.library_path),
+            framework_path: list(&vars.framework_path),
+            fallback_library_path: list(&vars.fallback_library_path),
+            fallback_framework_path: list(&vars.fallback_framework_path),
+            insert_libraries: insert_libraries(&vars.insert_libraries),
+            image_suffix: vars.image_suffix.clone(),
+        }
+    }
+}
+
+// The dyld restrictions on the process running the input.  dyld4 leaves
+// the decision to AMFI (ProcessConfig::Security, amfi_check_dyld_policy_self),
+// handing it whether the main executable has a __RESTRICT,__restrict section,
+// while the rules that can be taken from the file are the ones dyld applied
+// itself before (configureProcessRestrictions in dyld2): a setuid or setgid
+// program, or one with that section, is restricted.  A restricted process
+// ignores the DYLD_* variables (allowEnvVarsPath), does not expand
+// @executable_path and the @loader_path of the main executable LC_RPATH
+// entries (allowAtPaths), and falls back to the restricted default
+// directories (allowClassicFallbackPaths).
+#[derive(Clone, Copy, Default)]
+struct Security {
+    // Why the process is restricted.
+    restricted: Option<&'static str>,
+}
+
+impl Security {
+    fn new(filename: &Path, from_cache: bool, omf: &MachOInfo) -> Security {
+        use std::os::unix::fs::PermissionsExt;
+        const SETUGID: u32 = 0o6000;
+        let setugid = !from_cache
+            && std::fs::metadata(filename)
+                .is_ok_and(|meta| meta.permissions().mode() & SETUGID != 0);
+        let restricted = if setugid {
+            Some("setuid or setgid program")
+        } else if omf.restricted {
+            Some("__RESTRICT,__restrict section")
+        } else {
+            None
+        };
+        Security { restricted }
+    }
+
+    fn allow_env_vars_path(&self) -> bool {
+        self.restricted.is_none()
+    }
+
+    fn allow_at_paths(&self) -> bool {
+        self.restricted.is_none()
+    }
 }
 
 // The resolution context: the architecture selecting the input slice (the
@@ -66,8 +138,7 @@ pub struct MachOContext {
     // The dyld shared caches loaded so far, along with their names, since
     // each input selects the cache flavor of its architecture.
     caches: Vec<(&'static [&'static str], DyldCache)>,
-    preload: Vec<String>,
-    env: DyldEnv,
+    vars: DyldVars,
     all: bool,
     verbose: bool,
     depth: usize,
@@ -89,12 +160,9 @@ impl MachOContext {
 }
 
 // Retrieve a dynamic object information from the dyld shared cache.
-fn cache_image(cache: &DyldCache, name: &str, executable_path: &str) -> Option<MachOInfo> {
+fn cache_image(cache: &DyldCache, name: &str) -> Option<MachOInfo> {
     match cache.image(name)? {
-        Some((data, offset)) => {
-            let loader_path = pathutils::get_path(&Path::new(name)).unwrap_or_default();
-            parse_thin(data, offset, Check::Cache, executable_path, &loader_path).ok()
-        }
+        Some((data, offset)) => parse_thin(data, offset, Check::Cache).ok(),
         None => Some(MachOInfo::default()),
     }
 }
@@ -104,15 +172,12 @@ pub fn create_context(opts: &crate::Options) -> Result<MachOContext, String> {
     Ok(MachOContext {
         arch,
         caches: Vec::new(),
-        preload: insert_libraries(&opts.preload),
-        env: DyldEnv {
-            library_path: search_path::from_string(&opts.library_path, &[':']),
-            framework_path: search_path::from_string(&opts.framework_path, &[':']),
-            fallback_library_path: search_path::from_string(&opts.fallback_library_path, &[':']),
-            fallback_framework_path: search_path::from_string(
-                &opts.fallback_framework_path,
-                &[':'],
-            ),
+        vars: DyldVars {
+            library_path: opts.library_path.clone(),
+            framework_path: opts.framework_path.clone(),
+            fallback_library_path: opts.fallback_library_path.clone(),
+            fallback_framework_path: opts.fallback_framework_path.clone(),
+            insert_libraries: opts.preload.clone(),
             image_suffix: opts.image_suffix.clone(),
         },
         all: opts.all,
@@ -138,19 +203,12 @@ pub fn resolve_binary(ctx: &mut MachOContext, arg: &str) -> Result<DepTree, std:
     // present, on the cache of the requested or the host architecture.
     let (filename, omf, from_cache) = match Path::new(arg).canonicalize() {
         Ok(filename) => {
-            let executable_path = pathutils::get_path(&filename).ok_or(std::io::Error::other(
-                format!("failed to get path of input file {arg}"),
-            ))?;
-            let omf = open_macho_file(&filename, Check::Input(&ctx.arch), &executable_path)?;
+            let omf = open_macho_file(&filename, Check::Input(&ctx.arch))?;
             (filename, omf, false)
         }
         Err(err) => {
             let cache = ctx.load_cache(ctx.arch.cache_names());
-            match cache_image(
-                &ctx.caches[cache].1,
-                arg,
-                &pathutils::get_path(&Path::new(arg)).unwrap_or_default(),
-            ) {
+            match cache_image(&ctx.caches[cache].1, arg) {
                 Some(omf) => (Path::new(arg).to_path_buf(), omf, true),
                 None => return Err(err),
             }
@@ -169,8 +227,24 @@ pub fn resolve_binary(ctx: &mut MachOContext, arg: &str) -> Result<DepTree, std:
         "failed to get path of input file {arg}"
     )))?;
 
+    // A restricted process does not take the DYLD_* variables.
+    let security = Security::new(&filename, from_cache, &omf);
+    let no_vars = DyldVars::default();
+    let env = DyldEnv::new(if security.allow_env_vars_path() {
+        &ctx.vars
+    } else {
+        &no_vars
+    });
+    let main_rpath = expand_rpaths(
+        &omf.rpath,
+        &executable_path,
+        &executable_path,
+        security,
+        true,
+    );
+
     if ctx.verbose {
-        print_object_information(&arch, cache, &ctx.env, &filename, &omf);
+        print_object_information(&arch, cache, &env, security, &filename, &omf, &main_rpath);
     }
 
     let config = Config {
@@ -178,9 +252,10 @@ pub fn resolve_binary(ctx: &mut MachOContext, arg: &str) -> Result<DepTree, std:
         macos: omf.filetype == MH_EXECUTE
             && built_for_macos(&omf)
             && !omf.platforms.contains(&PLATFORM_MACCATALYST),
+        security,
         cache,
         executable_path: &executable_path,
-        env: &ctx.env,
+        env: &env,
         all: ctx.all,
         depth: ctx.depth,
         ignore_prefix: &ctx.ignore_prefix,
@@ -189,7 +264,6 @@ pub fn resolve_binary(ctx: &mut MachOContext, arg: &str) -> Result<DepTree, std:
     let mut tree = Tree::new();
     let path = filename.to_string_lossy().into_owned();
     let cache_image = cache.image_id(&path).filter(|_| from_cache);
-    let main_rpath = omf.rpath.clone();
     let root = tree.add_image(
         DepNode::new(
             Some(executable_path.clone()),
@@ -210,7 +284,7 @@ pub fn resolve_binary(ctx: &mut MachOContext, arg: &str) -> Result<DepTree, std:
     // main executable one.
     let root_place = tree.images[root].place;
     let mut inserted = Vec::new();
-    for pload in &ctx.preload {
+    for pload in &env.insert_libraries {
         let dep = MachODep {
             name: pload.clone(),
             attrs: Vec::new(),
@@ -255,7 +329,13 @@ fn load_dependents(config: &Config, tree: &mut Tree, image: usize, rpaths: &[Str
     if config.depth != 0 && place.level >= config.depth {
         return;
     }
-    let mut stack = pending.rpath;
+    let mut stack = expand_rpaths(
+        &pending.rpath,
+        config.executable_path,
+        &pending.loader_path,
+        config.security,
+        place.level == 0,
+    );
     for rpath in rpaths {
         if !stack.contains(rpath) {
             stack.push(rpath.clone());
@@ -393,8 +473,10 @@ fn print_object_information(
     arch: &Arch,
     cache: &DyldCache,
     env: &DyldEnv,
+    security: Security,
     filename: &Path,
     omf: &MachOInfo,
+    rpath: &[String],
 ) {
     let mut lines = vec![format!("{}: object information", filename.display())];
     lines.push(format!("  arch: {}", arch.name()));
@@ -407,9 +489,14 @@ fn print_object_information(
     if let Some(uuid) = &omf.uuid {
         lines.push(format!("  uuid: {uuid}"));
     }
+    if let Some(reason) = security.restricted {
+        lines.push(format!(
+            "  restricted: {reason} (the DYLD_* options and @executable_path are ignored)"
+        ));
+    }
     lines.push(format!(
         "  rpath: {}",
-        search_path::format_entries(omf.rpath.iter().map(String::as_str))
+        search_path::format_entries(rpath.iter().map(String::as_str))
     ));
     for (name, list) in [
         ("library path", &env.library_path),
@@ -446,8 +533,10 @@ struct Config<'a> {
     // images, for instance), and an input that is not a main executable may
     // be loaded by processes of several platforms, so they are not checked.
     macos: bool,
+    security: Security,
     cache: &'a DyldCache,
     executable_path: &'a str,
+    // The DYLD_* environment of the process.
     env: &'a DyldEnv,
     all: bool,
     // Limit the dependency tree to DEPTH levels, mimicking dylibtree, with
@@ -471,10 +560,14 @@ fn resolve_dependency(
     requester: Place,
     preload: bool,
 ) -> Option<usize> {
-    // dyld does not expand @loader_path in DYLD_INSERT_LIBRARIES.
+    // dyld does not expand @loader_path in DYLD_INSERT_LIBRARIES, nor
+    // @executable_path in a restricted process.
     let dependency = expand_at_path(
         &dep.name,
-        config.executable_path,
+        config
+            .security
+            .allow_at_paths()
+            .then_some(config.executable_path),
         (!preload).then_some(loader_path),
     );
 
@@ -642,10 +735,13 @@ fn at_path<'a>(path: &'a str, token: &str) -> Option<&'a str> {
 // The main executable directory being a real path, dyld drops the leading
 // ../ components of an @executable_path one against it
 // (expandAndNormalizeAtExecutablePath), while @loader_path is replaced as is.
-// LOADER_PATH is None for an inserted library, where dyld does not expand
-// @loader_path (Loader::expandAtLoaderPath), so the path is left as is.
-fn expand_at_path(path: &str, executable_path: &str, loader_path: Option<&str>) -> String {
-    if let Some(mut tail) = at_path(path, "@executable_path") {
+// A path whose token dyld does not expand is left as is: EXECUTABLE_PATH is
+// None in a restricted process (Loader::expandAtExecutablePath), and
+// LOADER_PATH for an inserted library (Loader::expandAtLoaderPath).
+fn expand_at_path(path: &str, executable_path: Option<&str>, loader_path: Option<&str>) -> String {
+    if let (Some(mut tail), Some(executable_path)) =
+        (at_path(path, "@executable_path"), executable_path)
+    {
         if tail.is_empty() {
             return format!("{executable_path}/");
         }
@@ -665,6 +761,34 @@ fn expand_at_path(path: &str, executable_path: &str, loader_path: Option<&str>) 
         (Some(tail), Some(loader_path)) => format!("{loader_path}{tail}"),
         _ => path.to_string(),
     }
+}
+
+// The LC_RPATH entries RPATHS of an image, expanded the way dyld does
+// (Loader::forEachResolvedAtPathVar): a leading @loader_path is the image
+// directory LOADER_PATH, and @executable_path the main executable one.  A
+// restricted process neither expands @executable_path nor the @loader_path
+// of the MAIN executable entries, and only takes the absolute entries, a
+// relative one being taken where dyld allows the @ paths.
+fn expand_rpaths(
+    rpaths: &[String],
+    executable_path: &str,
+    loader_path: &str,
+    security: Security,
+    main: bool,
+) -> Vec<String> {
+    let allow = security.allow_at_paths();
+    let mut expanded: Vec<String> = Vec::new();
+    for rpath in rpaths {
+        let rpath = expand_at_path(
+            rpath,
+            allow.then_some(executable_path),
+            (allow || !main).then_some(loader_path),
+        );
+        if (allow || rpath.starts_with('/')) && !expanded.contains(&rpath) {
+            expanded.push(rpath);
+        }
+    }
+    expanded
 }
 
 const CRYPTEX_OS_PATH: &str = "/System/Volumes/Preboot/Cryptexes/OS";
@@ -824,8 +948,7 @@ fn resolve_cache(
     if let Some(image) = check_already_resolved(config, found, dep, tree, requester) {
         return ResolveResult::Loaded(image);
     }
-    let Some(elc) = self::cache_image(config.cache, name, config.executable_path)
-        .filter(|elc| loads_platform(config, elc))
+    let Some(elc) = self::cache_image(config.cache, name).filter(|elc| loads_platform(config, elc))
     else {
         return ResolveResult::Miss;
     };
@@ -866,13 +989,10 @@ fn resolve_file(
     // libraries are loaded with the canBeDylib option alone, so a bundle or
     // an executable is refused (JustInTimeLoader::makeJustInTimeLoaderDisk)
     // and the search continues.
-    let Some(elc) = open_macho_file(
-        &path,
-        Check::Dependency(config.arch),
-        config.executable_path,
-    )
-    .ok()
-    .filter(|elc| elc.filetype == MH_DYLIB && loads_platform(config, elc)) else {
+    let Some(elc) = open_macho_file(&path, Check::Dependency(config.arch))
+        .ok()
+        .filter(|elc| elc.filetype == MH_DYLIB && loads_platform(config, elc))
+    else {
         return ResolveResult::Miss;
     };
     add_found(elc, &path, mode, dep, tree, requester, None)
@@ -944,34 +1064,26 @@ impl Check<'_> {
 fn open_macho_file<P: AsRef<Path>>(
     filename: &P,
     check: Check,
-    executable_path: &str,
 ) -> Result<MachOInfo, std::io::Error> {
     let mmap = pathutils::map_file(filename)?;
-
-    let loader_path = pathutils::get_path(filename).unwrap_or_default();
-    parse_object(&mmap, check, executable_path, &loader_path).map_err(Error::other)
+    parse_object(&mmap, check).map_err(Error::other)
 }
 
 // Parse a Mach-O file, either a thin image or a universal (FAT) file whose
 // selected slice is then parsed.
-fn parse_object(
-    data: &[u8],
-    check: Check,
-    executable_path: &str,
-    loader_path: &str,
-) -> Result<MachOInfo, String> {
+fn parse_object(data: &[u8], check: Check) -> Result<MachOInfo, String> {
     match object::FileKind::parse(data).map_err(|_| "Failed to parse file".to_string())? {
         object::FileKind::MachOFat32 => {
             let fat = MachOFatFile32::parse(data)
                 .map_err(|_| "Invalid FAT Mach-O 32 object".to_string())?;
-            parse_macho_fat(data, fat.arches(), check, executable_path, loader_path)
+            parse_macho_fat(data, fat.arches(), check)
         }
         object::FileKind::MachOFat64 => {
             let fat = MachOFatFile64::parse(data)
                 .map_err(|_| "Invalid FAT Mach-O 64 object".to_string())?;
-            parse_macho_fat(data, fat.arches(), check, executable_path, loader_path)
+            parse_macho_fat(data, fat.arches(), check)
         }
-        _ => parse_thin(data, 0, check, executable_path, loader_path),
+        _ => parse_thin(data, 0, check),
     }
 }
 
@@ -980,25 +1092,19 @@ fn parse_object(
 // only accepts a slice with the MH_MAGIC header) and lipo, a universal file
 // is not accepted as a slice of another one, which would otherwise recurse
 // without end on a slice covering the whole file.
-fn parse_thin(
-    data: &[u8],
-    offset: u64,
-    check: Check,
-    executable_path: &str,
-    loader_path: &str,
-) -> Result<MachOInfo, String> {
+fn parse_thin(data: &[u8], offset: u64, check: Check) -> Result<MachOInfo, String> {
     match object::FileKind::parse_at(data, offset)
         .map_err(|_| "Failed to parse file".to_string())?
     {
         object::FileKind::MachO32 => {
             let header = MachHeader32::parse(data, offset)
                 .map_err(|_| "Invalid Mach-O 32 object".to_string())?;
-            parse_macho(header, data, offset, check, executable_path, loader_path)
+            parse_macho(header, data, offset, check)
         }
         object::FileKind::MachO64 => {
             let header = MachHeader64::parse(data, offset)
                 .map_err(|_| "Invalid Mach-O 64 object".to_string())?;
-            parse_macho(header, data, offset, check, executable_path, loader_path)
+            parse_macho(header, data, offset, check)
         }
         object::FileKind::MachOFat32 | object::FileKind::MachOFat64 => {
             Err("slice is not a valid Mach-O image".to_string())
@@ -1011,8 +1117,6 @@ fn parse_macho_fat<FatArch: object::read::macho::FatArch>(
     data: &[u8],
     arches: &[FatArch],
     check: Check,
-    executable_path: &str,
-    loader_path: &str,
 ) -> Result<MachOInfo, String> {
     // Like dyld (Universal::valid), a slice past the end of the file makes
     // the whole file invalid.
@@ -1035,7 +1139,7 @@ fn parse_macho_fat<FatArch: object::read::macho::FatArch>(
         })
         .collect();
     let idx = check.slice(&archs)?;
-    parse_thin(slices[idx], 0, check, executable_path, loader_path)
+    parse_thin(slices[idx], 0, check)
 }
 
 fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
@@ -1043,8 +1147,6 @@ fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
     data: &[u8],
     offset: u64,
     check: Check,
-    executable_path: &str,
-    loader_path: &str,
 ) -> Result<MachOInfo, String> {
     let mut info = MachOInfo::default();
     let mut platforms = Vec::new();
@@ -1074,7 +1176,6 @@ fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
         match parse_load_command::<Mach>(endian, command)? {
             Some(LoadCommand::Dylib(dep)) => info.deps.push(dep),
             Some(LoadCommand::Rpath(path)) => {
-                let path = expand_at_path(&path, executable_path, Some(loader_path));
                 if !path.is_empty() && !info.rpath.contains(&path) {
                     info.rpath.push(path);
                 }
@@ -1082,6 +1183,7 @@ fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
             Some(LoadCommand::Id(name)) => info.id = Some(name),
             Some(LoadCommand::Platform(platform)) => platforms.push(platform),
             Some(LoadCommand::Uuid(uuid)) => info.uuid = Some(uuid),
+            Some(LoadCommand::Restrict) => info.restricted = true,
             None => {}
         }
     }
@@ -1145,6 +1247,20 @@ enum LoadCommand {
     Id(String),
     Platform(PlatformInfo),
     Uuid(String),
+    // A segment with the __RESTRICT,__restrict section.
+    Restrict,
+}
+
+// Whether a segment is the __RESTRICT one holding a __restrict section, the
+// section dyld checks to hand AMFI the restricted process mark
+// (UnsafeHeader::isRestricted, AMFI_DYLD_INPUT_PROC_HAS_RESTRICT_SEG).
+fn restrict_section<S: Segment>(endian: S::Endian, segment: &S, data: &[u8]) -> bool {
+    segment.name() == b"__RESTRICT"
+        && segment.sections(endian, data).is_ok_and(|sections| {
+            sections
+                .iter()
+                .any(|section| section.name() == b"__restrict")
+        })
 }
 
 // A load command string (a dependency, the install name, or a run-path
@@ -1306,6 +1422,12 @@ fn parse_load_command<Mach: MachHeader>(
             }))
         }
         LoadCommandVariant::Uuid(x) => Some(LoadCommand::Uuid(format_uuid(&x.uuid))),
+        LoadCommandVariant::Segment32(segment, data) => {
+            restrict_section(endian, segment, data).then_some(LoadCommand::Restrict)
+        }
+        LoadCommandVariant::Segment64(segment, data) => {
+            restrict_section(endian, segment, data).then_some(LoadCommand::Restrict)
+        }
         _ => None,
     })
 }
@@ -1398,7 +1520,7 @@ mod tests {
     }
 
     fn parse(data: &[u8], arch: &Arch) -> Result<MachOInfo, String> {
-        parse_object(data, Check::Input(arch), "/exe", "/loader")
+        parse_object(data, Check::Input(arch))
     }
 
     fn dep_names(info: &MachOInfo) -> Vec<&str> {
@@ -1458,14 +1580,7 @@ mod tests {
         let mut ctx = MachOContext {
             arch: Arch::new(arch).unwrap(),
             caches: Vec::new(),
-            preload: Vec::new(),
-            env: DyldEnv {
-                library_path: Vec::new(),
-                framework_path: Vec::new(),
-                fallback_library_path: Vec::new(),
-                fallback_framework_path: Vec::new(),
-                image_suffix: None,
-            },
+            vars: DyldVars::default(),
             all: true,
             verbose: false,
             depth: 0,
@@ -1608,7 +1723,7 @@ mod tests {
             ]),
         );
         let mut ctx = context(None);
-        ctx.env.fallback_library_path = search_path::from_string(dir.path("fb"), &[':']);
+        ctx.vars.fallback_library_path = dir.path("fb");
         assert_eq!(
             resolve(&mut ctx, &exe),
             [
@@ -1630,7 +1745,7 @@ mod tests {
             &x86_64_exe(&[load("/a/libz.dylib"), load("/b/libz.dylib")]),
         );
         let mut ctx = context(None);
-        ctx.env.library_path = search_path::from_string(dir.path("lp"), &[':']);
+        ctx.vars.library_path = dir.path("lp");
         assert_eq!(
             resolve(&mut ctx, &exe),
             [
@@ -1653,7 +1768,7 @@ mod tests {
         let dylib = dir.write("fb/libfoo.dylib", &x86_64_dylib(&[]));
         let exe = dir.write("bin/exe", &x86_64_exe(&[load(&bundle), load(&exe_dep)]));
         let mut ctx = context(None);
-        ctx.env.fallback_library_path = search_path::from_string(dir.path("fb"), &[':']);
+        ctx.vars.fallback_library_path = dir.path("fb");
         assert_eq!(
             resolve(&mut ctx, &exe),
             [
@@ -1721,7 +1836,7 @@ mod tests {
         let implicit = dir.write("bin/implicit", &exe(None));
         let iphone = dir.write("bin/ios", &exe(Some(PLATFORM_IOS)));
         let mut ctx = context(None);
-        ctx.env.fallback_library_path = search_path::from_string(dir.path("fb"), &[':']);
+        ctx.vars.fallback_library_path = dir.path("fb");
         for input in [macos, implicit] {
             assert_eq!(
                 resolve(&mut ctx, &input),
@@ -1750,7 +1865,7 @@ mod tests {
             &x86_64_exe(&[load(&framework), load(&dir.path("missing/Foo"))]),
         );
         let mut ctx = context(None);
-        ctx.env.library_path = search_path::from_string(dir.path("lp"), &[':']);
+        ctx.vars.library_path = dir.path("lp");
         assert_eq!(
             resolve(&mut ctx, &exe),
             [
@@ -1761,7 +1876,7 @@ mod tests {
 
         // The framework is found on DYLD_FRAMEWORK_PATH.
         let found = dir.write("fp/Foo.framework/Versions/A/Foo", &x86_64_dylib(&[]));
-        ctx.env.framework_path = search_path::from_string(dir.path("fp"), &[':']);
+        ctx.vars.framework_path = dir.path("fp");
         assert_eq!(
             resolve(&mut ctx, &exe),
             [
@@ -1773,7 +1888,7 @@ mod tests {
 
     #[test]
     fn at_path_expansion() {
-        let expand = |path| expand_at_path(path, "/a/b/MacOS", Some("/l/lib"));
+        let expand = |path| expand_at_path(path, Some("/a/b/MacOS"), Some("/l/lib"));
         for (path, expanded) in [
             ("@executable_path/libx.dylib", "/a/b/MacOS/libx.dylib"),
             ("@executable_path/../Frameworks/X", "/a/b/Frameworks/X"),
@@ -1794,7 +1909,7 @@ mod tests {
         }
         // Not for an inserted library.
         assert_eq!(
-            expand_at_path("@loader_path/libx.dylib", "/a", None),
+            expand_at_path("@loader_path/libx.dylib", Some("/a"), None),
             "@loader_path/libx.dylib"
         );
         assert_eq!(expand_rpath("@rpath/x/@rpath/y", "/r"), "/r/x/@rpath/y");
@@ -1816,9 +1931,8 @@ mod tests {
             &x86_64_exe(&[string_command(LC_RPATH, &[], &dir.path("rp"))]),
         );
         let mut ctx = context(None);
-        ctx.preload = insert_libraries(
-            "@rpath/librp.dylib:@loader_path/libld.dylib:@executable_path/libex.dylib",
-        );
+        ctx.vars.insert_libraries =
+            "@rpath/librp.dylib:@loader_path/libld.dylib:@executable_path/libex.dylib".to_string();
         assert_eq!(
             resolve(&mut ctx, &exe),
             [
@@ -1827,8 +1941,8 @@ mod tests {
                 node(&exec, DepMode::Preload),
             ]
         );
-        ctx.env.library_path = search_path::from_string(dir.path("lp"), &[':']);
-        ctx.env.fallback_library_path = search_path::from_string(dir.path("fb"), &[':']);
+        ctx.vars.library_path = dir.path("lp");
+        ctx.vars.fallback_library_path = dir.path("fb");
         assert_eq!(
             resolve(&mut ctx, &exe),
             [
@@ -1953,7 +2067,7 @@ mod tests {
         let lib_p = dir.write("pre/libP.dylib", &x86_64_dylib(&[load(&lib_d)]));
         let exe = dir.write("bin/exe", &x86_64_exe(&[load(&lib_a)]));
         let mut ctx = context(None);
-        ctx.preload = insert_libraries(&format!("{lib_p}:{lib_p}"));
+        ctx.vars.insert_libraries = format!("{lib_p}:{lib_p}");
         let (tree, loaded) = listing(&mut ctx, &exe);
         assert_eq!(
             tree,
@@ -1978,7 +2092,7 @@ mod tests {
         let inserted = dir.write("pre/libpre.dylib", &x86_64_dylib(&[load(&dep)]));
         let exe = dir.write("bin/exe", &x86_64_exe(&[load(&other), load(&inserted)]));
         let mut ctx = context(None);
-        ctx.preload = insert_libraries(&inserted);
+        ctx.vars.insert_libraries = inserted.clone();
         assert_eq!(
             resolve(&mut ctx, &exe),
             [
@@ -1995,8 +2109,7 @@ mod tests {
         let keys_off = Arch::process(CPU_TYPE_ARM64, CpuSubtype(0), MH_EXECUTE);
         let x86_64 = Arch::process(CPU_TYPE_X86_64, CpuSubtype(3), MH_EXECUTE);
         let dependency = |data: &[u8], arch| {
-            parse_object(data, Check::Dependency(arch), "/exe", "/loader")
-                .map(|info| dep_names(&info).join(":"))
+            parse_object(data, Check::Dependency(arch)).map(|info| dep_names(&info).join(":"))
         };
         let x86_64_lib = dylib(CPU_TYPE_X86_64, 3, "/x86_64");
         let arm64_lib = dylib(CPU_TYPE_ARM64, 0, "/arm64");
@@ -2064,7 +2177,7 @@ mod tests {
         );
         let mut ctx = context(None);
         assert_eq!(resolve(&mut ctx, &exe), [node(&intel, DepMode::NotFound)]);
-        ctx.env.fallback_library_path = search_path::from_string(dir.path("fallback"), &[':']);
+        ctx.vars.fallback_library_path = dir.path("fallback");
         assert_eq!(
             resolve(&mut ctx, &exe),
             [node(&arm64, DepMode::LdFallbackLibraryPath)]
@@ -2135,8 +2248,124 @@ mod tests {
         let info = parse(&image, &arch).unwrap();
         assert_eq!(
             info.rpath,
-            ["/does/not/exist", "/loader/../lib", "/exe/Frameworks/"]
+            [
+                "/does/not/exist",
+                "@loader_path/../lib",
+                "@executable_path/Frameworks/"
+            ]
         );
+        let expand = |security, main| expand_rpaths(&info.rpath, "/exe", "/loader", security, main);
+        let unrestricted = Security::default();
+        for main in [true, false] {
+            assert_eq!(
+                expand(unrestricted, main),
+                ["/does/not/exist", "/loader/../lib", "/exe/Frameworks/"]
+            );
+        }
+        // A restricted process neither expands @executable_path nor the main
+        // executable @loader_path, and drops a relative entry.
+        let restricted = Security {
+            restricted: Some("test"),
+        };
+        assert_eq!(expand(restricted, true), ["/does/not/exist"]);
+        assert_eq!(
+            expand(restricted, false),
+            ["/does/not/exist", "/loader/../lib"]
+        );
+        let relative = vec!["lib".to_string(), "/usr/lib".to_string()];
+        assert_eq!(
+            expand_rpaths(&relative, "/exe", "/loader", unrestricted, true),
+            ["lib", "/usr/lib"]
+        );
+        assert_eq!(
+            expand_rpaths(&relative, "/exe", "/loader", restricted, true),
+            ["/usr/lib"]
+        );
+    }
+
+    // A LC_SEGMENT_64 command for SEGNAME with the SECTIONS.
+    fn segment64(segname: &str, sections: &[&str]) -> Vec<u8> {
+        let name = |name: &str| {
+            let mut bytes = name.as_bytes().to_vec();
+            bytes.resize(16, 0);
+            bytes
+        };
+        let mut command = words(&[LC_SEGMENT_64.0, 72 + 80 * sections.len() as u32], false);
+        command.extend(name(segname));
+        command.extend([0; 32]);
+        command.extend(words(&[0, 0, sections.len() as u32, 0], false));
+        for section in sections {
+            command.extend(name(section));
+            command.extend(name(segname));
+            command.extend([0; 48]);
+        }
+        command
+    }
+
+    #[test]
+    fn restrict_section() {
+        let arch = Arch::new(None).unwrap();
+        let restricted = |cmds: &[Vec<u8>]| parse(&x86_64_exe(cmds), &arch).unwrap().restricted;
+        assert!(restricted(&[segment64("__RESTRICT", &["__restrict"])]));
+        assert!(restricted(&[
+            segment64("__TEXT", &["__text"]),
+            segment64("__RESTRICT", &["__other", "__restrict"]),
+        ]));
+        assert!(!restricted(&[segment64("__RESTRICT", &["__other"])]));
+        assert!(!restricted(&[segment64("__DATA", &["__restrict"])]));
+        assert!(!restricted(&[]));
+    }
+
+    #[test]
+    fn restricted_process() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // A program linking against an @executable_path library and one
+        // only found on the DYLD_LIBRARY_PATH directory, with an inserted
+        // library.
+        let dir = Scratch::new("restricted");
+        let exec = dir.write("bin/libe.dylib", &x86_64_dylib(&[]));
+        let lib = dir.write("lp/libfoo.dylib", &x86_64_dylib(&[]));
+        let inserted = dir.write("pre/libp.dylib", &x86_64_dylib(&[]));
+        let missing = dir.path("missing/libfoo.dylib");
+        let deps = [load("@executable_path/libe.dylib"), load(&missing)];
+        let plain = dir.write("bin/plain", &x86_64_exe(&deps));
+        let mut cmds = deps.to_vec();
+        cmds.push(segment64("__RESTRICT", &["__restrict"]));
+        let restrict = dir.write("bin/restrict", &x86_64_exe(&cmds));
+        let setuid = dir.write("bin/setuid", &x86_64_exe(&deps));
+        std::fs::set_permissions(&setuid, std::fs::Permissions::from_mode(0o4755)).unwrap();
+
+        let mut ctx = context(None);
+        ctx.vars.library_path = dir.path("lp");
+        ctx.vars.insert_libraries = inserted.clone();
+        assert_eq!(
+            resolve(&mut ctx, &plain),
+            [
+                node(&inserted, DepMode::Preload),
+                node(&exec, DepMode::Direct),
+                node(&lib, DepMode::LdLibraryPath),
+            ]
+        );
+        // The restricted ones neither take the DYLD_* variables nor expand
+        // @executable_path.
+        for input in [&restrict, &setuid] {
+            assert_eq!(
+                resolve(&mut ctx, input),
+                [
+                    node("@executable_path/libe.dylib", DepMode::NotFound),
+                    node(&missing, DepMode::NotFound),
+                ]
+            );
+        }
+
+        let security = |path: &str| {
+            let info = parse(&std::fs::read(path).unwrap(), &Arch::new(None).unwrap()).unwrap();
+            Security::new(Path::new(path), false, &info).restricted
+        };
+        assert_eq!(security(&plain), None);
+        assert_eq!(security(&restrict), Some("__RESTRICT,__restrict section"));
+        assert_eq!(security(&setuid), Some("setuid or setgid program"));
     }
 
     #[test]
@@ -2219,9 +2448,9 @@ mod tests {
         let missing = dir.path("missing/Foo.framework/Versions/A/Foo_debug");
         let exe = dir.write("bin/exe", &x86_64_exe(&[load(&missing)]));
         let mut ctx = context(None);
-        ctx.env.framework_path = search_path::from_string(dir.path("fp"), &[':']);
+        ctx.vars.framework_path = dir.path("fp");
         assert_eq!(resolve(&mut ctx, &exe), [node(&missing, DepMode::NotFound)]);
-        ctx.env.image_suffix = Some("_debug".to_string());
+        ctx.vars.image_suffix = Some("_debug".to_string());
         assert_eq!(
             resolve(&mut ctx, &exe),
             [node(&framework, DepMode::LdFrameworkPath)]
