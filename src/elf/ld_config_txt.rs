@@ -138,8 +138,17 @@ impl Properties {
         };
     }
 
-    fn get<S: AsRef<str>>(&self, name: S) -> Option<&String> {
-        self.properties.get(name.as_ref())
+    // A comma separated list, with each entry trimmed like the bionic
+    // Properties::get_strings does.  A property that is set but empty is
+    // one empty entry.
+    fn get_strings<S: AsRef<str>>(&self, name: S) -> Vec<String> {
+        match self.properties.get(name.as_ref()) {
+            Some(value) => value
+                .split(',')
+                .map(|entry| entry.trim_matches(is_space).to_string())
+                .collect(),
+            None => Vec::new(),
+        }
     }
 
     fn get_bool<S: AsRef<str>>(&self, name: S) -> bool {
@@ -351,10 +360,8 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
 
     ldcache.push_namespace(DEFAULT_NAME_CONFIG);
 
-    if let Some(additional_namespaces) = properties.get("additional.namespaces") {
-        for namespace in additional_namespaces.split(',') {
-            ldcache.push_namespace(namespace);
-        }
+    for namespace in properties.get_strings("additional.namespaces") {
+        ldcache.push_namespace(&namespace);
     }
 
     // The loop below borrow as immutable, so it can not check if the linked namespace
@@ -364,38 +371,36 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
 
     for ns in ldcache.namespaces_config.values_mut() {
         let mut property_name_prefix = format!("namespace.{}", ns.name);
-        if let Some(linked_namespaces) = properties.get(format!("{property_name_prefix}.links")) {
-            for ns_linked in linked_namespaces.split(',') {
-                if !ns_configs_set.contains(ns_linked) {
-                    return Err("undefined namespace");
-                }
-
-                let allow_all = properties.get_bool(format!(
-                    "{property_name_prefix}.link.{ns_linked}.allow_all_shared_libs"
-                ));
-
-                let shared_libs = properties.get_string(format!(
-                    "{property_name_prefix}.link.{ns_linked}.shared_libs"
-                ));
-
-                if !allow_all && shared_libs.is_empty() {
-                    return Err("list of shared_libs is not specified or is empty.");
-                }
-
-                if allow_all && !shared_libs.is_empty() {
-                    return Err("both shared_libs and allow_all_shared_libs are set.");
-                }
-
-                ns.namespaces.push(NamespaceLink {
-                    namespace: ns_linked.to_string(),
-                    shared_libs: shared_libs
-                        .split(':')
-                        .filter(|lib| !lib.is_empty())
-                        .map(|lib| lib.to_string())
-                        .collect(),
-                    allow_all_shared_libs: allow_all,
-                });
+        for ns_linked in properties.get_strings(format!("{property_name_prefix}.links")) {
+            if !ns_configs_set.contains(&ns_linked) {
+                return Err("undefined namespace");
             }
+
+            let allow_all = properties.get_bool(format!(
+                "{property_name_prefix}.link.{ns_linked}.allow_all_shared_libs"
+            ));
+
+            let shared_libs = properties.get_string(format!(
+                "{property_name_prefix}.link.{ns_linked}.shared_libs"
+            ));
+
+            if !allow_all && shared_libs.is_empty() {
+                return Err("list of shared_libs is not specified or is empty.");
+            }
+
+            if allow_all && !shared_libs.is_empty() {
+                return Err("both shared_libs and allow_all_shared_libs are set.");
+            }
+
+            ns.namespaces.push(NamespaceLink {
+                namespace: ns_linked,
+                shared_libs: shared_libs
+                    .split(':')
+                    .filter(|lib| !lib.is_empty())
+                    .map(|lib| lib.to_string())
+                    .collect(),
+                allow_all_shared_libs: allow_all,
+            });
         }
 
         ns.isolated = properties.get_bool(format!("{property_name_prefix}.isolated"));
@@ -516,14 +521,20 @@ fn lossy(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
     String::from_utf8_lossy(bytes)
 }
 
-// The android::base::Trim the loader uses, which strips the C locale isspace
-// characters (the vertical tab included).
+// The C locale isspace characters (the vertical tab included), which the
+// android::base::Trim the loader uses strips.
+fn is_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r')
+}
+
 fn trim(s: &[u8]) -> &[u8] {
-    let is_space = |c: &u8| matches!(c, b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r');
-    let start = s.iter().position(|c| !is_space(c)).unwrap_or(s.len());
+    let start = s
+        .iter()
+        .position(|&c| !is_space(c.into()))
+        .unwrap_or(s.len());
     let end = s
         .iter()
-        .rposition(|c| !is_space(c))
+        .rposition(|&c| !is_space(c.into()))
         .map_or(start, |end| end + 1);
     &s[start..end]
 }
@@ -997,6 +1008,42 @@ mod tests {
             .map_err(Error::other)?;
         assert_eq!(search_paths(&ldcache, "default"), vec![fixture.path("lib")]);
         assert_eq!(search_paths(&ldcache, "other"), vec![fixture.path("lib64")]);
+        Ok(())
+    }
+
+    #[test]
+    fn namespace_lists() -> Result<(), Error> {
+        let fixture = Fixture::new()?;
+        let ldcache = fixture
+            .parse(
+                "dir.test = {base}/bin\n\
+                 [test]\n\
+                 additional.namespaces = first ,\tsecond\n\
+                 namespace.default.links = first , second\n\
+                 namespace.default.link.first.shared_libs = libfoo.so\n\
+                 namespace.default.link.second.allow_all_shared_libs = true\n\
+                 namespace.second.search.paths = {base}/lib\n",
+            )
+            .map_err(Error::other)?;
+        let default_ns = ldcache
+            .get_default_namespace()
+            .ok_or(Error::other("default namespace not found"))?;
+        let links: Vec<&str> = default_ns
+            .namespaces
+            .iter()
+            .map(|link| link.namespace.as_str())
+            .collect();
+        assert_eq!(links, vec!["first", "second"]);
+        assert_eq!(search_paths(&ldcache, "second"), vec![fixture.path("lib")]);
+
+        // An empty entry names no namespace, which fails the configuration.
+        assert!(fixture
+            .parse(
+                "dir.test = {base}/bin\n\
+                 [test]\n\
+                 namespace.default.links =\n"
+            )
+            .is_err());
         Ok(())
     }
 
