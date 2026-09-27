@@ -498,11 +498,12 @@ fn find_dependency(
     None
 }
 
-// The candidate locations for a load path, in the order dyld searches them:
-// 1. The DYLD_FRAMEWORK_PATH directories (for framework load paths),
-// 2. DYLD_LIBRARY_PATH directories (by leaf name),
-// 3. The load path itself (with @rpath expanded against the run-path list),
-// 4. And at last the DYLD_FALLBACK_FRAMEWORK_PATH or DYLD_FALLBACK_LIBRARY_PATH
+// The candidate locations for a load path, in the order dyld searches them
+// (PathOverrides::forEachPathVariant):
+// 1. The DYLD_FRAMEWORK_PATH directories for a framework load path, or the
+//    DYLD_LIBRARY_PATH directories (by leaf name) for any other one,
+// 2. The load path itself (with @rpath expanded against the run-path list),
+// 3. And at last the DYLD_FALLBACK_FRAMEWORK_PATH or DYLD_FALLBACK_LIBRARY_PATH
 //    directories.
 fn candidate_paths(
     config: &Config,
@@ -512,15 +513,19 @@ fn candidate_paths(
 ) -> Vec<(String, DepMode)> {
     let mut candidates = Vec::new();
 
+    // Like the fallback lists, the framework and library lists are mutually
+    // exclusive: a framework is not looked up in the DYLD_LIBRARY_PATH
+    // directories.
     let partial = framework_partial_path(dependency);
+    let leaf = pathutils::get_name(&Path::new(dependency));
     if let Some(partial) = partial {
         for dir in &config.env.framework_path {
             candidates.push((format!("{}/{partial}", dir.path), DepMode::LdFrameworkPath));
         }
-    }
-    let leaf = pathutils::get_name(&Path::new(dependency));
-    for dir in &config.env.library_path {
-        candidates.push((format!("{}/{leaf}", dir.path), DepMode::LdLibraryPath));
+    } else {
+        for dir in &config.env.library_path {
+            candidates.push((format!("{}/{leaf}", dir.path), DepMode::LdLibraryPath));
+        }
     }
 
     if dependency.contains("@rpath") {
@@ -1585,6 +1590,39 @@ mod tests {
         assert_eq!(
             resolve(&mut ctx, &iphone),
             [node(&ios, DepMode::Direct), node(&plain, DepMode::Direct)]
+        );
+    }
+
+    #[test]
+    fn library_path_not_for_frameworks() {
+        // DYLD_LIBRARY_PATH holds a file with the framework leaf name, which
+        // only the non-framework load paths are looked up in.
+        let dir = Scratch::new("fwpath");
+        let lib = dir.write("lp/Foo", &x86_64_dylib(&[]));
+        let framework = dir.path("missing/Foo.framework/Versions/A/Foo");
+        let exe = dir.write(
+            "bin/exe",
+            &x86_64_exe(&[load(&framework), load(&dir.path("missing/Foo"))]),
+        );
+        let mut ctx = context(None);
+        ctx.env.library_path = search_path::from_string(dir.path("lp"), &[':']);
+        assert_eq!(
+            resolve(&mut ctx, &exe),
+            [
+                node(&framework, DepMode::NotFound),
+                node(&lib, DepMode::LdLibraryPath),
+            ]
+        );
+
+        // The framework is found on DYLD_FRAMEWORK_PATH.
+        let found = dir.write("fp/Foo.framework/Versions/A/Foo", &x86_64_dylib(&[]));
+        ctx.env.framework_path = search_path::from_string(dir.path("fp"), &[':']);
+        assert_eq!(
+            resolve(&mut ctx, &exe),
+            [
+                node(&found, DepMode::LdFrameworkPath),
+                node(&lib, DepMode::LdLibraryPath),
+            ]
         );
     }
 
