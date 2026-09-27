@@ -1,4 +1,6 @@
+use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::io::{Error, Result};
 use std::mem::{align_of, size_of};
 use std::path::Path;
@@ -270,10 +272,6 @@ fn align_cache(value: usize) -> usize {
     (value + (align_of::<cache_file_new>() - 1)) & !(align_of::<cache_file_new>() - 1)
 }
 
-// The directory of the library path for each name the loader resolves through
-// the cache.
-pub type LdCache = HashMap<String, String>;
-
 // A cache entry.
 #[derive(Debug)]
 struct CacheEntry {
@@ -542,16 +540,16 @@ struct Search<'a> {
 // first regular entry is taken on the new format, while the old format one
 // keeps searching for an entry with the loader default flags (the generic
 // FLAG_ELF_LIBC6 over FLAG_ELF, or the ARM unmarked entries over the float
-// ABI ones).
+// ABI ones).  The result is the directory of the library path for each name.
 fn select_entries(
     file: &CacheFile,
     ei_class: FileClass,
     e_machine: Machine,
     e_flags: FileFlags,
     supported: &[&str],
-) -> LdCache {
+) -> HashMap<String, String> {
     let Some(flags) = CacheFlags::new(ei_class, e_machine, e_flags) else {
-        return LdCache::new();
+        return HashMap::new();
     };
     let priorities = hwcaps_priorities(&file.hwcaps, supported);
 
@@ -602,22 +600,66 @@ fn select_entries(
         .collect()
 }
 
-pub fn parse_ld_so_cache<P: AsRef<Path>>(
-    filename: &P,
-    ei_class: FileClass,
-    e_machine: Machine,
-    e_flags: FileFlags,
-) -> Result<LdCache> {
+// The object ABI the entries are selected for.
+type Abi = (FileClass, DataEncoding, Machine, FileFlags);
+
+// The loader cache, read once and shared by all objects, with the entries
+// selected for the ABI of the last object given to select.
+#[derive(Debug, Default)]
+pub struct LdCache {
+    file: CacheFile,
+    abi: Option<Abi>,
+    entries: HashMap<String, String>,
+}
+
+impl LdCache {
+    fn parse(data: &[u8]) -> Result<Self> {
+        Ok(LdCache {
+            file: parse_cache(data)?,
+            ..Default::default()
+        })
+    }
+
+    // Select the entries for the object ABI: each object runs with the
+    // loader built for its ABI, which takes only the entries of that ABI and
+    // has its own glibc-hwcaps subdirectories.
+    pub fn select(
+        &mut self,
+        ei_class: FileClass,
+        ei_data: DataEncoding,
+        e_machine: Machine,
+        e_flags: FileFlags,
+    ) {
+        let abi = Some((ei_class, ei_data, e_machine, e_flags));
+        if self.abi == abi {
+            return;
+        }
+        // And obtain the current machine supported glibc-hwcap subfolder.  A
+        // machine whose capabilities can not be read (the auxiliary vector on a
+        // chroot without /proc) is taken as supporting none, which still leaves
+        // the regular entries.
+        let supported = hwcap::hwcap_supported().unwrap_or_default();
+        self.entries = select_entries(&self.file, ei_class, e_machine, e_flags, &supported);
+        self.abi = abi;
+    }
+
+    // The directory the selected entry for NAME is in.
+    pub fn get<Q: Hash + Eq + ?Sized>(&self, name: &Q) -> Option<&String>
+    where
+        String: Borrow<Q>,
+    {
+        self.entries.get(name)
+    }
+
+    // The number of names with a selected entry.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+pub fn parse_ld_so_cache<P: AsRef<Path>>(filename: &P) -> Result<LdCache> {
     // The file is small, and the loader maps it whole as well.
-    let file = parse_cache(&fs::read(filename)?)?;
-    // And obtain the current machine supported glibc-hwcap subfolder.  A
-    // machine whose capabilities can not be read (the auxiliary vector on a
-    // chroot without /proc) is taken as supporting none, which still leaves
-    // the regular entries.
-    let supported = hwcap::hwcap_supported().unwrap_or_default();
-    Ok(select_entries(
-        &file, ei_class, e_machine, e_flags, &supported,
-    ))
+    LdCache::parse(&fs::read(filename)?)
 }
 
 #[cfg(test)]
@@ -780,7 +822,7 @@ mod tests {
     }
     const EXTENSION_OFFSET: usize = 32;
 
-    fn select(cache: &[u8], supported: &[&str]) -> LdCache {
+    fn select(cache: &[u8], supported: &[&str]) -> HashMap<String, String> {
         let file = parse_cache(cache).unwrap();
         select_entries(&file, ELFCLASS64, EM_X86_64, FileFlags(0), supported)
     }
@@ -972,9 +1014,41 @@ mod tests {
         ei_class: FileClass,
         e_machine: Machine,
         e_flags: FileFlags,
-    ) -> LdCache {
+    ) -> HashMap<String, String> {
         let file = parse_cache(cache).unwrap();
         select_entries(&file, ei_class, e_machine, e_flags, &[])
+    }
+
+    #[test]
+    fn entries_selected_per_abi() {
+        // The same cache used for objects of different ABIs, in any order.
+        let mut cache = LdCache::parse(&build_cache(
+            &[
+                (FLAG_ELF_LIBC6, "libc.so.6", "/usr/lib32/libc.so.6", 0),
+                (X86_64, "libc.so.6", "/usr/lib64/libc.so.6", 0),
+                (
+                    FLAG_ELF_LIBC6,
+                    "libnoneed.so.1",
+                    "/usr/lib32/libnoneed.so.1",
+                    0,
+                ),
+                (X86_64, "libz.so.1", "/usr/lib64/libz.so.1", 0),
+            ],
+            &[],
+        ))
+        .unwrap();
+        for _ in 0..2 {
+            cache.select(ELFCLASS64, ELFDATA2LSB, EM_X86_64, FileFlags(0));
+            assert_eq!(cache.len(), 2);
+            assert_eq!(cache.get("libc.so.6").unwrap(), "/usr/lib64");
+            assert_eq!(cache.get("libnoneed.so.1"), None);
+
+            cache.select(ELFCLASS32, ELFDATA2LSB, EM_386, FileFlags(0));
+            assert_eq!(cache.len(), 2);
+            assert_eq!(cache.get("libc.so.6").unwrap(), "/usr/lib32");
+            assert_eq!(cache.get("libnoneed.so.1").unwrap(), "/usr/lib32");
+            assert_eq!(cache.get("libz.so.1"), None);
+        }
     }
 
     #[test]

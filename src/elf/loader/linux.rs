@@ -12,19 +12,20 @@ impl Loader for Linux {
         _binary: &P,
         elc: &ElfInfo,
     ) {
-        if interp::is_glibc(&elc.interp) {
-            // glibc's ld.so.cache is shared between all executables, so there is no need
-            // to reload for multiple entries.
-            if ld_cache.is_none() {
-                *ld_cache = ld_so_cache::parse_ld_so_cache(
-                    &Path::new("/etc/ld.so.cache"),
-                    elc.ei_class,
-                    elc.e_machine,
-                    elc.e_flags,
-                )
-                .ok();
-            }
-        };
+        // Only the glibc loader reads the cache, so an object for another
+        // loader does not use the one of a previous object.
+        if !interp::is_glibc(&elc.interp) {
+            *ld_cache = None;
+            return;
+        }
+        // glibc's ld.so.cache is shared between all executables, so there is no need
+        // to reload for multiple entries, but the entries apply to the object ABI.
+        if ld_cache.is_none() {
+            *ld_cache = ld_so_cache::parse_ld_so_cache(&Path::new("/etc/ld.so.cache")).ok();
+        }
+        if let Some(cache) = ld_cache {
+            cache.select(elc.ei_class, elc.ei_data, elc.e_machine, elc.e_flags);
+        }
     }
 
     fn load_ld_so_preload(interp: &Option<String>) -> Vec<String> {
