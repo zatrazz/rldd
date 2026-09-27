@@ -90,7 +90,10 @@ struct PeInfo {
     // the one of a module, or the process one for the executable (see
     // process_manifest).
     assemblies: Vec<sxs::Assembly>,
-    // Whether the loader activates a manifest for the object.
+    // Whether the process starts with a manifest, the resource 1 or the
+    // external file of the executable, which disables the '.local'
+    // redirection.  The resource 2 of an executable is activated for its
+    // imports, but does not count.
     manifest: bool,
     // The RT_MANIFEST resource the process starts with, when the object is
     // the executable.
@@ -104,6 +107,8 @@ const CREATEPROCESS_MANIFEST_RESOURCE_ID: u16 = 1;
 const ISOLATIONAWARE_MANIFEST_RESOURCE_ID: u16 = 2;
 
 const SIDE_BY_SIDE_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\SideBySide";
+const IMAGE_FILE_EXECUTION_OPTIONS_KEY: &str =
+    r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options";
 
 // The resolution context: the system state the loader consults before the search order,
 // along with the command line settings.
@@ -116,6 +121,9 @@ pub struct PeContext {
     // The PreferExternalManifest value, which puts the external manifest of
     // an executable before the embedded one.
     prefer_external_manifest: bool,
+    // The DevOverrideEnable value, which keeps the '.local' redirection for
+    // an executable with a manifest.
+    dev_override: bool,
     dll_directory: search_path::SearchPathVec,
     all: bool,
     verbose: bool,
@@ -146,6 +154,8 @@ impl PeContext {
             windows_dir,
             safe_search,
             prefer_external_manifest: registry::dword(SIDE_BY_SIDE_KEY, "PreferExternalManifest")
+                .is_some_and(|value| value != 0),
+            dev_override: registry::dword(IMAGE_FILE_EXECUTION_OPTIONS_KEY, "DevOverrideEnable")
                 .is_some_and(|value| value != 0),
             dll_directory: search_path::SearchPathVec::new(),
             all: false,
@@ -197,7 +207,7 @@ pub fn resolve_binary(ctx: &mut PeContext, arg: &str) -> Result<DepTree, std::io
         print_object_information(ctx, filename, &pei, &dirs);
     }
 
-    let redirect = dot_local_dirs(filename, application.as_deref());
+    let redirect = dot_local(ctx, filename, application.as_deref(), &pei);
 
     let mut deptree = DepTree::new();
     let depp = deptree.addroot(DepNode::new(
@@ -274,6 +284,23 @@ fn print_object_information(
         lines.push(format!("  search path: {} {mode}", dir.path));
     }
     outln!("{}", lines.join("\n"));
+}
+
+// The '.local' redirection of the executable, which the loader ignores when
+// the process starts with a manifest unless the DevOverrideEnable value is
+// set, as https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-redirection
+// documents.  An executable whose only manifest is the resource 2 still has
+// it (checked on Windows 11 24H2).
+fn dot_local(
+    ctx: &PeContext,
+    filename: &Path,
+    application: Option<&str>,
+    pei: &PeInfo,
+) -> search_dirs::SearchDirs {
+    match pei.manifest && !ctx.dev_override {
+        true => search_dirs::SearchDirs::new(),
+        false => dot_local_dirs(filename, application),
+    }
 }
 
 // When a '<object>.local' directory exists the dependencies are taken from it, and
@@ -801,7 +828,6 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
 
     if let Some(manifest) = manifest_resource(&file, ISOLATIONAWARE_MANIFEST_RESOURCE_ID) {
         pei.assemblies = sxs::parse_manifest(manifest);
-        pei.manifest = true;
     }
     if !pei.is_dll {
         pei.process_manifest =
@@ -1156,7 +1182,6 @@ mod tests {
             .unwrap();
         }
         let pei = open_object(ctx, &path, true).unwrap();
-        assert_eq!(pei.manifest, !pei.assemblies.is_empty());
         pei.assemblies.into_iter().map(|a| a.name).collect()
     }
 
@@ -1208,6 +1233,43 @@ mod tests {
         ctx.prefer_external_manifest = true;
         assert_eq!(activated(&ctx, &both, true), ["external"]);
         assert_eq!(activated(&ctx, &both, false), ["one"]);
+    }
+
+    // The '.local' redirection is ignored when the process starts with a
+    // manifest, the resource 1 or the external file, unless DevOverrideEnable
+    // is set.  The resource 2 of the executable does not count.
+    #[test]
+    fn dot_local_with_manifest() {
+        let mut ctx = PeContext::new(true);
+        ctx.dev_override = false;
+        let plain = manifest("plain");
+        let dir = crate::tempdir::TempDir::new().unwrap();
+        let exe = dir.path().join("app.exe");
+        let external = dir.path().join("app.exe.manifest");
+        fs::create_dir(dir.path().join("app.exe.local")).unwrap();
+        let application = dir.path().to_string_lossy().into_owned();
+
+        let redirected = |ctx: &PeContext, manifests: &[(u16, &[u8])], with_external: bool| {
+            let mut image = testimage::Image::exe(pe::IMAGE_FILE_MACHINE_AMD64, true);
+            image.manifests(manifests);
+            fs::write(&exe, image.build()).unwrap();
+            match with_external {
+                true => fs::write(&external, &plain).unwrap(),
+                false => _ = fs::remove_file(&external),
+            }
+            let pei = open_object(ctx, &exe, true).unwrap();
+            !dot_local(ctx, &exe, Some(application.as_str()), &pei).is_empty()
+        };
+
+        assert!(redirected(&ctx, &[], false));
+        assert!(redirected(&ctx, &[(2, &plain)], false));
+        assert!(redirected(&ctx, &[(3, &plain)], false));
+        assert!(!redirected(&ctx, &[(1, &plain)], false));
+        assert!(!redirected(&ctx, &[], true));
+
+        ctx.dev_override = true;
+        assert!(redirected(&ctx, &[(1, &plain)], false));
+        assert!(redirected(&ctx, &[], true));
     }
 
     #[test]
