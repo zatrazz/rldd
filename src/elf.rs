@@ -1,5 +1,7 @@
+use std::borrow::Cow;
 use std::io::Error;
 use std::path::Path;
+use std::rc::Rc;
 use std::{fs, str};
 
 use object::elf::*;
@@ -116,6 +118,10 @@ struct ElfInfo {
     // Whether DF_1_PIE is set.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pie: bool,
+    // The subdirectories the loader of the input object tries first in each
+    // directory it searches, best first (the glibc hwcaps ones), handed down
+    // to every object it loads.
+    search_subdirs: Rc<Vec<String>>,
     // The $ORIGIN expansion, None when the directory is not valid UTF-8.
     origin: Option<String>,
     // The search list entries and the dependencies dropped because of a
@@ -155,6 +161,7 @@ impl ElfInfo {
             dst_lib: Some("lib64".to_string()),
             loader_flags: e_flags,
             pie: false,
+            search_subdirs: Rc::default(),
             origin: Some("/o".to_string()),
             unexpanded: Vec::new(),
             deps: DepsVec::new(),
@@ -310,6 +317,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
             dst_lib: None,
             loader_flags: elf.e_flags(endian),
             pie: DynamicFlags1(tags.flags_1).contains(DF_1_PIE),
+            search_subdirs: Rc::default(),
             origin: None,
             unexpanded: Vec::new(),
         });
@@ -623,6 +631,12 @@ fn searched_locations(
             }
         }
     }
+    if !elc.search_subdirs.is_empty() {
+        r.push(format!(
+            "each directory under {} first",
+            search_path::format_entries(elc.search_subdirs.iter().map(String::as_str))
+        ));
+    }
     r
 }
 
@@ -709,6 +723,14 @@ fn print_search_path_information<P: AsRef<Path>>(filename: &P, config: &Config, 
             .map_or(search_path::EMPTY_LIST.to_string(), |cache| cache.summary()),
         search_path::format_list(&config.system_dirs),
     );
+    // The subdirectories tried in each directory of the lists above (but the
+    // cache) before the directory itself.
+    if !elc.search_subdirs.is_empty() {
+        outln!(
+            "  subdirectories: {}",
+            search_path::format_entries(elc.search_subdirs.iter().map(String::as_str))
+        );
+    }
     // The entries the loader drops because a token has no value (a $PLATFORM
     // the kernel does not provide, or a directory that is not valid UTF-8
     // for $ORIGIN).
@@ -818,10 +840,12 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
         search_path::SearchPathVec::new()
     };
 
-    // The $LIB expansion is built into the glibc loader.
+    // The $LIB expansion and the hwcaps subdirectories are built into the
+    // glibc loader.
     #[cfg(target_os = "linux")]
     if !elc.is_musl {
         elc.dst_lib = system_dirs::get_dst_lib(loader.as_deref(), &elc);
+        elc.search_subdirs = Rc::new(system_dirs::get_search_subdirs(loader.as_deref(), &elc));
     }
 
     expand_object(&mut elc, ctx.platform.as_ref());
@@ -881,7 +905,9 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
 #[derive(Debug)]
 struct ResolvedDependency<'a> {
     elc: ElfInfo,
-    path: &'a String,
+    // The directory, which a search subdirectory makes another one than the
+    // search path entry.
+    path: Cow<'a, str>,
     // The resolved file name, which might differ from the DT_NEEDED entry
     // (for instance on OpenBSD minor version matching).
     filename: String,
@@ -1264,14 +1290,14 @@ fn resolve_loader<'a>(
 // matches the requesting ELC one, or the error when the loader fails the
 // load on it.
 fn search_dir<'a>(
-    dir: &'a String,
+    dir: Cow<'a, str>,
     dtneeded: &str,
     elc: &ElfInfo,
     platform: Option<&String>,
     mode: DepMode,
     namespace: &ObjectNamespace,
 ) -> Option<Resolution<'a>> {
-    let path = Rtld::dependency_path(dir, dtneeded);
+    let path = Rtld::dependency_path(&dir, dtneeded);
     match open_dependency(&path, elc, platform) {
         Ok(elc) => Some(Ok(ResolvedDependency {
             elc,
@@ -1286,7 +1312,10 @@ fn search_dir<'a>(
 }
 
 // Search DTNEEDED on each of the SEARCHPATHS in order, returning the first
-// directory with a matching object (or where the loader fails).
+// directory with a matching object (or where the loader fails).  The search
+// subdirectories of each directory, if any, are tried before it (the glibc
+// open_path, with the capability subdirectories of each r_search_path
+// entry).
 fn search_dirs<'a>(
     searchpaths: &'a search_path::SearchPathVec,
     dtneeded: &str,
@@ -1296,8 +1325,20 @@ fn search_dirs<'a>(
     namespace: &ObjectNamespace,
 ) -> Option<Resolution<'a>> {
     searchpaths.iter().find_map(|searchpath| {
-        search_dir(&searchpath.path, dtneeded, elc, platform, mode, namespace)
+        let dir = &searchpath.path;
+        elc.search_subdirs
+            .iter()
+            .find_map(|subdir| {
+                let subdir = Cow::Owned(subdir_path(dir, subdir));
+                search_dir(subdir, dtneeded, elc, platform, mode, namespace)
+            })
+            .or_else(|| search_dir(Cow::Borrowed(dir), dtneeded, elc, platform, mode, namespace))
     })
+}
+
+// The SUBDIR subdirectory of the DIR search directory.
+fn subdir_path(dir: &str, subdir: &str) -> String {
+    format!("{}/{subdir}", dir.strip_suffix('/').unwrap_or(dir))
 }
 
 fn resolve_dependency_1<'a>(
@@ -1322,7 +1363,7 @@ fn resolve_dependency_1<'a>(
         return Some(match open_dependency(&path, elc, config.platform) {
             Ok(elc) => Ok(ResolvedDependency {
                 elc,
-                path: dtneeded,
+                path: Cow::Borrowed(dtneeded),
                 filename: pathutils::get_name(&path),
                 mode: if preload {
                     DepMode::Preload
@@ -1362,7 +1403,7 @@ fn resolve_dependency_1<'a>(
         let dep = dep.filter(|dep| match dep {
             Ok(dep) => {
                 rule != NodeflibRule::OutsideSystemDirs
-                    || !in_system_dirs(&config.system_dirs, dep.path, &dep.filename)
+                    || !in_system_dirs(&config.system_dirs, &dep.path, &dep.filename)
             }
             Err(_) => true,
         });
@@ -1862,6 +1903,16 @@ mod tests {
             &unversioned
         ));
         assert!(!satisfies(&ObjectSymbols::default(), &unversioned));
+    }
+
+    #[test]
+    fn search_subdirectory() {
+        assert_eq!(
+            subdir_path("/usr/lib", "glibc-hwcaps/x86-64-v3"),
+            "/usr/lib/glibc-hwcaps/x86-64-v3"
+        );
+        assert_eq!(subdir_path("/", "tls"), "/tls");
+        assert_eq!(subdir_path(".", "tls"), "./tls");
     }
 
     #[test]

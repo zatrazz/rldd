@@ -85,6 +85,7 @@ impl Loader for Linux {
             elc.is_musl = melc.is_musl;
             elc.dst_lib = melc.dst_lib.clone();
             elc.loader_flags = melc.loader_flags;
+            elc.search_subdirs = Rc::clone(&melc.search_subdirs);
             return;
         }
         elc.is_musl = interp::is_musl(&elc.interp)
@@ -296,9 +297,11 @@ impl SearchCache for ld_so_cache::LdCache {
         elc: &'a ElfInfo,
         _namespace: &NoNamespace,
     ) -> Option<Resolution<'a>> {
+        // The glibc-hwcaps subdirectories are cache entries of their own, so
+        // an entry is not searched for them.
         let dir = self.get(dtneeded)?;
         search_dir(
-            dir,
+            Cow::Borrowed(dir),
             dtneeded,
             elc,
             platform,

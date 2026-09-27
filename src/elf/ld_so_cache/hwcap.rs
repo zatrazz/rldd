@@ -698,10 +698,6 @@ pub fn loader_hwcaps(
 // powerpc64 and s390x have them, and only the objects the host CPU runs get
 // them, so the list is empty for any other ABI (i386 on a x86-64 host, for
 // instance), and when the CPU capabilities can not be read.
-//
-// Unused until the directory search tries the glibc-hwcaps subdirectories
-// of each directory, as the loader does.
-#[allow(dead_code)]
 pub fn glibc_hwcaps_subdirs(
     e_machine: Machine,
     ei_class: FileClass,

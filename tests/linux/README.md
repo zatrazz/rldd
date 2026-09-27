@@ -169,5 +169,4 @@ expected result, where ldd can not tell:
 | `wrong-class`, `verify` | the candidate files the loader skips or fails the load on |
 | `versions` | the version check diagnostics and the symbol version binding rules |
 | `musl` | the musl search order, rpath chain and path file |
-
-The glibc-hwcaps subdirectories are not covered yet.
+| `hwcaps` | the glibc-hwcaps subdirectories of the DT_RPATH, DT_RUNPATH and library path directories (for the ones `ld.so --help` lists, skipped without them) |

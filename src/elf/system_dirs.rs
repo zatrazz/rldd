@@ -120,6 +120,8 @@ struct LoaderStrings {
     system_dirs: Option<Vec<String>>,
     // The $LIB expansion (DL_DST_LIB).
     dst_lib: Option<String>,
+    // The glibc release.
+    release: Option<GlibcRelease>,
 }
 
 // The loader keep the configured system directories in a static array of NUL
@@ -155,10 +157,45 @@ fn read_loader_strings(loader: &str) -> Option<LoaderStrings> {
         .as_ref()
         .and_then(|dirs| dirs.first())
         .and_then(|slibdir| dst_lib_in(data, slibdir));
+    let release = match super::ld_so_cache::glibc_release_in(&mmap) {
+        Some((major, minor)) => GlibcRelease::Release(major, minor),
+        None => GlibcRelease::Before233,
+    };
     Some(LoaderStrings {
         system_dirs,
         dst_lib,
+        release: Some(release),
     })
+}
+
+// The glibc release of a loader, from the version banner it has since glibc
+// 2.33 ("ld.so (GNU libc) stable release version 2.39."), older without one.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GlibcRelease {
+    Before233,
+    Release(u32, u32),
+}
+
+// The subdirectories the glibc LOADER tries in each directory it searches
+// before the directory itself, best first, for the ELC input object and on
+// this machine (the capstr list of _dl_important_hwcaps): the glibc-hwcaps
+// ones the CPU supports, since glibc 2.33.  A loader of an unknown release
+// (none to read) is taken as a current one.
+#[cfg(target_os = "linux")]
+pub fn get_search_subdirs(loader: Option<&str>, elc: &ElfInfo) -> Vec<String> {
+    use super::ld_so_cache::hwcap;
+
+    let release = loader.and_then(|loader| loader_strings(loader).release);
+    let mut r: Vec<String> = Vec::new();
+    if release.is_none_or(|release| release >= GlibcRelease::Release(2, 33)) {
+        r.extend(
+            hwcap::glibc_hwcaps_subdirs(elc.e_machine, elc.ei_class, elc.ei_data)
+                .iter()
+                .map(|subdir| format!("glibc-hwcaps/{subdir}")),
+        );
+    }
+    r
 }
 
 // The glibc build sets the $LIB expansion (DL_DST_LIB) to the last component
@@ -452,7 +489,7 @@ mod solaris_tests {
 
 #[cfg(all(test, target_os = "linux"))]
 mod system_dirs_tests {
-    use super::{dst_lib_in, get_musl_path_file, system_dirs_in};
+    use super::{dst_lib_in, get_musl_path_file, system_dirs_in, GlibcRelease};
 
     #[test]
     fn musl_path_file() {
@@ -469,6 +506,13 @@ mod system_dirs_tests {
             Some("/etc/ld-musl-aarch64.path")
         );
         assert_eq!(get_musl_path_file("/lib/ld-linux.so.2"), None);
+    }
+
+    #[test]
+    fn glibc_release_order() {
+        assert!(GlibcRelease::Before233 < GlibcRelease::Release(2, 33));
+        assert!(GlibcRelease::Release(2, 36) < GlibcRelease::Release(2, 37));
+        assert!(GlibcRelease::Release(2, 39) < GlibcRelease::Release(3, 0));
     }
 
     #[test]

@@ -59,7 +59,7 @@ EOF
 
 CASES="rpath runpath tokens origin-literal lib platform empty-entry nodeflib
 preload library-path slash-needed soname not-found-then-found symlink-root
-wrong-class verify versions musl"
+wrong-class verify versions musl hwcaps"
 
 RLDD=
 KEEP=false
@@ -105,6 +105,10 @@ LOADER=$(readelf -l "$WORK/probe" | sed -n 's/.*Requesting program interpreter: 
 DIAGNOSTICS=$("$LOADER" --list-diagnostics 2>/dev/null)
 DST_LIB=$(printf '%s\n' "$DIAGNOSTICS" | sed -n 's/^dl_dst_lib="\(.*\)"$/\1/p')
 PLATFORM=$(printf '%s\n' "$DIAGNOSTICS" | sed -n 's/^dl_platform="\(.*\)"$/\1/p')
+# The glibc-hwcaps subdirectories of the loader, the ones the CPU supports
+# being marked as searched (glibc 2.33 and later list them).
+HWCAPS=$("$LOADER" --help 2>/dev/null |
+    sed -n '/^Subdirectories of glibc-hwcaps directories/,/^$/s/^  \([^ ]*\).*/\1/p')
 
 # The objects of a case.
 lib() { # lib OUTPUT SOURCE [GCC OPTION...]
@@ -557,6 +561,40 @@ case_musl() {
     check_output "musl with a path file" 'default paths: /opt/a:/opt/b$' -v musl/a/main
 }
 
+# The glibc-hwcaps subdirectories of each directory are searched first, the
+# best one the CPU supports first (glibc 2.33 and later).
+case_hwcaps() {
+    if [ -z "$HWCAPS" ]; then
+        skip "glibc-hwcaps (the loader lists no glibc-hwcaps subdirectory)"
+        return
+    fi
+    # A copy on every subdirectory the loader knows, whether the CPU
+    # supports it or not, and on the directory itself.
+    for dir in hwcaps/lib hwcaps/llp hwcaps/first; do
+        lib "$dir/libfoo.so" foo.c
+        for subdir in $HWCAPS; do
+            lib "$dir/glibc-hwcaps/$subdir/libfoo.so" foo.c
+        done
+    done
+    prog hwcaps/rpath main.c -Lhwcaps/lib -lfoo -Wl,-rpath,'$ORIGIN/lib' -Wl,--disable-new-dtags
+    prog hwcaps/runpath main.c -Lhwcaps/lib -lfoo -Wl,-rpath,'$ORIGIN/lib' -Wl,--enable-new-dtags
+    prog hwcaps/plain main.c -Lhwcaps/lib -lfoo
+    check_ldd "glibc-hwcaps subdirectory of a DT_RPATH" hwcaps/rpath
+    check_ldd "glibc-hwcaps subdirectory of a DT_RUNPATH" hwcaps/runpath
+    check_ldd "glibc-hwcaps subdirectory of the library path" hwcaps/plain \
+        "LD_LIBRARY_PATH=$WORK/hwcaps/llp" -- --library-path "$WORK/hwcaps/llp"
+    # A file of another class on each subdirectory of the first directory
+    # is skipped.
+    for subdir in $HWCAPS; do
+        elf32 "hwcaps/first/glibc-hwcaps/$subdir/libfoo.so"
+    done
+    prog hwcaps/first/main main.c -Lhwcaps/lib -lfoo -Wl,-rpath,'$ORIGIN:$ORIGIN/../lib' \
+        -Wl,--disable-new-dtags
+    check_ldd "glibc-hwcaps subdirectory of another class" hwcaps/first/main
+    check_output "glibc-hwcaps subdirectories on -v" '^  subdirectories: glibc-hwcaps/' \
+        -v hwcaps/rpath
+}
+
 for case_name in $CASES; do
     if [ -n "$SELECTED" ]; then
         case " $SELECTED " in
@@ -584,6 +622,7 @@ for case_name in $CASES; do
     verify) case_verify ;;
     versions) case_versions ;;
     musl) case_musl ;;
+    hwcaps) case_hwcaps ;;
     esac
 done
 

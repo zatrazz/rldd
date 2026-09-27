@@ -632,7 +632,7 @@ fn glibc_release<P: AsRef<Path>>(loader: &P) -> Option<(u32, u32)> {
     glibc_release_in(&pathutils::map_file(loader).ok()?)
 }
 
-fn glibc_release_in(data: &[u8]) -> Option<(u32, u32)> {
+pub fn glibc_release_in(data: &[u8]) -> Option<(u32, u32)> {
     const BANNER: &[u8] = b" release version ";
     let start = data.windows(BANNER.len()).position(|w| w == BANNER)? + BANNER.len();
     let version = data[start..]
