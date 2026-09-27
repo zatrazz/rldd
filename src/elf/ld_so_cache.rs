@@ -294,6 +294,16 @@ struct CacheFile {
     hwcaps: Vec<Option<Vec<u8>>>,
 }
 
+// Whether DATA at OFFSET starts a new format header (glibc
+// CACHEMAGIC_VERSION_NEW).
+fn is_cache_new(data: &[u8], offset: usize) -> bool {
+    data.get(offset..).is_some_and(|data| {
+        data.len() >= CACHE_FILE_NEW_LEN
+            && data.starts_with(CACHEMAGIC_NEW.as_bytes())
+            && data[CACHEMAGIC_NEW.len()..].starts_with(CACHE_VERSION.as_bytes())
+    })
+}
+
 fn parse_ld_so_cache_old(data: &[u8]) -> Result<CacheFile> {
     let hdr: cache_file = read_at(data, 0).ok_or(Error::other("Invalid cache file"))?;
 
@@ -303,16 +313,14 @@ fn parse_ld_so_cache_old(data: &[u8]) -> Result<CacheFile> {
         return Err(Error::other("Invalid cache file"));
     }
 
-    // The string table follows the entries, and the new format header (if
-    // any) is at its start after the alignment.
+    // The string table follows the entries, and the compat format has the new
+    // format header at its start after the alignment (ldconfig makes the
+    // entry count even so there is no padding).  Without it, the old format
+    // entries are used.
     let strings = CACHE_FILE_LEN + nlibs * FILE_ENTRY_LEN;
     let offset = align_cache(strings);
-    if data.len() > (offset + CACHE_FILE_NEW_LEN) {
+    if is_cache_new(data, offset) {
         return parse_ld_so_cache_new(data, offset);
-    }
-
-    if hdr.magic != CACHEMAGIC.as_bytes() {
-        return Err(Error::other("Invalid magic"));
     }
 
     let mut entries = Vec::new();
@@ -338,12 +346,8 @@ fn parse_ld_so_cache_new(data: &[u8], initial: usize) -> Result<CacheFile> {
     let hdr: cache_file_new =
         read_at(data, initial).ok_or(Error::other("Invalid new cache header"))?;
 
-    if hdr.magic != CACHEMAGIC_NEW.as_bytes() {
-        return Err(Error::other("Invalid new cache magic"));
-    }
-    if hdr.version != CACHE_VERSION.as_bytes() {
-        return Err(Error::other("Invalid new cache version"));
-    }
+    // The old format part of a compat cache is not used either with the wrong
+    // endianness.
     if !check_cache_new_endian(hdr.flags) {
         return Err(Error::other("Invalid new cache endianness"));
     }
@@ -372,7 +376,7 @@ fn parse_ld_so_cache_new(data: &[u8], initial: usize) -> Result<CacheFile> {
 
     Ok(CacheFile {
         entries,
-        hwcaps: parse_ld_so_cache_glibc_hwcap(data, initial, hdr.extension_offset),
+        hwcaps: parse_ld_so_cache_glibc_hwcap(data, hdr.extension_offset),
     })
 }
 
@@ -391,13 +395,15 @@ fn check_cache_hwcap_extension(hwcap: u64) -> bool {
 // The glibc-hwcaps section of the extension directory at EXTENSION_OFFSET: the
 // whole directory must be within the file, and so must every section, and the
 // section must be a non empty and aligned array of 32-bit string offsets
-// (glibc cache_extension_load and cache_extension_verify).
-fn glibc_hwcaps_section(data: &[u8], initial: usize, extension_offset: u32) -> Option<&[u8]> {
+// (glibc cache_extension_load and cache_extension_verify).  The offsets are
+// relative to the start of the file, which is not the new format header on a
+// compat cache.
+fn glibc_hwcaps_section(data: &[u8], extension_offset: u32) -> Option<&[u8]> {
     // Either no extension, or a misaligned one.
     if extension_offset == 0 || !extension_offset.is_multiple_of(4) {
         return None;
     }
-    let offset = initial.checked_add(extension_offset as usize)?;
+    let offset = extension_offset as usize;
     let ext: cache_extension = read_at(data, offset)?;
     if ext.magic != cache_extension_magic {
         return None;
@@ -411,7 +417,7 @@ fn glibc_hwcaps_section(data: &[u8], initial: usize, extension_offset: u32) -> O
             .checked_mul(CACHE_EXTENSION_SECTION_LEN)
             .and_then(|len| len.checked_add(directory))
             .and_then(|offset| read_at(data, offset))?;
-        let start = initial.checked_add(section.offset as usize)?;
+        let start = section.offset as usize;
         let contents = data.get(start..start.checked_add(section.size as usize)?)?;
         // The last one wins, as for any other tag.
         if section.tag == CACHE_EXTENSION_TAG_GLIBC_HWCAPS {
@@ -428,27 +434,33 @@ fn glibc_hwcaps_section(data: &[u8], initial: usize, extension_offset: u32) -> O
 // array is indexed by the 32-bit lower bit from file_entry_new hwcap field.  A malformed
 // extension leaves no subdirectory, so no glibc-hwcaps entry is usable while the regular
 // ones still are (the loader glibc_hwcaps_priorities_init).
-fn parse_ld_so_cache_glibc_hwcap(
-    data: &[u8],
-    initial: usize,
-    extension_offset: u32,
-) -> Vec<Option<Vec<u8>>> {
-    let Some(section) = glibc_hwcaps_section(data, initial, extension_offset) else {
+//
+// The loader reads the names relative to the start of the file (glibc_hwcaps_compare),
+// while ldconfig writes them relative to the new format header, as the entry strings.
+// So on a compat cache the names do not match any subdirectory and the loader uses no
+// glibc-hwcaps entry, which is mimicked by reading them the same way.
+fn parse_ld_so_cache_glibc_hwcap(data: &[u8], extension_offset: u32) -> Vec<Option<Vec<u8>>> {
+    let Some(section) = glibc_hwcaps_section(data, extension_offset) else {
         return Vec::new();
     };
     section
         .as_chunks()
         .0
         .iter()
-        .map(|idx| read_bytes(data, initial, u32::from_ne_bytes(*idx)).map(<[u8]>::to_vec))
+        .map(|idx| read_bytes(data, 0, u32::from_ne_bytes(*idx)).map(<[u8]>::to_vec))
         .collect()
 }
 
+// Parse the cache formats the loader handles (glibc _dl_load_cache_lookup): the
+// new format alone, the old format alone, and the compat one (the old format
+// with the new one at its string table).
 fn parse_cache(data: &[u8]) -> Result<CacheFile> {
-    if data.starts_with(CACHEMAGIC.as_bytes()) {
+    if data.len() > CACHE_FILE_NEW_LEN && is_cache_new(data, 0) {
+        parse_ld_so_cache_new(data, 0)
+    } else if data.len() > CACHE_FILE_LEN && data.starts_with(CACHEMAGIC.as_bytes()) {
         parse_ld_so_cache_old(data)
     } else {
-        parse_ld_so_cache_new(data, 0)
+        Err(Error::other("Invalid cache file"))
     }
 }
 
@@ -645,6 +657,73 @@ mod tests {
         cache
     }
 
+    // An old format cache holding the given (flags, name, path) entries in
+    // that order.
+    fn build_old(entries: &[(i32, &str, &str)]) -> Vec<u8> {
+        let header = cache_file {
+            magic: CACHEMAGIC.as_bytes().try_into().unwrap(),
+            nlibs: entries.len() as u32,
+            ..Default::default()
+        };
+        let mut cache = object::pod::bytes_of(&header).to_vec();
+        let mut strings = Vec::<u8>::new();
+        let mut add = |s: &str| {
+            let offset = strings.len();
+            strings.extend_from_slice(s.as_bytes());
+            strings.push(0);
+            offset as u32
+        };
+        for (flags, name, path) in entries {
+            let entry = file_entry {
+                flags: *flags,
+                key: add(name),
+                value: add(path),
+            };
+            cache.extend_from_slice(object::pod::bytes_of(&entry));
+        }
+        cache.extend_from_slice(&strings);
+        cache
+    }
+
+    // A compat format cache, as ldconfig -c compat writes it: an old format
+    // part with the same entries (the count made even by repeating the last
+    // one, so the new format header needs no padding), the new format part at
+    // its string table (the string offsets of both relative to it), and the
+    // extension offsets relative to the file start.
+    fn build_compat(entries: &[(i32, &str, &str, u64)], hwcaps: &[&str]) -> Vec<u8> {
+        let mut new = build_cache(entries, hwcaps);
+        let nlibs = entries.len().next_multiple_of(2);
+        let header = cache_file {
+            magic: CACHEMAGIC.as_bytes().try_into().unwrap(),
+            nlibs: nlibs as u32,
+            ..Default::default()
+        };
+        let mut cache = object::pod::bytes_of(&header).to_vec();
+        for i in 0..nlibs {
+            let index = i.min(entries.len() - 1);
+            let entry: file_entry_new =
+                read_at(&new, CACHE_FILE_NEW_LEN + index * FILE_ENTRY_NEW_LEN).unwrap();
+            let entry = file_entry {
+                flags: entry.flags,
+                key: entry.key,
+                value: entry.value,
+            };
+            cache.extend_from_slice(object::pod::bytes_of(&entry));
+        }
+        assert_eq!(cache.len(), align_cache(cache.len()));
+
+        if !hwcaps.is_empty() {
+            let old = cache.len() as u32;
+            let extension = u32::from_ne_bytes(new[EXTENSION_OFFSET..][..4].try_into().unwrap());
+            let section = extension as usize + CACHE_EXTENSION_LEN + 8;
+            set_u32(&mut new, EXTENSION_OFFSET, extension + old);
+            let offset = u32::from_ne_bytes(new[section..][..4].try_into().unwrap());
+            set_u32(&mut new, section, offset + old);
+        }
+        cache.extend_from_slice(&new);
+        cache
+    }
+
     // Replace the first FROM bytes of CACHE with TO.
     fn patch(cache: &mut [u8], from: &[u8], to: &[u8]) {
         let at = cache.windows(from.len()).position(|w| w == from).unwrap();
@@ -800,6 +879,54 @@ mod tests {
         ] {
             assert_eq!(select(&cache, supported)["liblzma.so.5"], dir);
         }
+    }
+
+    #[test]
+    fn old_format() {
+        // More strings than a new format header, which does not make it a
+        // compat cache.
+        let cache = select(
+            &build_old(&[
+                (
+                    FLAG_ELF_LIBC6,
+                    "libc.so.6",
+                    "/usr/lib/i386-linux-gnu/libc.so.6",
+                ),
+                (X86_64, "libc.so.6", "/usr/lib/x86_64-linux-gnu/libc.so.6"),
+                (X86_64, "libm.so.6", "/usr/lib/x86_64-linux-gnu/libm.so.6"),
+            ]),
+            &[],
+        );
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache["libc.so.6"], "/usr/lib/x86_64-linux-gnu");
+        assert_eq!(cache["libm.so.6"], "/usr/lib/x86_64-linux-gnu");
+    }
+
+    #[test]
+    fn compat_format() {
+        let cache = build_compat(
+            &[
+                (
+                    X86_64,
+                    "liblzma.so.5",
+                    "/opt/x86-64-v3/liblzma.so.5",
+                    named(0),
+                ),
+                (X86_64, "liblzma.so.5", "/opt/liblzma.so.5", 0),
+                (X86_64, "libm.so.6", "/usr/lib/libm.so.6", 0),
+            ],
+            &["x86-64-v3"],
+        );
+        // The extension is found at its file offset, but the loader reads the
+        // subdirectory name from the file start instead of the new format
+        // header ldconfig writes it relative to, so it does not match.
+        let file = parse_cache(&cache).unwrap();
+        assert_eq!(file.hwcaps.len(), 1);
+        assert_ne!(file.hwcaps[0].as_deref(), Some(&b"x86-64-v3"[..]));
+
+        let cache = select(&cache, &["x86-64-v3", "x86-64-v2"]);
+        assert_eq!(cache["liblzma.so.5"], "/opt");
+        assert_eq!(cache["libm.so.6"], "/usr/lib");
     }
 
     #[test]
