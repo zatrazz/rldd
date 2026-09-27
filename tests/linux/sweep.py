@@ -12,7 +12,7 @@ The report lines are tab separated:
   UNTRACED n         objects ldd traces nothing for (another machine, static)
   UNREADABLE n       objects without read permission
   UNREADABLE-DIRS n  directories the walk could not enter
-  PANIC path what    the object made rldd panic, or time out
+  PANIC path what    the object made rldd panic, crash, or time out
   REFUSED path what  ldd traces the object, rldd refused it
   DIFF path what     the two listings differ
   UNRESOLVED path name
@@ -43,14 +43,24 @@ RLDD = None
 
 
 def run(cmd):
+    """(returncode, stdout, stderr), the return code being negative for a
+    process killed by a signal, and None when it did not run to completion
+    (a timeout, with 'timeout' as the error, or a failure to start it)."""
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
                            timeout=300, env=ENV)
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
-        return -1, "", "timeout"
+        return None, "", "timeout"
     except OSError as e:
-        return -1, "", str(e)
+        return None, "", str(e)
+
+
+def signal_name(rc):
+    try:
+        return signal.Signals(-rc).name
+    except ValueError:
+        return "signal %d" % -rc
 
 
 ET_EXEC, ET_DYN = 2, 3
@@ -255,7 +265,7 @@ def parse_ldd(rc, out, err):
         if m:
             deps.add((m.group(1), NOT_FOUND))
     if rc != 0 and not out.strip():
-        return (err.strip() or "exit status %d" % rc).split("\n")[0], deps, bare
+        return (err.strip() or "exit status %s" % rc).split("\n")[0], deps, bare
     for line in out.split("\n"):
         line = line.strip()
         if not line:
@@ -360,18 +370,26 @@ def check(path):
         return [("UNTRACED",)]
 
     rc, out, err = run([RLDD, "-l", path])
-    if "panicked" in err or (rc == -1 and err == "timeout"):
+    # A panic, a timeout, or a crash (a signal, such as the SIGSEGV of a
+    # stack overflow or the SIGABRT of a panic with the abort strategy).
+    if "panicked" in err or (rc is None and err == "timeout") or (rc is not None and rc < 0):
         what = [l for l in err.split("\n") if "panicked" in l]
-        return [("PANIC", path, what[0] if what else err.strip())]
+        if what:
+            what = what[0]
+        elif rc is not None:
+            what = "killed by %s" % signal_name(rc)
+        else:
+            what = err.strip()
+        return [("PANIC", path, what)]
     if rc != 0 and not out:
         rldd_status, rldd_deps = "error", set()
-        refused = err.strip().split("\n")[0] if err.strip() else "exit status %d" % rc
+        refused = err.strip().split("\n")[0] if err.strip() else "exit status %s" % rc
     else:
         rldd_status, rldd_deps = parse_rldd(out)
         refused = rldd_status
 
     rc, out, err = run(["ldd", path])
-    if rc == -1 and err == "timeout":
+    if rc is None and err == "timeout":
         return [("PANIC", path, "ldd timeout")]
     ldd_status, ldd_deps, ldd_bare = parse_ldd(rc, out, err)
     if ldd_status not in ("ok", "static"):

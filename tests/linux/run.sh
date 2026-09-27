@@ -208,8 +208,8 @@ check_sweep() {
         DIFF:*) fail "$n objects list other dependencies or paths than ldd" ;;
         REFUSED:0) pass "every object ldd traces is read" ;;
         REFUSED:*) fail "$n objects ldd traces were refused by rldd" ;;
-        PANIC:0) pass "no object made rldd panic" ;;
-        PANIC:*) fail "$n objects made rldd panic" ;;
+        PANIC:0) pass "no object made rldd panic or crash" ;;
+        PANIC:*) fail "$n objects made rldd panic or crash" ;;
         esac
         printf '%s\n' "$failures" | grep . | head -10 |
             awk -F'\t' '{ printf "        %s\n            %s\n", $2, $3 }'
@@ -230,8 +230,10 @@ run_host() {
 
     if [ "$host" = local ]; then
         printf '\n%s==> local  %s  %s%s\n' "$C_BOLD" "$(uname -m)" "$(host_libc local)" "$C_OFF"
-        rldd=$REPO_ROOT/target/release/rldd
-        if [ ! -x "$rldd" ] && ! (cd "$REPO_ROOT" && cargo build --quiet -r); then
+        rldd=${CARGO_TARGET_DIR:-$REPO_ROOT/target}/release/rldd
+        # Always built, which is a no-op when the binary is up to date, so an
+        # edit since the last build is not swept with the stale binary.
+        if ! (cd "$REPO_ROOT" && cargo build --quiet -r); then
             fail "cargo build failed"
             return 1
         fi
@@ -270,7 +272,7 @@ run_host() {
     printf '\n%s==> %s  %s  %s  (%s)%s\n' "$C_BOLD" "$host" "$arch" "$libc" "$target" "$C_OFF"
 
     build_target "$target" || return 1
-    rldd=$REPO_ROOT/target/$target/release/rldd
+    rldd=${CARGO_TARGET_DIR:-$REPO_ROOT/target}/$target/release/rldd
 
     host_sh "$host" "rm -rf $REMOTE_DIR && mkdir -p $REMOTE_DIR"
     if ! scp -q -o BatchMode=yes "$rldd" "$SCRIPT_DIR/sweep.py" "$host:$REMOTE_DIR/" </dev/null; then
