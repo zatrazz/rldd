@@ -1029,6 +1029,23 @@ mod tests {
     }
 
     #[test]
+    fn glibc_hwcaps_priorities_merge() {
+        // The loader merges both lists sorted by name, so a name out of the
+        // file has no priority, and neither has one out of order.
+        let name = |s: &str| Some(s.as_bytes().to_vec());
+        let hwcaps = [
+            name("x86-64-v2"),
+            None,
+            name("x86-64-v3"),
+            name("x86-64-v5"),
+            name("x86-64-v4"),
+        ];
+        let supported = ["x86-64-v4", "x86-64-v3", "x86-64-v2"];
+        assert_eq!(hwcaps_priorities(&hwcaps, &supported), [3, 0, 2, 0, 0]);
+        assert_eq!(hwcaps_priorities(&hwcaps, &[]), [0; 5]);
+    }
+
+    #[test]
     fn glibc_hwcaps_entry_isa_level() {
         // ldconfig records the x86 ISA level a glibc-hwcaps library requires
         // (the index of the highest GNU_PROPERTY_X86_ISA_1_NEEDED bit), which
