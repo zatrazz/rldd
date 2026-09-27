@@ -28,6 +28,12 @@ impl Loader for OpenBsd {
         }
     }
 
+    // _dl_find_shlib scans the hints directory list, and only without a valid
+    // hints file the default /usr/lib.
+    fn load_system_dirs(ld_cache: &Option<Self::Cache>) -> bool {
+        ld_cache.is_none()
+    }
+
     fn origin_directory<P: AsRef<Path>>(filename: &P, _melc: Option<&ElfInfo>) -> String {
         canonical_origin_directory(filename)
     }
