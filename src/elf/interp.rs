@@ -52,64 +52,55 @@ pub fn is_glibc(interp: &Option<String>) -> bool {
     }
 }
 
-// musl interp is in the form of ld-musl-$(ARCH)$(SUBARCH).so.1
-const MUSL_SUBARCH_MIPS: &[&str] = &["r6", "r6el", "el", "r6-sf", "r6el-sf", "el-sf"];
+// musl interp is in the form of ld-musl-$(ARCH)$(SUBARCH).so.1, where the
+// musl configure script appends the SUBARCH variants of each ARCH in this
+// order (for instance the ISA revision, then the endianness, then the float
+// ABI on MIPS).
+const MUSL_SUBARCH_MIPS: &[&str] = &["", "r6", "el", "r6el", "-sf", "r6-sf", "el-sf", "r6el-sf"];
 
-const MUSL_SUBARCH_SH: &[&str] = &[
-    "eb",
-    "-nofpu",
-    "-fdpic",
-    "-nofpu-fdpic",
-    "eb-nofpu",
-    "eb-fdpic",
-    "eb-nofpu-fdpic",
+const MUSL_ARCHS: &[(&str, &[&str])] = &[
+    ("aarch64", &["", "_be"]),
+    ("arm", &["", "eb", "hf", "ebhf"]),
+    ("i386", &[""]),
+    // The soft and single float ABIs are exclusive.
+    ("loongarch64", &["", "-sf", "-sp"]),
+    ("m68k", &["", "-fp64", "-sf"]),
+    ("microblaze", &["", "el"]),
+    ("mips", MUSL_SUBARCH_MIPS),
+    ("mips64", MUSL_SUBARCH_MIPS),
+    ("mipsn32", MUSL_SUBARCH_MIPS),
+    ("nt32", &[""]),
+    ("nt64", &[""]),
+    ("or1k", &[""]),
+    ("powerpc", &["", "-sf"]),
+    ("powerpc64", &["", "le"]),
+    ("riscv32", &["", "-sf", "-sp"]),
+    ("riscv64", &["", "-sf", "-sp"]),
+    ("s390x", &[""]),
+    // The -nofpu variant is the one without an FPU.
+    (
+        "sh",
+        &[
+            "",
+            "eb",
+            "-nofpu",
+            "eb-nofpu",
+            "-fdpic",
+            "eb-fdpic",
+            "-nofpu-fdpic",
+            "eb-nofpu-fdpic",
+        ],
+    ),
+    ("x32", &[""]),
+    ("x86_64", &[""]),
 ];
 
-fn check_name_suffix(interp: &str, abi: &str, suffixes: Option<&Vec<&str>>) -> bool {
-    if interp.starts_with(abi) {
-        if interp.len() == abi.len() {
-            return true;
-        }
-        if let Some(interp) = interp.get(abi.len()..) {
-            if let Some(suffixes) = suffixes {
-                for suffix in suffixes {
-                    if interp == *suffix {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
 fn is_musl_arch(interp: &str) -> bool {
-    if interp.starts_with("arm") {
-        return check_name_suffix(interp, "arm", Some(&vec!["eb", "hf", "ebhf"]));
-    } else if interp.starts_with("aarch64") {
-        return check_name_suffix(interp, "aarch64", Some(&vec!["_be"]));
-    } else if interp.starts_with("m68k") {
-        return check_name_suffix(interp, "m68k", Some(&vec!["-fp64", "-sf"]));
-    } else if interp.starts_with("mips64") {
-        return check_name_suffix(interp, "mips64", Some(&MUSL_SUBARCH_MIPS.to_vec()));
-    } else if interp.starts_with("mipsn32") {
-        return check_name_suffix(interp, "mipsn32", Some(&MUSL_SUBARCH_MIPS.to_vec()));
-    } else if interp.starts_with("mips") {
-        return check_name_suffix(interp, "mips", Some(&MUSL_SUBARCH_MIPS.to_vec()));
-    } else if interp.starts_with("powerpc64") {
-        return check_name_suffix(interp, "powerpc64", Some(&vec!["le"]));
-    } else if interp.starts_with("powerpc") {
-        return check_name_suffix(interp, "powerpc", Some(&vec!["sf"]));
-    } else if interp.starts_with("microblaze") {
-        return check_name_suffix(interp, "microblaze", Some(&vec!["el"]));
-    } else if interp.starts_with("riscv64") {
-        return check_name_suffix(interp, "riscv64", Some(&vec!["sf", "-sf-sp", "-sp"]));
-    } else if interp.starts_with("sh") {
-        return check_name_suffix(interp, "sh", Some(&MUSL_SUBARCH_SH.to_vec()));
-    } else if ["nt32", "nt64", "or1k", "s390x", "x86_64", "x32", "i386"].contains(&interp) {
-        return true;
-    }
-    false
+    MUSL_ARCHS.iter().any(|(arch, suffixes)| {
+        interp
+            .strip_prefix(arch)
+            .is_some_and(|suffix| suffixes.contains(&suffix))
+    })
 }
 
 pub fn is_musl(interp: &Option<String>) -> bool {
@@ -176,5 +167,44 @@ mod tests {
         assert!(is_musl(&Some("ld-musl-sh-nofpu-fdpic.so.1".to_string())));
         assert!(is_musl(&Some("ld-musl-sheb-nofpu.so.1".to_string())));
         assert!(!is_musl(&Some("ld-musl-shhf.so.1".to_string())));
+
+        let musl = |arch: &str| is_musl(&Some(format!("/lib/ld-musl-{arch}.so.1")));
+        // Every ISA revision, endianness and float ABI combination of the
+        // three MIPS ABIs.
+        for arch in ["mips", "mips64", "mipsn32"] {
+            for suffix in ["", "r6", "el", "r6el", "-sf", "r6-sf", "el-sf", "r6el-sf"] {
+                assert!(musl(&format!("{arch}{suffix}")));
+            }
+            assert!(!musl(&format!("{arch}sf")));
+            assert!(!musl(&format!("{arch}elr6")));
+        }
+        assert!(!musl("mips64n32"));
+        // The float ABI variants take a dash on powerpc, RISC-V and LoongArch.
+        for arch in ["powerpc", "riscv32", "riscv64", "loongarch64"] {
+            assert!(musl(arch));
+            assert!(musl(&format!("{arch}-sf")));
+            assert!(!musl(&format!("{arch}sf")));
+            assert!(!musl(&format!("{arch}-sf-sp")));
+        }
+        for arch in ["riscv32", "riscv64", "loongarch64"] {
+            assert!(musl(&format!("{arch}-sp")));
+        }
+        for arch in [
+            "armebhf",
+            "armhf",
+            "microblazeel",
+            "or1k",
+            "s390x",
+            "x32",
+            "m68k-fp64",
+            "powerpc64le",
+            "i386",
+            "sheb-nofpu-fdpic",
+        ] {
+            assert!(musl(arch));
+        }
+        assert!(!musl("x86_64el"));
+        assert!(!musl("armhfeb"));
+        assert!(!musl("powerpc64-sf"));
     }
 }
