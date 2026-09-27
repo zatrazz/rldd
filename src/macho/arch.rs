@@ -69,16 +69,19 @@ const ARM64E_V1: Slice = Slice::new(
 // any other arm64 process also loads them, in preference to the arm64 ones.
 static LOAD_ARM64E: &[Slice] = &[ARM64E];
 static LOAD_ARM64E_KEYS_OFF: &[Slice] = &[ARM64E, ARM64E_V1, ARM64, ARM64_V8];
+// An x86_64 process prefers the x86_64h slices on a Haswell or newer host.
 static LOAD_MAC: &[Slice] = &[X86_64];
 static LOAD_MAC_HASWELL: &[Slice] = &[X86_64H, X86_64];
 // The main executable slice an Apple Silicon host launches, where an x86_64
-// one runs under Rosetta (launch_macAppleSilicon).
+// one runs under Rosetta (launch_macAppleSilicon).  An Intel host launches
+// the slices an x86_64 process loads.
 static LAUNCH_APPLE_SILICON: &[Slice] = &[ARM64E, ARM64, X86_64];
 
-// The dyld shared cache names, in preference order.  There is a single
-// arm64e cache for all the arm64 processes.
+// The dyld shared cache names, in preference order (getMacOSCachePath).
+// There is a single arm64e cache for all the arm64 processes, and the
+// x86_64h one is only tried on a Haswell or newer host.
 static ARM64E_CACHE: &[&str] = &["arm64e"];
-static X86_64_CACHE: &[&str] = &["x86_64", "x86_64h"];
+static X86_64_CACHE: &[&str] = &["x86_64"];
 static X86_64H_CACHE: &[&str] = &["x86_64h", "x86_64"];
 
 // The architecture names accepted by --arch, mimicking dyld_info and otool.
@@ -119,7 +122,7 @@ impl Arch {
                 name: n,
                 graded: vec![*slice],
                 explicit: true,
-                cache_names: cache_names(slice.cputype, *slice == X86_64H),
+                cache_names: cache_names(slice.cputype, *slice == X86_64H || host_is_haswell()),
             })
             .ok_or_else(|| {
                 format!(
@@ -138,6 +141,7 @@ impl Arch {
     fn host() -> Arch {
         let (name, graded) = match std::env::consts::ARCH {
             "aarch64" => ("arm64", LAUNCH_APPLE_SILICON),
+            "x86_64" if host_is_haswell() => ("x86_64", LOAD_MAC_HASWELL),
             "x86_64" => ("x86_64", LOAD_MAC),
             _ => ("unknown", &[][..]),
         };
@@ -145,9 +149,9 @@ impl Arch {
             name,
             graded: graded.to_vec(),
             explicit: false,
-            cache_names: graded
-                .first()
-                .map_or(&[][..], |slice| cache_names(slice.cputype, false)),
+            cache_names: graded.first().map_or(&[][..], |slice| {
+                cache_names(slice.cputype, host_is_haswell())
+            }),
         }
     }
 
@@ -156,9 +160,12 @@ impl Arch {
     // of its dependencies (ProcessConfig::Process::getMainArchs) and selects
     // the dyld cache flavor.  An input that is not a main executable (a
     // dylib, or a bundle) may be loaded by any process of its cpu type, so
-    // it takes the images an arm64 process with the keys off loads.
+    // it takes the images an arm64 process with the keys off loads.  The
+    // x86_64 grading and cache follow the host capability, as an x86_64h
+    // main executable only runs on a Haswell or newer host anyway.
     pub fn process(cputype: CpuType, cpusubtype: CpuSubtype, filetype: FileType) -> Arch {
-        let haswell = cputype == CPU_TYPE_X86_64 && cpusubtype.id() == CPU_SUBTYPE_X86_64_H;
+        let haswell = cputype == CPU_TYPE_X86_64
+            && (cpusubtype.id() == CPU_SUBTYPE_X86_64_H || host_is_haswell());
         let graded = match cputype {
             CPU_TYPE_ARM64 if filetype == MH_EXECUTE && cpusubtype.id() == CPU_SUBTYPE_ARM64E => {
                 LOAD_ARM64E.to_vec()
@@ -214,6 +221,61 @@ impl Arch {
             .or_else(|| find(|graded, cputype, _| graded.cputype == cputype))
             .or_else(|| (!self.explicit && !slices.is_empty()).then_some(0))
     }
+}
+
+// Whether the host is a Haswell or newer Intel machine, where dyld prefers
+// the x86_64h slices and cache.  dyld checks the host_info cpu subtype
+// (SyscallDelegate::onHaswell), which the kernel sets to x86_64h for a
+// processor with the Haswell features.  Only an x86_64 process can run the
+// same check, natively or under Rosetta, where the kernel answers it the way
+// it does to dyld.  A native arm64 build cannot query what a translated
+// process gets, and takes it as not Haswell.
+#[cfg(target_arch = "x86_64")]
+fn host_is_haswell() -> bool {
+    static HASWELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HASWELL.get_or_init(|| {
+        // The host_basic_info structure from <mach/host_info.h>, of which
+        // only the cpu subtype is read.
+        #[repr(C)]
+        #[derive(Default)]
+        #[allow(dead_code)]
+        struct HostBasicInfo {
+            max_cpus: i32,
+            avail_cpus: i32,
+            memory_size: u32,
+            cpu_type: i32,
+            cpu_subtype: i32,
+            cpu_threadtype: i32,
+            physical_cpu: i32,
+            physical_cpu_max: i32,
+            logical_cpu: i32,
+            logical_cpu_max: i32,
+            max_mem: u64,
+        }
+        const HOST_BASIC_INFO: i32 = 1;
+        extern "C" {
+            fn mach_host_self() -> u32;
+            fn host_info(host: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+        }
+
+        let mut info = HostBasicInfo::default();
+        let mut count = (std::mem::size_of::<HostBasicInfo>() / std::mem::size_of::<i32>()) as u32;
+        // SAFETY: host_info writes at most COUNT integers to INFO.
+        let ret = unsafe {
+            host_info(
+                mach_host_self(),
+                HOST_BASIC_INFO,
+                (&mut info as *mut HostBasicInfo).cast(),
+                &mut count,
+            )
+        };
+        ret == 0 && info.cpu_subtype as u32 == CPU_SUBTYPE_X86_64_H.0
+    })
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn host_is_haswell() -> bool {
+    false
 }
 
 // The dyld shared cache names of a cpu type, in preference order.
@@ -285,9 +347,17 @@ mod tests {
             assert_eq!(keys_off.cache_names(), ["arm64e"]);
         }
 
+        // An x86_64 process prefers the x86_64h slices and cache on a
+        // Haswell or newer host.
         let x86_64 = process(X86_64, MH_EXECUTE);
         assert_eq!(x86_64.name(), "x86_64");
-        assert_eq!(x86_64.cache_names()[0], "x86_64");
+        if host_is_haswell() {
+            assert_eq!(x86_64.graded, LOAD_MAC_HASWELL);
+            assert_eq!(x86_64.cache_names(), ["x86_64h", "x86_64"]);
+        } else {
+            assert_eq!(x86_64.graded, LOAD_MAC);
+            assert_eq!(x86_64.cache_names(), ["x86_64"]);
+        }
         let x86_64h = process(X86_64H, MH_EXECUTE);
         assert_eq!(x86_64h.name(), "x86_64h");
         assert_eq!(x86_64h.graded, [X86_64H, X86_64]);
@@ -319,7 +389,7 @@ mod tests {
         let fat = [slice(ARM64), slice(X86_64H)];
         assert_eq!(keys_off.best_slice(&fat), Some(0));
         assert_eq!(keys_on.best_slice(&fat), None);
-        assert_eq!(x86_64.best_slice(&fat), None);
+        assert_eq!(x86_64.best_slice(&fat), host_is_haswell().then_some(1));
         let x86_64h = process(X86_64H, MH_EXECUTE);
         assert_eq!(x86_64h.best_slice(&fat), Some(1));
         assert_eq!(
@@ -366,11 +436,31 @@ mod tests {
             Some(1)
         );
         assert_eq!(x86_64.input_slice(&[slice(X86_64H)]), Some(0));
-        assert_eq!(x86_64.cache_names()[0], "x86_64");
         assert_eq!(
-            Arch::new(Some("x86_64h")).unwrap().cache_names()[0],
-            "x86_64h"
+            x86_64.cache_names()[0],
+            if host_is_haswell() {
+                "x86_64h"
+            } else {
+                "x86_64"
+            }
+        );
+        assert_eq!(
+            Arch::new(Some("x86_64h")).unwrap().cache_names(),
+            ["x86_64h", "x86_64"]
         );
         assert!(Arch::new(Some("sparc")).is_err());
+    }
+
+    #[test]
+    fn host_launch() {
+        // An Intel host launches the x86_64h slice when it runs it.
+        let host = Arch::new(None).unwrap();
+        let fat = [slice(ARM64), slice(X86_64), slice(X86_64H)];
+        match std::env::consts::ARCH {
+            "aarch64" => assert_eq!(host.input_slice(&fat), Some(0)),
+            "x86_64" if host_is_haswell() => assert_eq!(host.input_slice(&fat), Some(2)),
+            "x86_64" => assert_eq!(host.input_slice(&fat), Some(1)),
+            _ => {}
+        }
     }
 }
