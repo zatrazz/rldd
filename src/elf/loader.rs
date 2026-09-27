@@ -70,6 +70,12 @@ pub(super) trait Loader {
         Vec::new()
     }
 
+    // The entries of the --preload LIST (LD_PRELOAD) for the ELC input
+    // object.  Most loaders separate them with colons or whitespace.
+    fn preload_list(list: &str, _elc: &ElfInfo) -> Vec<String> {
+        search_path::from_preload(list)
+    }
+
     // Record the loader specific flavor of the parsed object, handed down
     // from MELC, the object loading it (None for the input object).
     fn handle_loader(_elc: &mut ElfInfo, _melc: Option<&ElfInfo>) {}
@@ -98,13 +104,17 @@ pub(super) trait Loader {
     // Expand the dynamic string tokens of INPUT, an entry of the SITE kind
     // for the ELC object, or None when the loader drops the entry because a
     // token has no value.  Most loaders replace $ORIGIN and $PLATFORM, with
-    // or without braces, wherever they appear.
+    // or without braces, wherever they appear on the search lists and the
+    // dependency names of an object.
     fn expand_tokens(
         input: &str,
-        _site: TokenSite,
+        site: TokenSite,
         elc: &ElfInfo,
         platform: Option<&String>,
     ) -> Option<String> {
+        if matches!(site, TokenSite::LibraryPath | TokenSite::Preload) {
+            return Some(input.to_string());
+        }
         let mut r = input.to_string();
         if r.contains("$ORIGIN") || r.contains("${ORIGIN}") {
             r = replace_token(&r, "ORIGIN", elc.origin.as_deref()?);

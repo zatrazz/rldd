@@ -119,8 +119,18 @@ impl SearchPathVecExt for SearchPathVec {
     }
 }
 
-// Not used by the Mach-O backend.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+// A list of the existing directories of STRING, separated by any of DELIM,
+// with the empty entries skipped.  The Linux, NetBSD and illumos loaders
+// split their lists on their own.
+#[cfg_attr(
+    any(
+        target_os = "linux",
+        target_os = "netbsd",
+        target_os = "illumos",
+        target_os = "solaris"
+    ),
+    allow(dead_code)
+)]
 pub fn from_string<S: AsRef<str>>(string: S, delim: &[char]) -> SearchPathVec {
     let mut r = SearchPathVec::new();
     for path in string.as_ref().split(delim) {

@@ -79,7 +79,7 @@ fn same_path_byte(a: u8, b: u8) -> bool {
 }
 
 // The lines of FILENAME, for the loader configuration files.
-#[cfg(any(target_os = "linux", target_os = "netbsd"))]
+#[cfg(any(target_os = "netbsd", all(test, target_os = "linux")))]
 pub fn read_lines<P: AsRef<Path>>(
     filename: P,
 ) -> Result<std::io::Lines<std::io::BufReader<fs::File>>> {

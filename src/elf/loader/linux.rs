@@ -41,6 +41,27 @@ impl Loader for Linux {
         Vec::new()
     }
 
+    // The glibc loader splits LD_PRELOAD on spaces and colons only, and
+    // silently skips an entry that does not fit a path (handle_preload_list),
+    // while the musl one splits it on any whitespace or colon (load_preload).
+    fn preload_list(list: &str, elc: &ElfInfo) -> Vec<String> {
+        const PATH_MAX: usize = 4096;
+        let entries: Vec<&str> = if elc.is_musl {
+            // The C isspace set, along with the colon.
+            list.split([' ', '\t', '\n', '\x0b', '\x0c', '\r', ':'])
+                .collect()
+        } else {
+            list.split([' ', ':'])
+                .filter(|entry| entry.len() < PATH_MAX)
+                .collect()
+        };
+        entries
+            .into_iter()
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
     fn handle_loader(elc: &mut ElfInfo, melc: Option<&ElfInfo>) {
         if let Some(melc) = melc {
             elc.dst_lib = melc.dst_lib.clone();
@@ -65,9 +86,11 @@ impl Loader for Linux {
 
     // The glibc loader takes an empty entry as the current directory
     // (fillin_rpath), although a list without any entry is ignored
-    // (decompose_rpath).  The musl loader expands the tokens of the whole list
-    // at once (fixup_rpath), and splits it on colons and newlines skipping the
-    // empty entries (path_open).
+    // (decompose_rpath), and also splits LD_LIBRARY_PATH on semicolons
+    // (_dl_init_paths).  The musl loader expands the tokens of a DT_RPATH or
+    // DT_RUNPATH list at once (fixup_rpath), but none on LD_LIBRARY_PATH, and
+    // splits them on colons and newlines skipping the empty entries
+    // (path_open).
     fn search_list(
         list: &str,
         site: TokenSite,
@@ -75,8 +98,12 @@ impl Loader for Linux {
         platform: Option<&String>,
     ) -> Vec<Result<String, String>> {
         if elc.is_musl {
-            let Some(list) = musl_expand(list, elc.origin.as_deref()) else {
-                return vec![Err(list.to_string())];
+            let list = match site {
+                TokenSite::SearchPath => match musl_expand(list, elc.origin.as_deref()) {
+                    Some(list) => list,
+                    None => return vec![Err(list.to_string())],
+                },
+                _ => list.to_string(),
             };
             return list
                 .split([':', '\n'])
@@ -87,7 +114,11 @@ impl Loader for Linux {
         if list.is_empty() {
             return Vec::new();
         }
-        list.split(':')
+        let separators: &[char] = match site {
+            TokenSite::LibraryPath => &[':', ';'],
+            _ => &[':'],
+        };
+        list.split(separators)
             .map(|entry| match entry {
                 "" => Ok(".".to_string()),
                 _ => {
@@ -98,15 +129,16 @@ impl Loader for Linux {
     }
 
     // The glibc loader expands $ORIGIN, $PLATFORM and $LIB on the search lists
-    // and the dependency names, while the musl one only expands the search
-    // lists.
+    // (LD_LIBRARY_PATH included), the dependency names, and the preload
+    // entries naming a path (the bare names are searched as is), while the
+    // musl one only expands the DT_RPATH and DT_RUNPATH lists.
     fn expand_tokens(
         input: &str,
-        _site: TokenSite,
+        site: TokenSite,
         elc: &ElfInfo,
         platform: Option<&String>,
     ) -> Option<String> {
-        if elc.is_musl {
+        if elc.is_musl || (site == TokenSite::Preload && !input.contains('/')) {
             return Some(input.to_string());
         }
         let platform = platform

@@ -493,7 +493,7 @@ fn match_elf_header(a1: &ElfInfo, a2: &ElfInfo) -> bool {
 // - system_dirs: system defaults deirectories based on binary architecture.
 struct Config<'a> {
     ld_preload: &'a [String],
-    ld_library_path: &'a search_path::SearchPathVec,
+    ld_library_path: search_path::SearchPathVec,
     ld_cache: &'a Option<LoaderCache>,
     system_dirs: search_path::SearchPathVec,
     platform: Option<&'a String>,
@@ -524,7 +524,7 @@ fn searched_locations(config: &Config, elc: &ElfInfo, dependency: &str) -> Vec<S
                 }
             }
             SearchStep::LibraryPath => {
-                push_searched(&mut r, "library path", config.ld_library_path)
+                push_searched(&mut r, "library path", &config.ld_library_path)
             }
             SearchStep::Runpath => push_searched(&mut r, "runpath", &elc.runpath),
             SearchStep::Cache => {
@@ -561,6 +561,12 @@ enum TokenSite {
     SearchPath,
     // A DT_NEEDED, DT_AUXILIARY or DT_FILTER entry.
     Needed,
+    // A --library-path (LD_LIBRARY_PATH) entry, expanded for the input
+    // object.
+    LibraryPath,
+    // A --preload (LD_PRELOAD) or ld.so.preload entry, expanded for the input
+    // object.
+    Preload,
 }
 
 fn print_search_path_information<P: AsRef<Path>>(filename: &P, config: &Config, elc: &ElfInfo) {
@@ -575,7 +581,7 @@ fn print_search_path_information<P: AsRef<Path>>(filename: &P, config: &Config, 
         filename.as_ref().display(),
         search_path::format_list(&elc.rpath),
         search_path::format_entries(config.ld_preload.iter().map(String::as_str)),
-        search_path::format_list(config.ld_library_path),
+        search_path::format_list(&config.ld_library_path),
         search_path::format_list(&elc.runpath),
         DepMode::LdCache,
         config
@@ -608,12 +614,14 @@ fn find_musl_loader() -> Option<String> {
 }
 
 // The resolution context: the loader search cache along with the command line
-// settings.
+// settings.  The --preload and --library-path lists are kept as given, since
+// how the loader splits them and expands their tokens depends on the input
+// object.
 pub struct ElfContext {
     // Lazy loaded if the binary has a loader that actually supports it.
     ld_cache: Option<LoaderCache>,
-    ld_preload: Vec<String>,
-    ld_library_path: search_path::SearchPathVec,
+    ld_preload: String,
+    ld_library_path: String,
     platform: Option<String>,
     all: bool,
     verbose: bool,
@@ -622,12 +630,33 @@ pub struct ElfContext {
 pub fn create_context(opts: &crate::Options) -> Result<ElfContext, String> {
     Ok(ElfContext {
         ld_cache: None,
-        ld_preload: search_path::from_preload(&opts.preload),
-        ld_library_path: search_path::from_string(&opts.library_path, &[':']),
+        ld_preload: opts.preload.clone(),
+        ld_library_path: opts.library_path.clone(),
         platform: opts.platform.clone(),
         all: opts.all,
         verbose: opts.verbose,
     })
+}
+
+// The --library-path directories for the ELC input object, with the entries
+// the token expansion drops recorded on it.
+fn library_path_list(
+    list: &str,
+    elc: &mut ElfInfo,
+    platform: Option<&String>,
+) -> search_path::SearchPathVec {
+    use search_path::SearchPathVecExt;
+
+    let mut r = search_path::SearchPathVec::new();
+    for entry in Rtld::search_list(list, TokenSite::LibraryPath, elc, platform) {
+        match entry {
+            Ok(dir) => {
+                r.add_path(&dir);
+            }
+            Err(entry) => elc.unexpanded.push(entry),
+        }
+    }
+    r
 }
 
 pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::io::Error> {
@@ -649,12 +678,6 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
     // The cache/hints/config file is usually an optional file and failing to open it
     // does not incur on a resolution failure.
     Rtld::load_so_cache(&mut ctx.ld_cache, &filename, &elc);
-
-    // Same for glibc ld.so.preload file.
-    let mut preload = ctx.ld_preload.to_vec();
-    // glibc first parses LD_PRELOAD and then ld.so.preload.
-    // We need a new vector for the case of binaries with different interpreters.
-    preload.extend(Rtld::load_ld_so_preload(&elc.interp));
 
     #[cfg(target_os = "linux")]
     let loader = elc.interp.clone().or_else(|| {
@@ -682,6 +705,13 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
     }
 
     expand_object(&mut elc, ctx.platform.as_ref());
+    let ld_library_path = library_path_list(&ctx.ld_library_path, &mut elc, ctx.platform.as_ref());
+
+    // Same for glibc ld.so.preload file.
+    let mut preload = Rtld::preload_list(&ctx.ld_preload, &elc);
+    // glibc first parses LD_PRELOAD and then ld.so.preload.
+    // We need a new vector for the case of binaries with different interpreters.
+    preload.extend(Rtld::load_ld_so_preload(&elc.interp));
 
     // The trace reports an object without any DT_NEEDED entry as statically
     // linked, and does not list the filtees of the root object (it lists the ones of
@@ -702,7 +732,7 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
 
     let config = Config {
         ld_preload: &preload,
-        ld_library_path: &ctx.ld_library_path,
+        ld_library_path,
         ld_cache: &ctx.ld_cache,
         system_dirs,
         platform: ctx.platform.as_ref(),
@@ -813,9 +843,31 @@ fn resolve_dependencies(
     while let Some(item) = queue.pop_front() {
         let (elc, refpath, namespace) = &parents[item.parent];
 
+        // The tokens of a preload entry are expanded for the main object, and
+        // an entry whose expansion fails is not loaded.
+        let dependency = if item.preload {
+            match Rtld::expand_tokens(
+                &item.dependency,
+                TokenSite::Preload,
+                &parents[0].0,
+                config.platform,
+            ) {
+                Some(dependency) => dependency,
+                None => {
+                    deptree.addnode(
+                        DepNode::not_found(item.dependency.clone(), Vec::new()),
+                        item.depp,
+                    );
+                    continue;
+                }
+            }
+        } else {
+            item.dependency.clone()
+        };
+
         // FreeBSD libmap.conf may remap the dependency name based on the
         // referencing object path.
-        let dependency = Rtld::libmap_dependency(config, refpath, &item.dependency);
+        let dependency = Rtld::libmap_dependency(config, refpath, &dependency);
 
         #[cfg(target_os = "openbsd")]
         let dependency = match &openbsd_libc {
@@ -1137,7 +1189,7 @@ fn resolve_dependency_1<'a>(
             // DT_RUNPATH presence).
             SearchStep::Rpath if Rtld::rpath_search(elc) => search(&elc.rpath, DepMode::DtRpath),
             SearchStep::Rpath => None,
-            SearchStep::LibraryPath => search(config.ld_library_path, DepMode::LdLibraryPath),
+            SearchStep::LibraryPath => search(&config.ld_library_path, DepMode::LdLibraryPath),
             SearchStep::Runpath => search(&elc.runpath, DepMode::DtRunpath),
             // Skip the system paths if DF_1_NODEFLIB is set.
             SearchStep::Cache | SearchStep::SystemDirs if elc.nodeflibs => None,
