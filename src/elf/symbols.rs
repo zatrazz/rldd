@@ -2,7 +2,7 @@
 // It is used to mimic the loader symbol resolution for the --data-relocs,
 // --function-relocs, and --unused options.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::str;
 
@@ -20,6 +20,9 @@ pub struct SymbolRef {
     pub name: String,
     // The required symbol version, from the .gnu.version information.
     pub version: Option<String>,
+    // Whether the required version is hidden (a reference to a non default
+    // version).
+    pub hidden: bool,
     // Whether the reference is weak (unresolved weak symbols are not an error).
     pub weak: bool,
     // Whether the relocation comes from the DT_JMPREL table (function/PLT
@@ -27,6 +30,19 @@ pub struct SymbolRef {
     pub plt: bool,
     // Whether the reference comes from a COPY relocation.
     pub copy: bool,
+}
+
+// A symbol definition along with its version, from the .gnu.version
+// information.
+#[derive(Debug)]
+pub struct SymbolDef {
+    // The version index, without the hidden bit: 0 and 1 are the local and
+    // the global (unversioned) ones, and the object versions start at 2.
+    pub index: u16,
+    // Whether the version is hidden (a non default version, as foo@VERS).
+    pub hidden: bool,
+    // The version name, for a version the object defines.
+    pub version: Option<String>,
 }
 
 // A version required from a dependency, from the .gnu.version_r information.
@@ -42,10 +58,10 @@ pub struct VersionNeed {
 #[derive(Debug, Default)]
 pub struct ObjectSymbols {
     // Global visible defined symbols, candidates to resolve other objects
-    // undefined references.
-    pub defined: HashSet<String>,
-    // Defined symbols along their version definition.
-    pub defined_versioned: HashSet<(String, String)>,
+    // undefined references, by name.
+    pub defined: HashMap<String, Vec<SymbolDef>>,
+    // Whether the object has symbol versions (.gnu.version presence).
+    pub has_versym: bool,
     // Whether the object defines any version (.gnu.version_d presence).
     pub has_verdef: bool,
     // The version names the object defines.
@@ -80,7 +96,10 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
     let dynsyms = sections.symbols(endian, data, SHT_DYNSYM).ok()?;
     let versions = sections.versions(endian, data).ok().flatten();
 
-    let mut obj = ObjectSymbols::default();
+    let mut obj = ObjectSymbols {
+        has_versym: versions.is_some(),
+        ..Default::default()
+    };
 
     parse_verdef(&mut obj, endian, &sections, data);
     parse_verneed(&mut obj, endian, &sections, data);
@@ -99,11 +118,31 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
         if visibility != STV_DEFAULT && visibility != STV_PROTECTED {
             continue;
         }
+        // Neither a symbol without value nor one of a type that is not code
+        // or data defines anything (check_match on glibc, find_sym2 on musl).
+        let st_type = sym.st_type();
+        if sym.st_value(endian).into() == 0 && sym.st_shndx(endian) != SHN_ABS && st_type != STT_TLS
+        {
+            continue;
+        }
+        if !matches!(
+            st_type,
+            STT_NOTYPE | STT_OBJECT | STT_FUNC | STT_COMMON | STT_TLS | STT_GNU_IFUNC
+        ) {
+            continue;
+        }
         if let Some(name) = symbol_name(endian, &dynsyms, sym) {
-            obj.defined.insert(name.to_string());
-            if let Some(version) = symbol_version(endian, &versions, symidx) {
-                obj.defined_versioned.insert((name.to_string(), version));
-            }
+            let index = versions
+                .as_ref()
+                .map(|versions| versions.version_index(endian, symidx));
+            obj.defined
+                .entry(name.to_string())
+                .or_default()
+                .push(SymbolDef {
+                    index: index.map_or(0, |index| index.index().0),
+                    hidden: index.is_some_and(|index| index.is_hidden()),
+                    version: symbol_version(endian, &versions, symidx),
+                });
         }
     }
 
@@ -294,6 +333,9 @@ fn add_reference<'data, Elf: FileHeader>(
         references.push(SymbolRef {
             name: name.to_string(),
             version: symbol_version(endian, versions, symidx),
+            hidden: versions
+                .as_ref()
+                .is_some_and(|versions| versions.version_index(endian, symidx).is_hidden()),
             weak: sym.st_bind() == STB_WEAK,
             plt,
             copy,

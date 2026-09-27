@@ -1344,7 +1344,8 @@ fn resolve_dependency_1<'a>(
 // symbols with mangled names, while the BSD run-time linkers were not verified.
 
 // A version definition required by some object that the dependency providing
-// it does not define (the loader version check).
+// it does not define, reported by the loader version check
+// (_dl_check_map_versions).
 #[cfg(target_os = "linux")]
 pub struct VersionError {
     // Full path of the object that should provide the version.
@@ -1352,6 +1353,43 @@ pub struct VersionError {
     pub version: String,
     // Full path of the object requiring the version.
     pub required_by: String,
+    pub kind: VersionErrorKind,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VersionErrorKind {
+    // The version is not defined, which fails the load.
+    NotFound,
+    // A weak version (VER_FLG_WEAK) is not defined, which is only a warning.
+    WeakNotFound,
+    // The object defines no version at all, which is only a warning.
+    NoVersionInformation,
+}
+
+// The loader diagnostic, after the name of the object that should provide the
+// version (match_symbol).
+#[cfg(target_os = "linux")]
+impl std::fmt::Display for VersionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self.kind {
+            VersionErrorKind::NotFound => write!(
+                f,
+                "{}: version `{}' not found (required by {})",
+                self.object, self.version, self.required_by
+            ),
+            VersionErrorKind::WeakNotFound => write!(
+                f,
+                "{}: weak version `{}' not found (required by {})",
+                self.object, self.version, self.required_by
+            ),
+            VersionErrorKind::NoVersionInformation => write!(
+                f,
+                "{}: no version information available (required by {})",
+                self.object, self.required_by
+            ),
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1439,7 +1477,8 @@ fn append_interp_to_scope(scope: &mut Vec<(String, symbols::ObjectSymbols)>, elc
 // Mimic the musl loader relocation processing, which the musl ldd always
 // performs: musl has no lazy binding, so all the relocations (data and
 // DT_JMPREL) are processed eagerly, and the symbol versioning is ignored on
-// the load time resolution.  The unresolved references are reported as
+// the load time resolution, besides the hidden versions which never bind
+// (find_sym2).  The unresolved references are reported as
 // 'Error relocating OBJECT: SYMBOL: symbol not found' and the loader exits
 // with status 127.  Returns None when the object is not a musl one.
 #[cfg(target_os = "linux")]
@@ -1464,10 +1503,15 @@ pub fn check_musl_relocations(deptree: &DepTree) -> Option<Vec<UndefinedSymbol>>
             if sref.weak {
                 continue;
             }
+            let defines = |o: &symbols::ObjectSymbols| {
+                o.defined
+                    .get(&sref.name)
+                    .is_some_and(|defs| defs.iter().any(|def| !def.hidden))
+            };
             if !scope
                 .iter()
                 .enumerate()
-                .any(|(i, (_, o))| (!sref.copy || i != idx) && o.defined.contains(&sref.name))
+                .any(|(i, (_, o))| (!sref.copy || i != idx) && defines(o))
             {
                 undefined.push(UndefinedSymbol {
                     name: sref.name.clone(),
@@ -1486,6 +1530,38 @@ fn musl_loader_path(elc: &ElfInfo) -> Option<String> {
     match &elc.interp {
         Some(interp) => Some(interp.clone()),
         None => find_musl_loader(),
+    }
+}
+
+// Whether the OBJ object provides a definition satisfying the SREF reference,
+// following the glibc lookup rules (check_match and do_lookup_x): any
+// definition of an object without symbol versions does.  Otherwise a
+// versioned reference is satisfied by a definition of the same version, or
+// by an unversioned one when neither of them is hidden, while an unversioned
+// reference is satisfied by an unversioned definition or one of the first
+// version the object defines (index 2), or else by the single non hidden
+// definition of a later version.
+#[cfg(target_os = "linux")]
+fn satisfies(obj: &symbols::ObjectSymbols, sref: &symbols::SymbolRef) -> bool {
+    let Some(defs) = obj.defined.get(&sref.name) else {
+        return false;
+    };
+    if !obj.has_versym {
+        return true;
+    }
+    match &sref.version {
+        Some(version) => defs.iter().any(|def| {
+            def.version.as_ref() == Some(version)
+                || (def.version.is_none() && !def.hidden && !sref.hidden)
+        }),
+        None => {
+            defs.iter().any(|def| def.index < 3)
+                || defs
+                    .iter()
+                    .filter(|def| def.index >= 3 && !def.hidden)
+                    .count()
+                    == 1
+        }
     }
 }
 
@@ -1517,41 +1593,34 @@ pub fn check_relocations(
         append_interp_to_scope(&mut scope, root_elc);
     }
 
-    // Whether the OBJ object provides a definition satisfying the REF
-    // reference, following the loader lookup rules: a versioned reference is
-    // satisfied by a matching version definition or by any definition from an
-    // object without version information.
-    fn satisfies(obj: &symbols::ObjectSymbols, sref: &symbols::SymbolRef) -> bool {
-        match &sref.version {
-            Some(version) => {
-                obj.defined_versioned
-                    .contains(&(sref.name.clone(), version.clone()))
-                    || (!obj.has_verdef && obj.defined.contains(&sref.name))
-            }
-            None => obj.defined.contains(&sref.name),
-        }
-    }
-
     // The loader version check (mimicking _dl_check_all_versions): for each
     // required version, check whether the object providing it (matched by file
-    // name) actually defines it.
+    // name) actually defines it.  The loader reports a missing weak version,
+    // and an object without any version definition, as warnings (it always
+    // checks the versions in verbose mode, even for a plain trace).
     for (opath, obj) in &scope {
         for need in &obj.verneeded {
-            if need.weak {
-                continue;
-            }
-            if let Some((dpath, dobj)) = scope
+            let Some((dpath, dobj)) = scope
                 .iter()
                 .find(|(path, _)| pathutils::get_name(&Path::new(path)) == need.file)
-            {
-                if !dobj.verdef_names.contains(&need.version) {
-                    r.version_errors.push(VersionError {
-                        object: dpath.clone(),
-                        version: need.version.clone(),
-                        required_by: opath.clone(),
-                    });
-                }
-            }
+            else {
+                continue;
+            };
+            let kind = if !dobj.has_verdef {
+                VersionErrorKind::NoVersionInformation
+            } else if dobj.verdef_names.contains(&need.version) {
+                continue;
+            } else if need.weak {
+                VersionErrorKind::WeakNotFound
+            } else {
+                VersionErrorKind::NotFound
+            };
+            r.version_errors.push(VersionError {
+                object: dpath.clone(),
+                version: need.version.clone(),
+                required_by: opath.clone(),
+                kind,
+            });
         }
     }
 
@@ -1677,6 +1746,86 @@ mod tests {
             .collect();
         let dynstr = StringTable::new(strings, 0, strings.len() as u64);
         DynamicTags::parse::<FileHeader64<Endianness>>(endian, &dynamic, dynstr)
+    }
+
+    // The glibc symbol lookup version rules.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn symbol_version_match() {
+        use symbols::{ObjectSymbols, SymbolDef, SymbolRef};
+
+        let def = |index, hidden, version: Option<&str>| SymbolDef {
+            index,
+            hidden,
+            version: version.map(str::to_string),
+        };
+        let object = |defs: Vec<SymbolDef>, has_versym| ObjectSymbols {
+            defined: [("foo".to_string(), defs)].into(),
+            has_versym,
+            ..Default::default()
+        };
+        let reference = |version: Option<&str>, hidden| SymbolRef {
+            name: "foo".to_string(),
+            version: version.map(str::to_string),
+            hidden,
+            weak: false,
+            plt: false,
+            copy: false,
+        };
+        let unversioned = reference(None, false);
+        let v2 = reference(Some("V2"), false);
+
+        // Without symbol versions any definition matches.
+        assert!(satisfies(&object(vec![def(0, false, None)], false), &v2));
+        // A versioned reference: the same version, or an unversioned
+        // definition, unless one of them is hidden.
+        assert!(satisfies(
+            &object(vec![def(3, true, Some("V2"))], true),
+            &v2
+        ));
+        assert!(!satisfies(
+            &object(vec![def(2, false, Some("V1"))], true),
+            &v2
+        ));
+        assert!(satisfies(&object(vec![def(1, false, None)], true), &v2));
+        assert!(!satisfies(&object(vec![def(1, true, None)], true), &v2));
+        assert!(!satisfies(
+            &object(vec![def(1, false, None)], true),
+            &reference(Some("V2"), true)
+        ));
+        // An unversioned reference: an unversioned definition or one of the
+        // first version, even hidden, or else the single non hidden one.
+        assert!(satisfies(
+            &object(vec![def(1, false, None)], true),
+            &unversioned
+        ));
+        assert!(satisfies(
+            &object(vec![def(2, true, Some("V1"))], true),
+            &unversioned
+        ));
+        assert!(!satisfies(
+            &object(vec![def(3, true, Some("V2"))], true),
+            &unversioned
+        ));
+        assert!(satisfies(
+            &object(vec![def(3, false, Some("V2"))], true),
+            &unversioned
+        ));
+        assert!(!satisfies(
+            &object(
+                vec![def(3, false, Some("V2")), def(4, false, Some("V3"))],
+                true
+            ),
+            &unversioned
+        ));
+        assert!(satisfies(
+            &object(
+                vec![def(3, true, Some("V2")), def(4, false, Some("V3"))],
+                true
+            ),
+            &unversioned
+        ));
+        assert!(!satisfies(&ObjectSymbols::default(), &unversioned));
     }
 
     #[test]

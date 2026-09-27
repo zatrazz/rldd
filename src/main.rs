@@ -181,12 +181,7 @@ struct Options {
 #[cfg(target_os = "linux")]
 fn print_version_errors(arg: &str, errors: &[elf::VersionError]) {
     for error in errors {
-        outln!(
-            "{arg}: {}: version `{}' not found (required by {})",
-            error.object,
-            error.version,
-            error.required_by
-        );
+        outln!("{arg}: {error}");
     }
 }
 
