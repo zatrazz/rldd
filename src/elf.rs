@@ -674,6 +674,7 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
 
     // The loader might inspect another file than the one given.
     let (filename, mut elc) = Rtld::redirect_root(filename, elc, ctx.platform.as_ref());
+    elc.origin = Rtld::root_origin_directory(Path::new(arg), &filename, &elc);
 
     // The cache/hints/config file is usually an optional file and failing to open it
     // does not incur on a resolution failure.

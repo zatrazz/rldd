@@ -138,6 +138,14 @@ pub(super) trait Loader {
             .map(str::to_string)
     }
 
+    // The directory the $ORIGIN token expands to for the ELC input object,
+    // opened as FILENAME, the canonical path of the GIVEN one.  The kernel
+    // resolves the path of an executable before the loader runs
+    // (/proc/self/exe on Linux), so the loaders see the canonical path.
+    fn root_origin_directory(_given: &Path, filename: &Path, _elc: &ElfInfo) -> Option<String> {
+        Self::origin_directory(&filename, None)
+    }
+
     // Check the ELF header OS ABI fields, which for the GNU loaders (glibc and
     // bionic) depend on the architecture.
     fn check_elf_header(elc: &ElfInfo) -> bool {

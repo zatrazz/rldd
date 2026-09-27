@@ -74,6 +74,16 @@ impl Loader for Linux {
             || (elc.interp.is_none() && is_musl_system());
     }
 
+    // A shared library is loaded through the path it is opened with, without
+    // resolving a symlink (_dl_new_object, and fixup_rpath on musl), the way
+    // dlopen and ldd (which runs the loader on it) do.
+    fn root_origin_directory(given: &Path, filename: &Path, elc: &ElfInfo) -> Option<String> {
+        match std::path::absolute(given) {
+            Ok(path) if elc.interp.is_none() => Self::origin_directory(&path, None),
+            _ => Self::origin_directory(&filename, None),
+        }
+    }
+
     // The musl loader takes DT_RUNPATH over DT_RPATH, but searches it the way
     // it searches DT_RPATH.  For the object own dependencies and, walking the
     // chain of the objects that needed a library, for the indirect ones.
