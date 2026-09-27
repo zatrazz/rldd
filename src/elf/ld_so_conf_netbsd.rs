@@ -9,8 +9,13 @@ use std::path::Path;
 use crate::search_path::*;
 
 // Returns a vector of all available paths (it must exist on the filesystem)
-// parsed form the filename.
-pub fn parse_ld_so_conf<P: AsRef<Path>>(filename: &P) -> Result<SearchPathVec, &'static str> {
+// parsed form the filename, with the dynamic string tokens of each one
+// expanded by EXPAND (_rtld_append_path), which returns None for an entry the
+// loader drops.
+pub fn parse_ld_so_conf<P: AsRef<Path>>(
+    filename: &P,
+    expand: impl Fn(&str) -> Option<String>,
+) -> Result<SearchPathVec, &'static str> {
     let mut lines = match crate::pathutils::read_lines(filename) {
         Ok(lines) => lines,
         Err(_e) => return Err("Could not open the filename"),
@@ -24,9 +29,9 @@ pub fn parse_ld_so_conf<P: AsRef<Path>>(filename: &P) -> Result<SearchPathVec, &
             None => continue,
         };
 
-        // NetBSD loader does string expansion for $ORIGIN, $OSNAME, $OSREL, and
-        // $PLATFORM.  For now add these as TODOs.
-        r.add_path(&line);
+        if let Some(dir) = expand(&line) {
+            r.add_path(&dir);
+        }
     }
 
     Ok(r)
@@ -58,6 +63,10 @@ mod tests {
     use crate::tempdir::TempDir;
     use std::fs;
 
+    fn as_written(dir: &str) -> Option<String> {
+        Some(dir.to_string())
+    }
+
     #[test]
     fn parse_directories() -> std::io::Result<()> {
         let tmpdir = TempDir::new()?;
@@ -82,7 +91,7 @@ mod tests {
                 missing.display()
             ),
         )?;
-        let dirs = parse_ld_so_conf(&conf).unwrap();
+        let dirs = parse_ld_so_conf(&conf, as_written).unwrap();
         assert_eq!(dirs.len(), 2);
         assert_eq!(dirs[0], lib1);
         assert_eq!(dirs[1], lib2);
@@ -110,14 +119,34 @@ mod tests {
                  \r{lib1}\n"
             ),
         )?;
-        assert!(parse_ld_so_conf(&conf).unwrap().is_empty());
+        assert!(parse_ld_so_conf(&conf, as_written).unwrap().is_empty());
+        Ok(())
+    }
+
+    // The directories are expanded before being added, and the ones the
+    // expansion drops are skipped.
+    #[test]
+    fn expand_directories() -> std::io::Result<()> {
+        let tmpdir = TempDir::new()?;
+        let lib1 = tmpdir.path().join("lib1");
+        fs::create_dir(&lib1)?;
+        let lib1 = lib1.to_str().unwrap();
+
+        let conf = tmpdir.path().join("ld.so.conf");
+        fs::write(&conf, "/$DIR/lib1\n/$DROP\n")?;
+        let dirs = parse_ld_so_conf(&conf, |dir| {
+            (!dir.contains("$DROP")).then(|| dir.replace("/$DIR", tmpdir.path().to_str().unwrap()))
+        })
+        .unwrap();
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0], lib1);
         Ok(())
     }
 
     #[test]
     fn missing_file() -> std::io::Result<()> {
         let tmpdir = TempDir::new()?;
-        assert!(parse_ld_so_conf(&tmpdir.path().join("ld.so.conf")).is_err());
+        assert!(parse_ld_so_conf(&tmpdir.path().join("ld.so.conf"), as_written).is_err());
         Ok(())
     }
 }

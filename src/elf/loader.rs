@@ -342,6 +342,41 @@ fn canonical_origin_directory<P: AsRef<Path>>(filename: &P) -> Option<String> {
     path.parent().and_then(Path::to_str).map(str::to_string)
 }
 
+// The string value of the NAME sysctl, where the NetBSD loader takes the
+// values of some dynamic string tokens from (_rtld_expand_path).
+#[cfg(target_os = "netbsd")]
+fn sysctl_string(name: &std::ffi::CStr) -> Option<String> {
+    use std::ffi::{c_char, c_int, c_void};
+    extern "C" {
+        fn sysctlbyname(
+            name: *const c_char,
+            oldp: *mut c_void,
+            oldlenp: *mut usize,
+            newp: *const c_void,
+            newlen: usize,
+        ) -> c_int;
+    }
+    let mut buf = [0u8; 256];
+    let mut len = buf.len();
+    // SAFETY: BUF is valid for LEN bytes, which the call updates to the length
+    // it wrote, and nothing is set.
+    let r = unsafe {
+        sysctlbyname(
+            name.as_ptr(),
+            buf.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if r != 0 {
+        return None;
+    }
+    let value = buf.get(..len)?;
+    let value = value.split(|c| *c == 0).next().unwrap_or(value);
+    String::from_utf8(value.to_vec()).ok()
+}
+
 // The loaders recording DT_RPATH and DT_RUNPATH in a single slot, where the
 // last entry of either wins, search it as the object rpath.
 #[cfg(any(target_os = "netbsd", all(test, target_os = "linux")))]
