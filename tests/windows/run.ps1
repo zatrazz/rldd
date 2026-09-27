@@ -445,13 +445,18 @@ function Get-StaticModules($Tree, [switch]$Loose) {
 # modules the loader mapped.  The loader always maps ntdll, kernel32 and
 # kernelbase, and a 32 bit process has the native WOW64 layer (System32) too,
 # none of which needs an import.  Two things rldd does not read are kept
-# apart: the comctl32 version 5.82 the system default activation context
-# redirects to (rldd resolves the same file through System32), and the
-# application compatibility shims (apphelp.dll and the AppPatch modules).
+# apart: the assemblies the system default activation context redirects to,
+# the comctl32 version 5.82 and the gdiplus version 1.1 ones, even without a
+# manifest (rldd resolves them through the system directory), and the
+# application compatibility shims, which bring apphelp.dll and the modules of
+# the shims along with what they import.
 function Compare-Paths($Loader, $Strict, $Loose) {
     $system32 = (Join-Path $env:SystemRoot 'System32\').ToLowerInvariant()
-    $apppatch = (Join-Path $env:SystemRoot 'AppPatch\').ToLowerInvariant()
     $always = @('ntdll.dll', 'kernel32.dll', 'kernelbase.dll')
+    $redirected = @{
+        'comctl32.dll' = '\\winsxs\\[^\\]*_microsoft\.windows\.common-controls_[^\\]*_5\.82\.'
+        'gdiplus.dll'  = '\\winsxs\\[^\\]*_microsoft\.windows\.gdiplus_[^\\]*_1\.1\.'
+    }
     $mapped = @{}
     foreach ($path in $Loader.Modules) {
         $lower = $path.ToLowerInvariant()
@@ -476,25 +481,25 @@ function Compare-Paths($Loader, $Strict, $Loose) {
         if ($path -ieq $resolved) {
             continue
         }
-        if ($name -eq 'comctl32.dll' -and $path -match '\\winsxs\\[^\\]*common-controls[^\\]*_5\.82\.') {
+        if ($redirected.ContainsKey($name) -and $path -match $redirected[$name]) {
             $default++
             continue
         }
         $differences.Add("rldd resolves $resolved, the loader maps $path")
     }
+    $shimEngine = $mapped.ContainsKey('apphelp.dll')
     foreach ($name in $mapped.Keys) {
         if ($Loose.Modules.ContainsKey($name) -or $always -contains $name) {
             continue
         }
-        $path = $mapped[$name]
-        if ($name -eq 'apphelp.dll' -or $path.ToLowerInvariant().StartsWith($apppatch)) {
+        if ($shimEngine) {
             $shims++
             continue
         }
-        $differences.Add("only the loader maps $path")
+        $differences.Add("only the loader maps $($mapped[$name])")
     }
     foreach ($name in $Strict.Missing) {
-        $differences.Add("rldd does not resolve $name, which the loader maps")
+        $differences.Add("rldd does not resolve $name, and the process starts")
     }
     [pscustomobject]@{ Differences = $differences.ToArray(); SystemDefault = $default; Shims = [int]($shims -gt 0) }
 }
@@ -613,8 +618,9 @@ try {
         $compared++
 
         # A forwarded module is pulled in by a symbol instead of by a directory
-        # entry, so dumpbin never lists it.
-        $entries = @($tree.Entries | Where-Object { $_.Attrs -notcontains 'forwarded' })
+        # entry, and the .NET runtime shim by the CLR header, so dumpbin never
+        # lists them.
+        $entries = @($tree.Entries | Where-Object { $_.Attrs -notcontains 'forwarded' -and $_.Attrs -notcontains 'clr' })
         $lists = @(
             @{ Kind = 'import'; Expected = $reference.Imports; Got = @($entries | Where-Object { $_.Attrs -notcontains 'delay-load' } | ForEach-Object { $_.Recorded }) }
             @{ Kind = 'delay'; Expected = $reference.Delay; Got = @($entries | Where-Object { $_.Attrs -contains 'delay-load' } | ForEach-Object { $_.Recorded }) }
@@ -708,7 +714,7 @@ if ($notFound.Count) {
 }
 if ($Paths) {
     if ($systemDefault) {
-        Write-Detail "$systemDefault comctl32 mapped from the 5.82 assembly of the system default activation context"
+        Write-Detail "$systemDefault comctl32 or gdiplus mapped from the assembly of the system default activation context"
     }
     if ($shimmed) {
         Write-Detail "$shimmed executables with the application compatibility shims mapped"
