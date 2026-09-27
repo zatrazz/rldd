@@ -34,6 +34,46 @@ impl Loader for OpenBsd {
         ld_cache.is_none()
     }
 
+    // Every list is split on colons and semicolons, skipping the empty entries
+    // (_dl_split_path).
+    fn search_list(
+        list: &str,
+        site: TokenSite,
+        elc: &ElfInfo,
+        platform: Option<&String>,
+    ) -> Vec<Result<String, String>> {
+        list.split([':', ';'])
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                Self::expand_tokens(entry, site, elc, platform).ok_or_else(|| entry.to_string())
+            })
+            .collect()
+    }
+
+    // ld.so only expands the tokens of the DT_RPATH and DT_RUNPATH entries
+    // (_dl_origin_subst), none at all when the object directory can not be
+    // resolved.
+    fn expand_tokens(
+        input: &str,
+        site: TokenSite,
+        elc: &ElfInfo,
+        platform: Option<&String>,
+    ) -> Option<String> {
+        let origin = match (site, elc.origin.as_deref()) {
+            (TokenSite::SearchPath, Some(origin)) => origin,
+            _ => return Some(input.to_string()),
+        };
+        let [sysname, release, machine] = uname_values();
+        let platform = platform.map(String::as_str).or(machine.as_deref());
+        Some(origin_subst_path(input, |token| match token {
+            "ORIGIN" => origin,
+            "OSNAME" => sysname.as_deref().unwrap_or(""),
+            "OSREL" => release.as_deref().unwrap_or(""),
+            "PLATFORM" => platform.unwrap_or(""),
+            _ => "",
+        }))
+    }
+
     fn origin_directory<P: AsRef<Path>>(filename: &P, _melc: Option<&ElfInfo>) -> Option<String> {
         canonical_origin_directory(filename)
     }
@@ -139,10 +179,125 @@ impl Loader for OpenBsd {
     }
 }
 
+// Expand the tokens of the INPUT entry the way _dl_origin_subst_path does,
+// with VALUE giving the expansion of each name: a '$' followed by a name of
+// letters, digits and underscores, which might be within braces, where an
+// unknown name expands to nothing.
+fn origin_subst_path<'a>(input: &str, value: impl Fn(&str) -> &'a str) -> String {
+    let mut r = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(pos) = rest.find('$') {
+        r.push_str(&rest[..pos]);
+        let mut after = &rest[pos + 1..];
+        let braced = after.starts_with('{');
+        if braced {
+            after = &after[1..];
+        }
+        let end = after
+            .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .unwrap_or(after.len());
+        r.push_str(value(&after[..end]));
+        rest = &after[end..];
+        if braced {
+            rest = rest.strip_prefix('}').unwrap_or(rest);
+        }
+    }
+    r.push_str(rest);
+    r
+}
+
+// The uname(3) sysname, release and machine strings, which $OSNAME, $OSREL
+// and $PLATFORM expand to.
+#[cfg(target_os = "openbsd")]
+fn uname_values() -> &'static [Option<String>; 3] {
+    use std::ffi::{c_char, c_int};
+    use std::sync::OnceLock;
+    // The struct utsname fields, each of SYS_NMLN characters.
+    const SYS_NMLN: usize = 256;
+    extern "C" {
+        fn uname(name: *mut [c_char; SYS_NMLN]) -> c_int;
+    }
+    static VALUES: OnceLock<[Option<String>; 3]> = OnceLock::new();
+    VALUES.get_or_init(|| {
+        let mut uts = [[0 as c_char; SYS_NMLN]; 5];
+        // SAFETY: UTS has the layout of struct utsname, the five fields in
+        // order.
+        if unsafe { uname(uts.as_mut_ptr()) } != 0 {
+            return [None, None, None];
+        }
+        let field = |field: &[c_char; SYS_NMLN]| {
+            let bytes: Vec<u8> = field.iter().map(|&c| c as u8).collect();
+            let value = bytes.split(|c| *c == 0).next()?;
+            String::from_utf8(value.to_vec()).ok()
+        };
+        [field(&uts[0]), field(&uts[2]), field(&uts[4])]
+    })
+}
+
+#[cfg(not(target_os = "openbsd"))]
+fn uname_values() -> &'static [Option<String>; 3] {
+    static VALUES: [Option<String>; 3] = [None, None, None];
+    &VALUES
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tempdir::TempDir;
+
+    #[test]
+    fn origin_subst_path_tokens() {
+        let expand = |input| {
+            origin_subst_path(input, |token| match token {
+                "ORIGIN" => "/o",
+                "OSNAME" => "OpenBSD",
+                "OSREL" => "7.7",
+                "PLATFORM" => "amd64",
+                _ => "",
+            })
+        };
+        let cases = [
+            ("$ORIGIN/../lib", "/o/../lib"),
+            ("${ORIGIN}/lib", "/o/lib"),
+            ("${ORIGIN/lib", "/o/lib"),
+            // The name ends at the first character that can not be part of
+            // it, and an unknown one expands to nothing.
+            ("$ORIGINAL/lib", "/lib"),
+            ("/$OSNAME-$OSREL/$PLATFORM", "/OpenBSD-7.7/amd64"),
+            ("/a/$/b/${}", "/a//b/"),
+        ];
+        for (input, expanded) in cases {
+            assert_eq!(expand(input), expanded, "{input}");
+        }
+    }
+
+    // The DT_RPATH and DT_RUNPATH entries alone expand their tokens, and the
+    // lists are split on both separators.
+    #[test]
+    fn search_lists() {
+        let elc = ElfInfo::for_test(EM_X86_64, FileFlags(0));
+        let list = |list, site| -> Vec<String> {
+            OpenBsd::search_list(list, site, &elc, None)
+                .into_iter()
+                .map(|entry| entry.unwrap())
+                .collect()
+        };
+        assert_eq!(
+            list(";$ORIGIN/a::/b;", TokenSite::SearchPath),
+            ["/o/a", "/b"]
+        );
+        assert_eq!(
+            list("$ORIGIN/a;/b", TokenSite::LibraryPath),
+            ["$ORIGIN/a", "/b"]
+        );
+        let mut unresolved = ElfInfo::for_test(EM_X86_64, FileFlags(0));
+        unresolved.origin = None;
+        assert_eq!(
+            OpenBsd::expand_tokens("$ORIGIN/a", TokenSite::SearchPath, &unresolved, None)
+                .as_deref(),
+            Some("$ORIGIN/a")
+        );
+    }
 
     #[test]
     fn nodeflib_ignored() {
