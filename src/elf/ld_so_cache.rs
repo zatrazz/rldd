@@ -532,26 +532,42 @@ struct Search<'a> {
     done: bool,
 }
 
-// Select the entries the loader takes for the object ABI, with SUPPORTED the
-// glibc-hwcaps subdirectories it searches (best first), following glibc
-// search_cache.  The glibc-hwcaps entries of a name come first and the one
-// with the best priority wins, skipping the ones for a subdirectory the loader
-// does not search (for instance one the CPU does not support).  Otherwise the
-// first regular entry is taken on the new format, while the old format one
-// keeps searching for an entry with the loader default flags (the generic
-// FLAG_ELF_LIBC6 over FLAG_ELF, or the ARM unmarked entries over the float
-// ABI ones).  The result is the directory of the library path for each name.
+// Whether the ISA level a glibc-hwcaps entry HWCAP requires is one of the
+// ISA_LEVELS the CPU supports (glibc dl_cache_hwcap_isa_level_compatible on
+// x86, while the other loaders take any).
+fn check_isa_level(hwcap: u64, isa_levels: Option<u32>) -> bool {
+    let Some(isa_levels) = isa_levels else {
+        return true;
+    };
+    // ldconfig writes the index of the highest GNU_PROPERTY_X86_ISA_1_NEEDED
+    // bit of the library.
+    let level = 1u32
+        .checked_shl(((hwcap >> 32) & DL_CACHE_HWCAP_ISA_LEVEL_MASK) as u32)
+        .unwrap_or(0);
+    level != 0 && isa_levels & level == level
+}
+
+// Select the entries the loader takes for the object ABI, with HWCAPS the
+// capabilities it uses, following glibc search_cache.  The glibc-hwcaps
+// entries of a name come first and the one with the best priority wins,
+// skipping the ones for a subdirectory the loader does not search (for
+// instance one the CPU does not support) or requiring an ISA level the CPU
+// does not support.  Otherwise the first regular entry is taken on the new
+// format, while the old format one keeps searching for an entry with the
+// loader default flags (the generic FLAG_ELF_LIBC6 over FLAG_ELF, or the ARM
+// unmarked entries over the float ABI ones).  The result is the directory of
+// the library path for each name.
 fn select_entries(
     file: &CacheFile,
     ei_class: FileClass,
     e_machine: Machine,
     e_flags: FileFlags,
-    supported: &[&str],
+    hwcaps: &hwcap::LoaderHwcaps,
 ) -> HashMap<String, String> {
     let Some(flags) = CacheFlags::new(ei_class, e_machine, e_flags) else {
         return HashMap::new();
     };
-    let priorities = hwcaps_priorities(&file.hwcaps, supported);
+    let priorities = hwcaps_priorities(&file.hwcaps, &hwcaps.subdirs);
 
     let mut searches = HashMap::<&str, Search>::new();
     for entry in &file.entries {
@@ -565,6 +581,9 @@ fn select_entries(
         let mut named_hwcap = false;
         if file.new_format {
             named_hwcap = check_cache_hwcap_extension(entry.hwcap);
+            if named_hwcap && !check_isa_level(entry.hwcap, hwcaps.isa_levels) {
+                continue;
+            }
             // The glibc-hwcaps entries are exhausted, so the best one found so
             // far wins.
             if !named_hwcap && search.best.is_some() {
@@ -634,11 +653,11 @@ impl LdCache {
         if self.abi == abi {
             return;
         }
-        // And obtain the glibc-hwcaps subdirectories of the loader, on the
-        // current machine.  A machine whose capabilities can not be read has
-        // none, which still leaves the regular entries.
-        let supported = hwcap::glibc_hwcaps_subdirs(e_machine, ei_class, ei_data);
-        self.entries = select_entries(&self.file, ei_class, e_machine, e_flags, &supported);
+        // And obtain the capabilities the loader uses on the current machine.
+        // A machine whose capabilities can not be read has no glibc-hwcaps
+        // subdirectory, which still leaves the regular entries.
+        let hwcaps = hwcap::loader_hwcaps(e_machine, ei_class, ei_data);
+        self.entries = select_entries(&self.file, ei_class, e_machine, e_flags, &hwcaps);
         self.abi = abi;
     }
 
@@ -821,9 +840,21 @@ mod tests {
     }
     const EXTENSION_OFFSET: usize = 32;
 
-    fn select(cache: &[u8], supported: &[&str]) -> HashMap<String, String> {
+    // The x86-64 selection for a loader searching the SUPPORTED glibc-hwcaps
+    // subdirectories, which does not check the ISA levels.
+    fn select(cache: &[u8], supported: &[&'static str]) -> HashMap<String, String> {
+        select_hwcaps(
+            cache,
+            &hwcap::LoaderHwcaps {
+                subdirs: supported.to_vec(),
+                ..Default::default()
+            },
+        )
+    }
+
+    fn select_hwcaps(cache: &[u8], hwcaps: &hwcap::LoaderHwcaps) -> HashMap<String, String> {
         let file = parse_cache(cache).unwrap();
-        select_entries(&file, ELFCLASS64, EM_X86_64, FileFlags(0), supported)
+        select_entries(&file, ELFCLASS64, EM_X86_64, FileFlags(0), hwcaps)
     }
 
     #[test]
@@ -961,6 +992,49 @@ mod tests {
     }
 
     #[test]
+    fn glibc_hwcaps_entry_isa_level() {
+        // ldconfig records the x86 ISA level a glibc-hwcaps library requires
+        // (the index of the highest GNU_PROPERTY_X86_ISA_1_NEEDED bit), which
+        // the CPU must support.
+        let isa_level = |level: u64| level << 32;
+        let cache = build_cache(
+            &[
+                (
+                    X86_64,
+                    "liblzma.so.5",
+                    "/opt/x86-64-v2/liblzma.so.5",
+                    named(0) | isa_level(1),
+                ),
+                (
+                    X86_64,
+                    "liblzma.so.5",
+                    "/opt/x86-64-v3/liblzma.so.5",
+                    named(1) | isa_level(3),
+                ),
+                (X86_64, "liblzma.so.5", "/usr/lib/liblzma.so.5", 0),
+            ],
+            &["x86-64-v2", "x86-64-v3"],
+        );
+        let v3 =
+            GNU_PROPERTY_X86_ISA_1_BASELINE | GNU_PROPERTY_X86_ISA_1_V2 | GNU_PROPERTY_X86_ISA_1_V3;
+        for (isa_levels, dir) in [
+            // The loaders that do not check it.
+            (None, "/opt/x86-64-v3"),
+            (Some(v3), "/opt/x86-64-v2"),
+            (Some(v3 | GNU_PROPERTY_X86_ISA_1_V4), "/opt/x86-64-v3"),
+            (Some(GNU_PROPERTY_X86_ISA_1_BASELINE), "/usr/lib"),
+        ] {
+            let hwcaps = hwcap::LoaderHwcaps {
+                subdirs: vec!["x86-64-v3", "x86-64-v2"],
+                isa_levels,
+            };
+            assert_eq!(select_hwcaps(&cache, &hwcaps)["liblzma.so.5"], dir);
+        }
+        // A level out of the 32-bit ISA bits.
+        assert!(!check_isa_level(named(0) | isa_level(40), Some(u32::MAX)));
+    }
+
+    #[test]
     fn old_format() {
         // More strings than a new format header, which does not make it a
         // compat cache.
@@ -1015,7 +1089,7 @@ mod tests {
         e_flags: FileFlags,
     ) -> HashMap<String, String> {
         let file = parse_cache(cache).unwrap();
-        select_entries(&file, ei_class, e_machine, e_flags, &[])
+        select_entries(&file, ei_class, e_machine, e_flags, &Default::default())
     }
 
     #[test]

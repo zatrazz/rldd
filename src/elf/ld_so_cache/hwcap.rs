@@ -3,6 +3,18 @@
 
 use object::elf::*;
 
+// The capabilities of this machine the glibc loader built for an object ABI
+// uses.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LoaderHwcaps {
+    // The glibc-hwcaps subdirectories the loader searches, best first.
+    pub subdirs: Vec<&'static str>,
+    // The x86 ISA levels the CPU supports (the GNU_PROPERTY_X86_ISA_1 bits),
+    // which must include the one a glibc-hwcaps cache entry requires.  None
+    // for the loaders that do not check it.
+    pub isa_levels: Option<u32>,
+}
+
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod cpuid {
     #[cfg(target_arch = "x86")]
@@ -11,10 +23,12 @@ mod cpuid {
     use std::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
 
     use object::elf::{
-        DataEncoding, FileClass, Machine, ELFCLASS32, ELFCLASS64, ELFDATA2LSB, EM_X86_64,
+        DataEncoding, FileClass, Machine, ELFCLASS32, ELFCLASS64, ELFDATA2LSB, EM_386, EM_X86_64,
         GNU_PROPERTY_X86_ISA_1_BASELINE, GNU_PROPERTY_X86_ISA_1_V2, GNU_PROPERTY_X86_ISA_1_V3,
         GNU_PROPERTY_X86_ISA_1_V4,
     };
+
+    use super::LoaderHwcaps;
 
     // CPUID.(EAX=1):EDX
     const CPUID_1_EDX_FPU: u32 = 1 << 0;
@@ -207,21 +221,30 @@ mod cpuid {
         .collect()
     }
 
-    // The x86-64 and x32 ABIs have glibc-hwcaps subdirectories
-    // (sysdeps/x86_64/dl-hwcaps-subdirs.c), while i386 has none.
-    pub fn has_glibc_hwcaps(
+    // The x86-64 and x32 loaders have glibc-hwcaps subdirectories
+    // (sysdeps/x86_64/dl-hwcaps-subdirs.c) while the i386 one has none, and
+    // all of them check the ISA level of the glibc-hwcaps cache entries
+    // (sysdeps/x86/dl-isa-level.h).
+    pub fn loader_hwcaps(
         e_machine: Machine,
         ei_class: FileClass,
         ei_data: DataEncoding,
-    ) -> bool {
-        e_machine == EM_X86_64
-            && matches!(ei_class, ELFCLASS32 | ELFCLASS64)
-            && ei_data == ELFDATA2LSB
-    }
-
-    pub fn supported() -> Result<Vec<&'static str>, std::io::Error> {
-        // Priority sorted, best-fit first (the glibc _dl_hwcaps_subdirs order).
-        Ok(subdirs(Features::read().isa_level()))
+    ) -> LoaderHwcaps {
+        let x86_64 = e_machine == EM_X86_64 && matches!(ei_class, ELFCLASS32 | ELFCLASS64);
+        let i386 = e_machine == EM_386 && ei_class == ELFCLASS32;
+        if ei_data != ELFDATA2LSB || !(x86_64 || i386) {
+            return LoaderHwcaps::default();
+        }
+        let isa_level = Features::read().isa_level();
+        LoaderHwcaps {
+            // Priority sorted, best-fit first (the glibc _dl_hwcaps_subdirs order).
+            subdirs: if x86_64 {
+                subdirs(isa_level)
+            } else {
+                Vec::new()
+            },
+            isa_levels: Some(isa_level),
+        }
     }
 
     #[cfg(test)]
@@ -315,6 +338,32 @@ mod cpuid {
             };
             assert_eq!(levels(f), ["x86-64-v2"]);
         }
+
+        #[test]
+        fn loader_hwcaps_by_abi() {
+            use object::elf::{ELFDATA2MSB, EM_PPC64};
+
+            // The x86-64 and x32 loaders search the subdirectories of the CPU
+            // levels, and the i386 one none, while all check the ISA level of
+            // the cache entries.
+            let isa_level = Features::read().isa_level();
+            for ei_class in [ELFCLASS64, ELFCLASS32] {
+                let hwcaps = loader_hwcaps(EM_X86_64, ei_class, ELFDATA2LSB);
+                assert_eq!(hwcaps.subdirs, subdirs(isa_level));
+                assert_eq!(hwcaps.isa_levels, Some(isa_level));
+            }
+            let i386 = loader_hwcaps(EM_386, ELFCLASS32, ELFDATA2LSB);
+            assert!(i386.subdirs.is_empty());
+            assert_eq!(i386.isa_levels, Some(isa_level));
+            // The CPU does not run the other architectures objects.
+            for (e_machine, ei_class, ei_data) in [
+                (EM_PPC64, ELFCLASS64, ELFDATA2LSB),
+                (EM_X86_64, ELFCLASS64, ELFDATA2MSB),
+            ] {
+                let hwcaps = loader_hwcaps(e_machine, ei_class, ei_data);
+                assert_eq!(hwcaps, LoaderHwcaps::default());
+            }
+        }
     }
 }
 
@@ -379,21 +428,23 @@ mod cpuid {
 
     use object::elf::{DataEncoding, FileClass, Machine, ELFCLASS64, ELFDATA2LSB, EM_PPC64};
 
+    use super::LoaderHwcaps;
+
     // Only the little-endian ABI has glibc-hwcaps subdirectories
     // (sysdeps/powerpc/powerpc64/le/dl-hwcaps-subdirs.c).
-    pub fn has_glibc_hwcaps(
+    pub fn loader_hwcaps(
         e_machine: Machine,
         ei_class: FileClass,
         ei_data: DataEncoding,
-    ) -> bool {
-        e_machine == EM_PPC64 && ei_class == ELFCLASS64 && ei_data == ELFDATA2LSB
-    }
-
-    pub fn supported() -> Result<Vec<&'static str>, std::io::Error> {
-        // Priority sorted, best-fit first (the glibc _dl_hwcaps_subdirs order).
-        Ok(super::power_subdirs(
-            auxv::getauxval(auxv::AT_HWCAP2)? as u64
-        ))
+    ) -> LoaderHwcaps {
+        let mut r = LoaderHwcaps::default();
+        if e_machine == EM_PPC64 && ei_class == ELFCLASS64 && ei_data == ELFDATA2LSB {
+            // Priority sorted, best-fit first (the glibc _dl_hwcaps_subdirs order).
+            r.subdirs = auxv::getauxval(auxv::AT_HWCAP2)
+                .map(|hwcap2| super::power_subdirs(hwcap2 as u64))
+                .unwrap_or_default();
+        }
+        r
     }
 }
 
@@ -403,19 +454,23 @@ mod cpuid {
 
     use object::elf::{DataEncoding, FileClass, Machine, ELFCLASS64, ELFDATA2MSB, EM_S390};
 
+    use super::LoaderHwcaps;
+
     // Only the 64-bit ABI has glibc-hwcaps subdirectories
     // (sysdeps/s390/s390-64/dl-hwcaps-subdirs.c).
-    pub fn has_glibc_hwcaps(
+    pub fn loader_hwcaps(
         e_machine: Machine,
         ei_class: FileClass,
         ei_data: DataEncoding,
-    ) -> bool {
-        e_machine == EM_S390 && ei_class == ELFCLASS64 && ei_data == ELFDATA2MSB
-    }
-
-    pub fn supported() -> Result<Vec<&'static str>, std::io::Error> {
-        // Priority sorted, best-fit first (the glibc _dl_hwcaps_subdirs order).
-        Ok(super::s390_subdirs(auxv::getauxval(auxv::AT_HWCAP)? as u64))
+    ) -> LoaderHwcaps {
+        let mut r = LoaderHwcaps::default();
+        if e_machine == EM_S390 && ei_class == ELFCLASS64 && ei_data == ELFDATA2MSB {
+            // Priority sorted, best-fit first (the glibc _dl_hwcaps_subdirs order).
+            r.subdirs = auxv::getauxval(auxv::AT_HWCAP)
+                .map(|hwcap| super::s390_subdirs(hwcap as u64))
+                .unwrap_or_default();
+        }
+        r
     }
 }
 
@@ -431,19 +486,29 @@ mod cpuid {
 mod cpuid {
     use object::elf::{DataEncoding, FileClass, Machine};
 
+    use super::LoaderHwcaps;
+
     // The other architectures have no glibc-hwcaps subdirectories, and the
     // host can only run the objects of its own (or a compatible) one.
-    pub fn has_glibc_hwcaps(
+    pub fn loader_hwcaps(
         _e_machine: Machine,
         _ei_class: FileClass,
         _ei_data: DataEncoding,
-    ) -> bool {
-        false
+    ) -> LoaderHwcaps {
+        LoaderHwcaps::default()
     }
+}
 
-    pub fn supported() -> Result<Vec<&'static str>, std::io::Error> {
-        Ok(vec![])
-    }
+// The capabilities of this machine the glibc loader for an object ABI (its
+// machine, class and data encoding) uses.  Only the objects the host CPU runs
+// get any, and none when they can not be read (the auxiliary vector on a
+// chroot without /proc).
+pub fn loader_hwcaps(
+    e_machine: Machine,
+    ei_class: FileClass,
+    ei_data: DataEncoding,
+) -> LoaderHwcaps {
+    cpuid::loader_hwcaps(e_machine, ei_class, ei_data)
 }
 
 // The glibc-hwcaps subdirectories the glibc loader for an object ABI (its
@@ -452,18 +517,17 @@ mod cpuid {
 // (_dl_hwcaps_subdirs_active).  Only x86-64 (and x32), little-endian
 // powerpc64 and s390x have them, and only the objects the host CPU runs get
 // them, so the list is empty for any other ABI (i386 on a x86-64 host, for
-// instance), and when the CPU capabilities can not be read (the auxiliary
-// vector on a chroot without /proc).
+// instance), and when the CPU capabilities can not be read.
+//
+// Unused until the directory search tries the glibc-hwcaps subdirectories
+// of each directory, as the loader does.
+#[allow(dead_code)]
 pub fn glibc_hwcaps_subdirs(
     e_machine: Machine,
     ei_class: FileClass,
     ei_data: DataEncoding,
 ) -> Vec<&'static str> {
-    if cpuid::has_glibc_hwcaps(e_machine, ei_class, ei_data) {
-        cpuid::supported().unwrap_or_default()
-    } else {
-        Vec::new()
-    }
+    loader_hwcaps(e_machine, ei_class, ei_data).subdirs
 }
 
 #[cfg(test)]
@@ -511,23 +575,5 @@ mod tests {
             s390_subdirs(0x3f << 11 | 1 << 19),
             ["z16", "z15", "z14", "z13"]
         );
-    }
-
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    #[test]
-    fn glibc_hwcaps_subdirs_on_x86() {
-        // The x86-64 and x32 loaders use the CPU levels, and the other
-        // architectures objects are not run by it.
-        let levels = cpuid::supported().unwrap();
-        assert_eq!(
-            glibc_hwcaps_subdirs(EM_X86_64, ELFCLASS64, ELFDATA2LSB),
-            levels
-        );
-        assert_eq!(
-            glibc_hwcaps_subdirs(EM_X86_64, ELFCLASS32, ELFDATA2LSB),
-            levels
-        );
-        assert!(glibc_hwcaps_subdirs(EM_PPC64, ELFCLASS64, ELFDATA2LSB).is_empty());
-        assert!(glibc_hwcaps_subdirs(EM_S390, ELFCLASS64, ELFDATA2MSB).is_empty());
     }
 }
