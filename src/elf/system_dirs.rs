@@ -398,40 +398,97 @@ pub fn get_system_dirs(elc: &ElfInfo) -> Result<search_path::SearchPathVec, std:
     Ok(r)
 }
 
-// The rtld STANDARD_LIBRARY_PATH (rtld_paths.h) for an object of the EI_CLASS
-// class.  The 32-bit compat loader of a 64-bit system (ld-elf32.so.1, built
-// with the "32" COMPAT_libcompat suffix) appends the suffix to both /lib and
-// /usr/lib, and has no /lib/casper.
+// The rtld STANDARD_LIBRARY_PATH (rtld_paths.h) of the current releases for an
+// object of the EI_CLASS class.  The 32-bit compat loader of a 64-bit system
+// (ld-elf32.so.1, built with the "32" COMPAT_libcompat suffix) appends the
+// suffix to both /lib and /usr/lib.
 #[cfg(any(target_os = "freebsd", all(test, target_os = "linux")))]
 fn freebsd_standard_dirs(ei_class: object::elf::FileClass) -> &'static [&'static str] {
     if cfg!(target_pointer_width = "64") && ei_class == object::elf::ELFCLASS32 {
         &["/lib32", "/usr/lib32"]
     } else {
-        &["/lib/casper", "/lib", "/usr/lib"]
+        &["/lib", "/usr/lib"]
+    }
+}
+
+// The list is compiled in the rtld, and changed with the releases (FreeBSD 13
+// searches /lib/casper first, which 14.0 dropped when the casper libraries
+// moved to /lib), so it is read from the rtld of ELC: its PT_INTERP, or the
+// one of its class for a shared library.  The list of the current releases
+// is used when it can not be read.
+#[cfg(target_os = "freebsd")]
+pub fn get_system_dirs(elc: &ElfInfo) -> Result<search_path::SearchPathVec, std::io::Error> {
+    let rtld = match &elc.interp {
+        Some(interp) => interp.as_str(),
+        None if cfg!(target_pointer_width = "64") && elc.ei_class == object::elf::ELFCLASS32 => {
+            "/libexec/ld-elf32.so.1"
+        }
+        None => "/libexec/ld-elf.so.1",
+    };
+    match rtld_standard_path(rtld) {
+        Some(dirs) => Ok(search_path::fixed_list(dirs)),
+        None => Ok(search_path::fixed_list(
+            freebsd_standard_dirs(elc.ei_class).iter().copied(),
+        )),
     }
 }
 
 #[cfg(target_os = "freebsd")]
-pub fn get_system_dirs(elc: &ElfInfo) -> Result<search_path::SearchPathVec, std::io::Error> {
-    Ok(search_path::fixed_list(
-        freebsd_standard_dirs(elc.ei_class).iter().copied(),
-    ))
+fn rtld_standard_path(rtld: &str) -> Option<Vec<String>> {
+    use object::{Object, ObjectSection};
+
+    let mmap = crate::pathutils::map_file(&rtld).ok()?;
+    let object = object::File::parse(&*mmap).ok()?;
+    let section = object.section_by_name(".rodata")?;
+    standard_path_in(section.data().ok()?)
+}
+
+// The first NUL terminated string of DATA which is a colon separated list of
+// at least two absolute directories (the only such string of the rtld read
+// only data, ld_standard_library_path).
+#[cfg(any(target_os = "freebsd", all(test, target_os = "linux")))]
+fn standard_path_in(data: &[u8]) -> Option<Vec<String>> {
+    data.split(|&b| b == 0)
+        .filter(|s| s.contains(&b':') && s.iter().all(|b| (0x20..=0x7e).contains(b)))
+        .map(|s| std::str::from_utf8(s).unwrap())
+        .find(|s| {
+            s.split(':')
+                .all(|dir| dir.len() > 1 && dir.starts_with('/'))
+        })
+        .map(|s| s.split(':').map(str::to_string).collect())
 }
 
 #[cfg(all(test, any(target_os = "freebsd", target_os = "linux")))]
 mod freebsd_tests {
-    use super::freebsd_standard_dirs;
-    use object::elf::*;
+    use super::*;
+    use object::elf::{ELFCLASS32, ELFCLASS64};
 
     #[test]
     fn standard_dirs() {
-        assert_eq!(
-            freebsd_standard_dirs(ELFCLASS64),
-            ["/lib/casper", "/lib", "/usr/lib"]
-        );
+        assert_eq!(freebsd_standard_dirs(ELFCLASS64), ["/lib", "/usr/lib"]);
         if cfg!(target_pointer_width = "64") {
             assert_eq!(freebsd_standard_dirs(ELFCLASS32), ["/lib32", "/usr/lib32"]);
         }
+    }
+
+    // The list compiled in the rtld, amid its other strings.
+    #[test]
+    fn compiled_standard_path() {
+        let data = b"%s: invalid\0/var/run/ld-elf.so.hints\0a:b\0/:/x\0\
+            /lib/casper:/lib:/usr/lib\0/etc/libmap.conf\0/lib32:/usr/lib32\0";
+        assert_eq!(
+            standard_path_in(data),
+            Some(vec![
+                "/lib/casper".to_string(),
+                "/lib".to_string(),
+                "/usr/lib".to_string()
+            ])
+        );
+        assert_eq!(
+            standard_path_in(b"LD_\0/lib32:/usr/lib32\0"),
+            Some(vec!["/lib32".to_string(), "/usr/lib32".to_string()])
+        );
+        assert_eq!(standard_path_in(b"/lib\0x:/y\0"), None);
     }
 }
 
