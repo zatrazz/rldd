@@ -130,8 +130,8 @@ impl Loader for FreeBsd {
             return Some(open_path_dependency(name, config, elc, namespace, preload));
         }
 
-        let search = |list: &'a search_path::SearchPathVec, mode: DepMode| {
-            list.iter().find_map(|dir| {
+        let search = |dirs: Vec<&'a search_path::SearchPath>, mode: DepMode| {
+            dirs.into_iter().find_map(|dir| {
                 let dir = match libmap_find(config, refobj, &dir.path) {
                     Some(mapped) => Cow::Owned(mapped),
                     None => Cow::Borrowed(dir.path.as_str()),
@@ -139,26 +139,52 @@ impl Loader for FreeBsd {
                 search_dir(dir, &name, elc, config.platform, mode, namespace)
             })
         };
-        // DF_1_NODEFLIB skips the hints and the standard directories.
+        let all = |list: &'a search_path::SearchPathVec| list.iter().collect::<Vec<_>>();
+        // DF_1_NODEFLIB skips the standard directories, and the hints ones
+        // that are standard directories too.
         let nodeflib = !preload && elc.nodeflibs;
         let hints = config
             .ld_cache
             .as_ref()
-            .and_then(|cache| cache.directories());
+            .and_then(|cache| cache.directories())
+            .map(|hints| gethints(hints, &config.system_dirs, nodeflib));
         let lists = [
-            ((!preload).then_some(&elc.rpath), DepMode::DtRpath),
-            (Some(&config.ld_library_path), DepMode::LdLibraryPath),
-            ((!preload).then_some(&elc.runpath), DepMode::DtRunpath),
-            (hints.filter(|_| !nodeflib), DepMode::LdCache),
+            ((!preload).then(|| all(&elc.rpath)), DepMode::DtRpath),
+            (Some(all(&config.ld_library_path)), DepMode::LdLibraryPath),
+            ((!preload).then(|| all(&elc.runpath)), DepMode::DtRunpath),
+            (hints, DepMode::LdCache),
             (
-                (!preload && !nodeflib).then_some(&config.system_dirs),
+                (!preload && !nodeflib).then(|| all(&config.system_dirs)),
                 DepMode::SystemDirs,
             ),
         ];
         lists
             .into_iter()
-            .find_map(|(list, mode)| list.and_then(|list| search(list, mode)))
+            .find_map(|(dirs, mode)| dirs.and_then(|dirs| search(dirs, mode)))
     }
+
+    // Only shown on the locations searched for a dependency not found, the
+    // search itself being the resolve_dependency one.
+    fn nodeflib_rule(step: SearchStep, _elc: &ElfInfo) -> NodeflibRule {
+        match step {
+            SearchStep::Cache => NodeflibRule::OutsideSystemDirs,
+            SearchStep::SystemDirs => NodeflibRule::Skip,
+            _ => NodeflibRule::Search,
+        }
+    }
+}
+
+// The HINTS directories searched: with NOSTDLIB (DF_1_NODEFLIB), without the
+// ones that are also STANDARD directories (gethints(true)).
+fn gethints<'a>(
+    hints: &'a search_path::SearchPathVec,
+    standard: &search_path::SearchPathVec,
+    nostdlib: bool,
+) -> Vec<&'a search_path::SearchPath> {
+    hints
+        .iter()
+        .filter(|dir| !nostdlib || !standard.iter().any(|std| std.path == dir.path))
+        .collect()
 }
 
 // The lm_find mapping of NAME, a library name or a search directory, for the
@@ -301,6 +327,46 @@ mod tests {
             candidate(&config, "/bin/other", "libbaz.so.1", true),
             Some(baz)
         );
+        Ok(())
+    }
+
+    // DF_1_NODEFLIB skips the standard directories, and the hints ones that
+    // are standard directories too.
+    #[test]
+    fn nodeflib_directories() -> std::io::Result<()> {
+        let tmpdir = TempDir::new()?;
+        let a = tmpdir.path().join("a");
+        fs::create_dir(&a)?;
+        fs::write(a.join("libbar.so.1"), [])?;
+        let a = a.to_str().unwrap();
+
+        let ld_cache = None;
+        let mut config = config(&tmpdir, &ld_cache, &[], "")?;
+        config.system_dirs = search_path::fixed_list([a]);
+        let mut elc = ElfInfo::for_test(EM_X86_64, FileFlags(0));
+        let name = "libbar.so.1".to_string();
+        let resolve = |elc: &ElfInfo| {
+            FreeBsd::resolve_dependency(
+                &name,
+                &config,
+                elc,
+                "/bin/prog",
+                &Default::default(),
+                false,
+            )
+            .is_some()
+        };
+        assert!(resolve(&elc));
+        elc.nodeflibs = true;
+        assert!(!resolve(&elc));
+
+        let hints = search_path::fixed_list(["/lib", "/usr/local/lib", "/usr/lib"]);
+        let standard = search_path::fixed_list(["/lib", "/usr/lib"]);
+        let paths = |dirs: Vec<&search_path::SearchPath>| -> Vec<String> {
+            dirs.into_iter().map(|dir| dir.path.clone()).collect()
+        };
+        assert_eq!(paths(gethints(&hints, &standard, true)), ["/usr/local/lib"]);
+        assert_eq!(paths(gethints(&hints, &standard, false)).len(), 3);
         Ok(())
     }
 
