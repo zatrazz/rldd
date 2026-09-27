@@ -55,7 +55,13 @@ All notable changes to this project will be documented in this file.
   absolute load path below /System/iOSSupport first.
 - Mach-O: the x86_64h slice and dyld shared cache are preferred on a Haswell
   or newer Intel host, like dyld does.
-<!-- PE -->
+- PE: the WOW64 file system redirection applies to every directory the search
+  order reaches: System32 and everything below it are the WOW64 system
+  directory for a 32-bit image, except catroot, catroot2, driverstore,
+  drivers\etc, logfiles, and spool, and Sysnative is the real System32.  A
+  32-bit ARM image has SysArm32 as its system directory.
+- PE: a .NET image gets the `mscoree.dll` dependency the loader maps for it,
+  with the `clr` attribute, when its imports do not record it.
 - The options that take a value accept the `--option=value` form.
 - `-h` prints the usage, like `--help`.
 - The package declares its minimum supported Rust version (1.88), so an older
@@ -67,6 +73,10 @@ All notable changes to this project will be documented in this file.
   compares every executable with what the device linker lists
   (`linker64 --list`, from Android 11), `--library-path` and `--preload`
   included.
+- The `-Paths` option of the Windows test suite, which starts every executable
+  of the sweep under the debugger up to the initial loader breakpoint, and
+  compares the modules the loader maps with the paths rldd resolves, along
+  with `-Timeout` to bound each run.
 - The configuration parsers of the Android and the BSD backends, and the
   loader rules of the FreeBSD, OpenBSD, NetBSD, and illumos ones, are also
   built for the Linux tests, so `cargo test` and the CI run their unit tests.
@@ -142,7 +152,32 @@ All notable changes to this project will be documented in this file.
 - Mach-O: an @rpath `--preload` entry is taken as is and an @loader_path one is
   not expanded, like dyld; the dependencies of an inserted library are loaded
   after the main executable tree.
-<!-- PE -->
+- PE: the known DLLs are the sections smss creates for each architecture: the
+  KnownDLLs registry list along with every module its static imports pull in,
+  with the API sets resolved (ntdll, kernelbase, and ucrtbase among them).  A
+  module a known DLL only pulls in through a delay load import or a forwarder
+  follows the search order instead of being taken from the known DLLs
+  directory.
+- PE: the manifest is the one the loader activates: for the executable, its
+  resource 1, the external `<name>.exe.manifest` file, or its resource 2, only
+  one of them (the PreferExternalManifest value puts the external file first),
+  and for a DLL its resource 2 alone.
+- PE: the `.local` redirection is ignored when the process starts with a
+  manifest, unless the DevOverrideEnable value is set.
+- PE: `--library-path` removes the current directory from the search order,
+  like SetDllDirectory does.
+- PE: a candidate the loader cannot map (a file that is not an image, a
+  truncated or an empty one, or a directory) stops the search, and the
+  dependency is printed as not found with the `bad image` attribute, `-v`
+  showing the reason.
+- PE: a relative import name with a path is searched below each directory of
+  the order, and an absolute one is taken as it is, the name being printed as
+  the alias of the module; the `.local` redirection applies to its base name,
+  and the side-by-side one does not apply.
+- PE: an IL only .NET image built for any CPU is resolved as the native
+  process the system runs it as, instead of a 32-bit one.
+- PE: `-d` and `-r` bind an import through the forwarders, like the loader, and
+  report the symbol and the module the chain ends on.
 - Only `-h` and `--help` print the usage, so a file named `help` is inspected.
 - A file of another object format is reported as such (`not an ELF object
   (this build inspects ELF objects only)`), a directory as `is a directory` on
@@ -157,8 +192,9 @@ All notable changes to this project will be documented in this file.
   `NO_COLOR` rules.
 - The package no longer ships the GitHub workflow and the git configuration
   files, and the libc crate is only a dependency of the Android build.
-- The Linux, BSD, macOS, and Android test suites always build rldd first, and
-  report a crash (rldd killed by a signal) as a failure.
+- Every test suite always builds rldd first.  The Linux, BSD, macOS, and
+  Android ones report a crash (rldd killed by a signal) as a failure, and the
+  Windows one fails on an rldd error for an object dumpbin reads.
 
 ### Fixed
 
@@ -274,6 +310,8 @@ All notable changes to this project will be documented in this file.
 - ELF (NetBSD): the last of the DT_RPATH and DT_RUNPATH entries is the object
   search list, and `$ORIGIN` expands to the directory of each library, not of
   the executable.
+- ELF (NetBSD): `--platform` also sets the `$PLATFORM` value of the
+  `ld.so.conf` directories.
 - ELF (illumos): the 64-bit default directories are /lib/64 and /usr/lib/64,
   and any architecture is accepted (the SPARC and aarch64 inputs were
   refused).
@@ -304,7 +342,26 @@ All notable changes to this project will be documented in this file.
   leading component, the leading ../ of an @executable_path path are resolved
   against the executable directory, and only the load paths not starting with
   @ are retried through their realpath.
-<!-- PE -->
+- PE: an import or forwarder name with a multi-byte character no longer panics
+  on the API set and forwarder checks.
+- PE: the manifests are parsed as XML: a dependency inside a comment is
+  ignored, the namespace prefixed elements the Visual Studio templates generate
+  are read, and so are the UTF-16 manifests.
+- PE: the WinSxS directory names the store shortens are matched (an assembly
+  name over 40 characters, or a language over 8, was never found).
+- PE: the exports are read entry by entry, so a malformed entry no longer makes
+  `-d` report every import of the module, and the symbol names read are
+  bounded.
+- PE: the delay load descriptors the Visual C++ 6 linker wrote are read, and
+  the imports of a bound descriptor without an import name table are no longer
+  read as garbage names.
+- PE: a chain of forwarders is followed to its end, including to a module the
+  forwarding one only delay loads.
+- PE: the DllDirectory and DllDirectory32 values of the KnownDLLs key are
+  expanded.
+- PE: an AMD64 header with CHPE metadata and no ARM64X relocations is an
+  ARM64EC object, not an ARM64X one, so a native ARM64 process no longer loads
+  it, nor an ARM64EC one a plain ARM64 module.
 - PE: `--ignore-prefix` matches either separator (`C:/Windows` pruned
   nothing), and no longer panics on a non-ASCII directory name.
 - A closed standard output (for instance `rldd ... | head`) ends rldd quietly
@@ -320,7 +377,6 @@ All notable changes to this project will be documented in this file.
 
 ### Removed
 
-<!-- PE -->
 - The `glob`, `raw-cpuid`, and `termcolor` dependencies, and the `tempfile`
   development dependency.
 - The `help` help trigger.
