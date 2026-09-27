@@ -239,7 +239,8 @@ impl PeContext {
     fn known_dlls(&self, wow64: Wow64) -> &HashSet<String> {
         self.known_sections[wow64 as usize].get_or_init(|| {
             let dirs = self.knowndll_dirs(wow64);
-            knowndlls::sections(self.knowndlls.names(), |name| {
+            let knowndlls = &self.knowndlls;
+            knowndlls::sections(knowndlls.entries(), knowndlls.excluded(), |name| {
                 let deps = dirs
                     .iter()
                     .find_map(|dir| static_import_modules(&Path::new(dir).join(name)))?;

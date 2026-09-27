@@ -6,7 +6,7 @@ use std::os::windows::ffi::OsStrExt;
 use windows_sys::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS};
 use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ,
-    REG_ROUTINE_FLAGS, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
+    REG_ROUTINE_FLAGS, RRF_RT_REG_DWORD, RRF_RT_REG_MULTI_SZ, RRF_RT_REG_SZ,
 };
 
 // S as a NUL terminated wide string.
@@ -93,6 +93,18 @@ pub fn string(key: &str, value: &str) -> Option<String> {
     Some(String::from_utf16_lossy(&data[..end]))
 }
 
+// The strings of the REG_MULTI_SZ VALUE of the KEY subkey of
+// HKEY_LOCAL_MACHINE, empty when it is not set.
+pub fn multi_string(key: &str, value: &str) -> Vec<String> {
+    let Some(data) = wide_value(key, value, RRF_RT_REG_MULTI_SZ) else {
+        return Vec::new();
+    };
+    data.split(|c| *c == 0)
+        .filter(|string| !string.is_empty())
+        .map(String::from_utf16_lossy)
+        .collect()
+}
+
 // The names of the subkeys of the KEY subkey of HKEY_LOCAL_MACHINE.
 pub fn subkeys(key: &str) -> Vec<String> {
     let mut names = Vec::new();
@@ -164,6 +176,13 @@ mod tests {
         assert!(string(KEY, "ProductName").is_some_and(|name| name.contains("Windows")));
         assert!(string(KEY, "InstallDate").is_none());
         assert!(string(KEY, "rldd-not-a-value").is_none());
+        // A multi string every installation sets.
+        let session = r"SYSTEM\CurrentControlSet\Control\Session Manager";
+        assert!(multi_string(session, "BootExecute")
+            .iter()
+            .any(|entry| entry.contains("autocheck")));
+        assert!(multi_string(session, "rldd-not-a-value").is_empty());
+        assert!(multi_string(KEY, "ProductName").is_empty());
     }
 
     #[test]
