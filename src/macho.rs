@@ -516,7 +516,7 @@ fn candidate_paths(
     // Like the fallback lists, the framework and library lists are mutually
     // exclusive: a framework is not looked up in the DYLD_LIBRARY_PATH
     // directories.
-    let partial = framework_partial_path(dependency);
+    let partial = framework_partial_path(dependency, config.env.image_suffix.as_deref());
     let leaf = pathutils::get_name(&Path::new(dependency));
     if let Some(partial) = partial {
         for dir in &config.env.framework_path {
@@ -589,16 +589,18 @@ fn realpath_leaf(path: &Path) -> Option<String> {
 
 // The framework partial path (Foo.framework/Versions/A/Foo) of a load path
 // whose leaf name matches the framework name, mimicking the dyld
-// getFrameworkPartialPath check used for the framework search paths.
-fn framework_partial_path(path: &str) -> Option<&str> {
+// getFrameworkPartialPath check used for the framework search paths.  With
+// an image SUFFIX, a leaf with the suffix appended to the framework name
+// (the install name of some debug frameworks) also matches, the suffix
+// being compared whole even when it is a list.
+fn framework_partial_path<'a>(path: &'a str, suffix: Option<&str>) -> Option<&'a str> {
     let idx = path.rfind(".framework/")?;
     let start = path[..idx].rfind('/').map(|i| i + 1).unwrap_or(0);
     let leaf = path.rsplit('/').next()?;
-    if &path[start..idx] == leaf {
-        Some(&path[start..])
-    } else {
-        None
-    }
+    let name = &path[start..idx];
+    let matches =
+        leaf == name || suffix.is_some_and(|suffix| leaf.strip_prefix(name) == Some(suffix));
+    matches.then(|| &path[start..])
 }
 
 // The DYLD_IMAGE_SUFFIX variants of a candidate path: the suffixed name
@@ -1821,8 +1823,42 @@ mod tests {
             ("/F/Foo.framework", None),
             ("/usr/lib/libz.dylib", None),
         ] {
-            assert_eq!(framework_partial_path(path), partial, "{path}");
+            assert_eq!(framework_partial_path(path, None), partial, "{path}");
         }
+
+        // A leaf with the image suffix appended to the framework name.
+        let debug = "/F/Foo.framework/Versions/A/Foo_debug";
+        for (suffix, partial) in [
+            (None, None),
+            (Some("_debug"), Some("Foo.framework/Versions/A/Foo_debug")),
+            (Some("_profile"), None),
+            (Some("_de"), None),
+            (Some("_debug:_profile"), None),
+        ] {
+            assert_eq!(framework_partial_path(debug, suffix), partial, "{suffix:?}");
+        }
+        assert_eq!(
+            framework_partial_path("/F/Foo.framework/Foo", Some("_debug")),
+            Some("Foo.framework/Foo")
+        );
+    }
+
+    #[test]
+    fn framework_path_image_suffix() {
+        // A debug framework install name is still a framework load path,
+        // looked up on DYLD_FRAMEWORK_PATH, when its suffix is the image one.
+        let dir = Scratch::new("fwsuffix");
+        let framework = dir.write("fp/Foo.framework/Versions/A/Foo_debug", &x86_64_dylib(&[]));
+        let missing = dir.path("missing/Foo.framework/Versions/A/Foo_debug");
+        let exe = dir.write("bin/exe", &x86_64_exe(&[load(&missing)]));
+        let mut ctx = context(None);
+        ctx.env.framework_path = search_path::from_string(dir.path("fp"), &[':']);
+        assert_eq!(resolve(&mut ctx, &exe), [node(&missing, DepMode::NotFound)]);
+        ctx.env.image_suffix = Some("_debug".to_string());
+        assert_eq!(
+            resolve(&mut ctx, &exe),
+            [node(&framework, DepMode::LdFrameworkPath)]
+        );
     }
 
     #[test]
