@@ -2,8 +2,6 @@
 // known DLLs directory, whatever the search order says.
 
 use std::collections::HashSet;
-use std::ffi::OsStr;
-use std::os::windows::ffi::OsStrExt;
 
 use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
 use windows_sys::Win32::System::Registry::{
@@ -40,13 +38,6 @@ impl KnownDlls {
     }
 }
 
-fn wide(s: &str) -> Vec<u16> {
-    OsStr::new(s)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
-}
-
 fn from_wide(buffer: &[u16], bytes: u32) -> String {
     let len = (bytes as usize / 2).min(buffer.len());
     let units = &buffer[..len];
@@ -59,7 +50,7 @@ fn from_wide(buffer: &[u16], bytes: u32) -> String {
 
 pub fn load() -> KnownDlls {
     let mut known = KnownDlls::default();
-    let subkey = wide(KNOWNDLLS_KEY);
+    let subkey = super::registry::wide(KNOWNDLLS_KEY);
     let mut key: HKEY = std::ptr::null_mut();
 
     // The subkey is NUL terminated and the handle is only used when the call

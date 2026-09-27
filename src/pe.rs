@@ -16,8 +16,11 @@ use crate::search_path;
 mod apiset;
 mod knowndlls;
 mod machine;
+mod registry;
 mod search_dirs;
 mod sxs;
+#[cfg(test)]
+mod testimage;
 
 // A symbol imported from a dependency.
 #[derive(Clone, Debug)]
@@ -82,13 +85,25 @@ struct PeInfo {
     is_dll: bool,
     deps: Vec<PeDep>,
     exports: PeExports,
-    // The dependent assemblies of the manifest, which the loader searches
-    // before the standard order.
+    // The dependent assemblies of the manifest the loader activates for the
+    // imports of the object, which it searches before the standard order:
+    // the one of a module, or the process one for the executable (see
+    // process_manifest).
     assemblies: Vec<sxs::Assembly>,
-    // Whether the object embeds a manifest resource, which the loader
-    // prefers over an external one.
+    // Whether the loader activates a manifest for the object.
     manifest: bool,
+    // The RT_MANIFEST resource the process starts with, when the object is
+    // the executable.
+    process_manifest: Option<Vec<sxs::Assembly>>,
 }
+
+// The RT_MANIFEST resource IDs the loader reads, from winuser.h.  Resource 3
+// (ISOLATIONAWARE_NOSTATICIMPORT_MANIFEST_RESOURCE_ID) is only activated by
+// the isolation aware wrappers, never for the static imports.
+const CREATEPROCESS_MANIFEST_RESOURCE_ID: u16 = 1;
+const ISOLATIONAWARE_MANIFEST_RESOURCE_ID: u16 = 2;
+
+const SIDE_BY_SIDE_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\SideBySide";
 
 // The resolution context: the system state the loader consults before the search order,
 // along with the command line settings.
@@ -98,6 +113,9 @@ pub struct PeContext {
     winsxs: sxs::WinSxs,
     windows_dir: String,
     safe_search: bool,
+    // The PreferExternalManifest value, which puts the external manifest of
+    // an executable before the embedded one.
+    prefer_external_manifest: bool,
     dll_directory: search_path::SearchPathVec,
     all: bool,
     verbose: bool,
@@ -127,6 +145,8 @@ impl PeContext {
             winsxs: sxs::WinSxs::new(&windows_dir),
             windows_dir,
             safe_search,
+            prefer_external_manifest: registry::dword(SIDE_BY_SIDE_KEY, "PreferExternalManifest")
+                .is_some_and(|value| value != 0),
             dll_directory: search_path::SearchPathVec::new(),
             all: false,
             verbose: false,
@@ -162,7 +182,7 @@ pub fn resolve_binary(ctx: &mut PeContext, arg: &str) -> Result<DepTree, std::io
     let canonical = Path::new(arg).canonicalize()?;
     let filename = pathutils::strip_verbatim(&canonical.to_string_lossy());
     let filename = Path::new(&filename);
-    let pei = open_pe_file(&filename)?;
+    let pei = open_object(ctx, &filename, true)?;
 
     let application = pathutils::get_path(&filename);
     let dirs = search_dirs::build(
@@ -508,7 +528,7 @@ pub fn check_imports(ctx: &PeContext, deptree: &DepTree, delay_load: bool) -> Ve
     let mut undefined = Vec::new();
     let mut cache = HashMap::<String, PeExports>::new();
 
-    for node in &deptree.arena {
+    for (index, node) in deptree.arena.iter().enumerate() {
         // The duplicated and the not found entries hold no imports.
         let Some(path) = &node.val.path else {
             continue;
@@ -516,7 +536,7 @@ pub fn check_imports(ctx: &PeContext, deptree: &DepTree, delay_load: bool) -> Ve
         if node.val.found {
             continue;
         }
-        let Ok(info) = open_pe_file(&Path::new(path).join(&node.val.name)) else {
+        let Ok(info) = open_object(ctx, &Path::new(path).join(&node.val.name), index == 0) else {
             continue;
         };
 
@@ -660,21 +680,51 @@ fn try_open(config: &Config, path: &Path) -> Option<PeInfo> {
     machine::compatible(config.machine, info.machine).then_some(info)
 }
 
+// Open FILENAME, which is the object given on the command line when ROOT is
+// set, and then an executable starts the process with its manifest.
+fn open_object<P: AsRef<Path>>(
+    ctx: &PeContext,
+    filename: &P,
+    root: bool,
+) -> Result<PeInfo, std::io::Error> {
+    let mut pei = open_pe_file(filename)?;
+    if root && !pei.is_dll {
+        process_manifest(ctx, filename.as_ref(), &mut pei);
+    }
+    Ok(pei)
+}
+
+// The manifest of the process an executable starts, which replaces the module
+// one: the RT_MANIFEST resource 1, then the external '<name>.exe.manifest',
+// and at last the resource 2 a module would use.  Only one of them is
+// activated, so a dependency the chosen one does not declare is not taken
+// from the others.  The PreferExternalManifest value puts the external file
+// first, which is the Windows XP precedence.  Checked on Windows 11 with an
+// executable importing comctl32 and a manifest asking for its version 6 on
+// each place, alone and along with another one that does not.
+fn process_manifest(ctx: &PeContext, filename: &Path, pei: &mut PeInfo) {
+    let external = || {
+        let external = format!("{}.manifest", filename.to_string_lossy());
+        fs::read(external)
+            .ok()
+            .map(|manifest| sxs::parse_manifest(&manifest))
+    };
+    let manifest = match ctx.prefer_external_manifest {
+        false => pei.process_manifest.take().or_else(external),
+        true => external().or_else(|| pei.process_manifest.take()),
+    };
+    if let Some(assemblies) = manifest {
+        pei.assemblies = assemblies;
+        pei.manifest = true;
+    }
+}
+
+// Open FILENAME as a module, whose manifest is only its RT_MANIFEST resource
+// 2: the loader reads no external file for a DLL, and ignores the resource 1
+// and 3 of one.
 fn open_pe_file<P: AsRef<Path>>(filename: &P) -> Result<PeInfo, std::io::Error> {
     let mmap = pathutils::map_file(filename)?;
-
-    let mut pei = parse_object(&mmap).map_err(Error::other)?;
-
-    // The loader falls back to an external manifest when the object embeds
-    // none.
-    if !pei.manifest {
-        let external = format!("{}.manifest", filename.as_ref().to_string_lossy());
-        if let Ok(manifest) = fs::read(&external) {
-            pei.assemblies = sxs::parse_manifest(&manifest);
-        }
-    }
-
-    Ok(pei)
+    parse_object(&mmap).map_err(Error::other)
 }
 
 fn parse_object(data: &[u8]) -> Result<PeInfo, &'static str> {
@@ -698,6 +748,7 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
         exports: PeExports::default(),
         assemblies: Vec::new(),
         manifest: false,
+        process_manifest: None,
     };
 
     if let Ok(Some(table)) = file.import_table() {
@@ -748,9 +799,13 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
         pei.exports = parse_exports(&table);
     }
 
-    if let Some(manifest) = manifest_resource(&file) {
+    if let Some(manifest) = manifest_resource(&file, ISOLATIONAWARE_MANIFEST_RESOURCE_ID) {
         pei.assemblies = sxs::parse_manifest(manifest);
         pei.manifest = true;
+    }
+    if !pei.is_dll {
+        pei.process_manifest =
+            manifest_resource(&file, CREATEPROCESS_MANIFEST_RESOURCE_ID).map(sxs::parse_manifest);
     }
 
     Ok(pei)
@@ -808,9 +863,12 @@ fn has_chpe_metadata<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> bool {
     u64::from_le_bytes(pointer.try_into().unwrap()) != 0
 }
 
-// The embedded RT_MANIFEST resource, which declares the side-by-side
+// The embedded RT_MANIFEST resource ID, which declares the side-by-side
 // assemblies the object depends on.
-fn manifest_resource<'data, Pe: ImageNtHeaders>(file: &PeFile<'data, Pe>) -> Option<&'data [u8]> {
+fn manifest_resource<'data, Pe: ImageNtHeaders>(
+    file: &PeFile<'data, Pe>,
+    id: u16,
+) -> Option<&'data [u8]> {
     let sections = file.section_table();
     let directory = file
         .data_directories()
@@ -826,7 +884,13 @@ fn manifest_resource<'data, Pe: ImageNtHeaders>(file: &PeFile<'data, Pe>) -> Opt
         .data(directory)
         .ok()?
         .table()?;
-    let languages = manifests.entries.first()?.data(directory).ok()?.table()?;
+    let languages = manifests
+        .entries
+        .iter()
+        .find(|entry| entry.name_or_id().id() == Some(id))?
+        .data(directory)
+        .ok()?
+        .table()?;
     let entry = languages.entries.first()?.data(directory).ok()?.data()?;
 
     let data = sections.pe_data_at(file.data(), entry.offset_to_data.get(LE))?;
@@ -1061,6 +1125,89 @@ mod tests {
         let dirs = dot_local_dirs(&exe, Some(application.as_str()));
         assert_eq!(dirs.len(), 1);
         assert!(dirs[0].0.path.to_lowercase().ends_with("app.exe.local"));
+    }
+
+    // A manifest asking for the NAME assembly.
+    fn manifest(name: &str) -> Vec<u8> {
+        format!(
+            r#"<assembly><dependency><dependentAssembly>
+            <assemblyIdentity name="{name}" version="1.0.0.0"/>
+            </dependentAssembly></dependency></assembly>"#
+        )
+        .into_bytes()
+    }
+
+    // The assembly names the loader activates for the object FILE builds, laid
+    // out as NAME with an external manifest asking for the 'external' one.
+    fn activated(ctx: &PeContext, image: &testimage::Image, external: bool) -> Vec<String> {
+        let dir = crate::tempdir::TempDir::new().unwrap();
+        let name = if image.characteristics & pe::IMAGE_FILE_DLL.0 != 0 {
+            "test.dll"
+        } else {
+            "test.exe"
+        };
+        let path = dir.path().join(name);
+        fs::write(&path, image.build()).unwrap();
+        if external {
+            fs::write(
+                dir.path().join(format!("{name}.manifest")),
+                manifest("external"),
+            )
+            .unwrap();
+        }
+        let pei = open_object(ctx, &path, true).unwrap();
+        assert_eq!(pei.manifest, !pei.assemblies.is_empty());
+        pei.assemblies.into_iter().map(|a| a.name).collect()
+    }
+
+    // A DLL only has the RT_MANIFEST resource 2 activated, never the 1 or the
+    // 3 one, nor an external file.
+    #[test]
+    fn module_manifest() {
+        let ctx = PeContext::new(true);
+        let one = manifest("one");
+        let two = manifest("two");
+        let three = manifest("three");
+
+        let mut image = testimage::Image::dll(pe::IMAGE_FILE_MACHINE_AMD64, true);
+        image.manifests(&[(1, &one), (2, &two), (3, &three)]);
+        assert_eq!(activated(&ctx, &image, true), ["two"]);
+
+        let mut image = testimage::Image::dll(pe::IMAGE_FILE_MACHINE_AMD64, true);
+        image.manifests(&[(1, &one), (3, &three), (123, &three)]);
+        assert!(activated(&ctx, &image, false).is_empty());
+        assert!(activated(&ctx, &image, true).is_empty());
+    }
+
+    // An executable has the manifest of its process activated: the resource
+    // 1, then the external file, then the resource 2.
+    #[test]
+    fn process_manifest_precedence() {
+        let mut ctx = PeContext::new(true);
+        let one = manifest("one");
+        let two = manifest("two");
+        let three = manifest("three");
+        let exe = |manifests: &[(u16, &[u8])]| {
+            let mut image = testimage::Image::exe(pe::IMAGE_FILE_MACHINE_AMD64, true);
+            image.manifests(manifests);
+            image
+        };
+
+        let both = exe(&[(1, &one), (2, &two)]);
+        assert_eq!(activated(&ctx, &both, false), ["one"]);
+        assert_eq!(activated(&ctx, &both, true), ["one"]);
+
+        let module = exe(&[(2, &two)]);
+        assert_eq!(activated(&ctx, &module, false), ["two"]);
+        assert_eq!(activated(&ctx, &module, true), ["external"]);
+
+        let isolation = exe(&[(3, &three)]);
+        assert!(activated(&ctx, &isolation, false).is_empty());
+        assert_eq!(activated(&ctx, &isolation, true), ["external"]);
+
+        ctx.prefer_external_manifest = true;
+        assert_eq!(activated(&ctx, &both, true), ["external"]);
+        assert_eq!(activated(&ctx, &both, false), ["one"]);
     }
 
     #[test]
