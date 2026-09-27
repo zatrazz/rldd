@@ -2,6 +2,8 @@
 
 use std::io::IsTerminal;
 
+use crate::pathutils;
+
 // The SGR sequences for the normal (not intense) foreground colors, matching
 // what a terminal renders for the 30-37 range.
 const RESET: &str = "\x1b[0m";
@@ -97,6 +99,12 @@ fn enable_virtual_terminal() -> bool {
     true
 }
 
+// The DIR directory ending with a separator, for the file name printed after
+// it.
+fn dir_prefix(dir: &str) -> String {
+    pathutils::join(dir, "")
+}
+
 pub struct Printer {
     pp: bool,
     ldd: bool,
@@ -147,7 +155,7 @@ impl Printer {
         out.push('\n');
     }
 
-    pub fn print_executable(&self, path: &Option<String>, name: &String) {
+    pub fn print_executable(&self, path: &Option<String>, name: &str) {
         let mut out = String::new();
 
         let mut style_path = Style::new();
@@ -163,8 +171,7 @@ impl Printer {
 
         if self.pp {
             if let Some(path) = path {
-                let delim = std::path::MAIN_SEPARATOR;
-                self.write_colorized(&mut out, &style_path, &format!("{path}{delim}"));
+                self.write_colorized(&mut out, &style_path, &dir_prefix(path));
             }
         }
 
@@ -179,9 +186,9 @@ impl Printer {
 
     fn print_entry(
         &self,
-        dtneeded: &String,
+        dtneeded: &str,
         alias: Option<&str>,
-        path: &String,
+        path: &str,
         mode: &str,
         found: bool,
     ) {
@@ -199,8 +206,7 @@ impl Printer {
         }
 
         if self.pp {
-            let delim = std::path::MAIN_SEPARATOR;
-            self.write_colorized(&mut out, &style, &format!("{path}{delim}"));
+            self.write_colorized(&mut out, &style, &dir_prefix(path));
         }
 
         self.write_colorized(&mut out, &style.bold(!found), dtneeded);
@@ -228,21 +234,19 @@ impl Printer {
         out!("\\_ ");
     }
 
-    fn print_ldd(&self, dtneeded: &String, alias: Option<&str>, path: &String) {
+    fn print_ldd(&self, dtneeded: &str, alias: Option<&str>, path: &str) {
         self.flush(&format!(
-            "        {} => {}{}{}\n",
+            "        {} => {}\n",
             alias.unwrap_or(dtneeded),
-            path,
-            std::path::MAIN_SEPARATOR,
-            dtneeded
+            pathutils::join(path, dtneeded)
         ));
     }
 
     pub fn print_dependency(
         &self,
-        dtneeded: &String,
+        dtneeded: &str,
         alias: Option<&str>,
-        path: &String,
+        path: &str,
         mode: &str,
         deptrace: &[bool],
     ) {
@@ -256,9 +260,9 @@ impl Printer {
 
     pub fn print_already_found(
         &self,
-        dtneeded: &String,
+        dtneeded: &str,
         alias: Option<&str>,
-        path: &String,
+        path: &str,
         mode: &str,
         deptrace: &[bool],
     ) {
@@ -279,7 +283,7 @@ impl Printer {
 
     pub fn print_not_found(
         &self,
-        dtneeded: &String,
+        dtneeded: &str,
         alias: Option<&str>,
         attrs: &[&'static str],
         searched: &[String],
@@ -297,7 +301,7 @@ impl Printer {
         // The recorded name, when the resolved module differs from it.
         let dtneeded = match alias {
             Some(alias) if alias != dtneeded => format!("{alias} -> {dtneeded}"),
-            _ => dtneeded.clone(),
+            _ => dtneeded.to_string(),
         };
         self.print_preamble(deptrace);
         let mut out = String::new();

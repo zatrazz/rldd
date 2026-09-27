@@ -20,8 +20,14 @@ pub fn get_name<P: AsRef<Path>>(path: &P) -> String {
 
 // The NAME entry of the DIR directory, joined with the platform separator
 // the way the loaders report it (unlike Path::join, NAME is appended as is).
+// A DIR that already ends with a separator, such as a root directory, is not
+// given a second one.
 pub fn join(dir: &str, name: &str) -> String {
-    format!("{dir}{}{name}", std::path::MAIN_SEPARATOR)
+    if dir.ends_with(std::path::is_separator) {
+        format!("{dir}{name}")
+    } else {
+        format!("{dir}{}{name}", std::path::MAIN_SEPARATOR)
+    }
 }
 
 // Map the whole FILE in memory for reading.  A directory, which unix opens
@@ -96,6 +102,25 @@ pub fn strip_verbatim(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn join_separator() {
+        assert_eq!(join("/usr/lib", "libc.so"), "/usr/lib/libc.so");
+        assert_eq!(join("/usr/lib/", "libc.so"), "/usr/lib/libc.so");
+        assert_eq!(join("/", "libc.so"), "/libc.so");
+        assert_eq!(join("/usr/lib", ""), "/usr/lib/");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn join_separator() {
+        assert_eq!(join(r"C:\Windows", "x.dll"), r"C:\Windows\x.dll");
+        assert_eq!(join(r"C:\", "x.dll"), r"C:\x.dll");
+        assert_eq!(join("C:/", "x.dll"), "C:/x.dll");
+        assert_eq!(join(r"\\host\share\", "x.dll"), r"\\host\share\x.dll");
+        assert_eq!(join(r"C:\Windows", ""), r"C:\Windows\");
+    }
 
     #[test]
     fn map_errors() {
