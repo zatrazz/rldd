@@ -297,19 +297,20 @@ pub fn resolve_binary(ctx: &mut MachOContext, arg: &str) -> Result<DepTree, std:
     };
     vars.add_embedded(&omf.dyld_environment, &executable_path, security);
     let env = DyldEnv::new(&vars);
+    let platform = ImagePlatform::new(&omf);
     let main_rpath = expand_rpaths(
         &omf.rpath,
         &executable_path,
         &executable_path,
         security,
         true,
+        platform.platform() == Some(PLATFORM_IOS),
     );
 
     if ctx.verbose {
         print_object_information(&arch, cache, &env, security, &filename, &omf, &main_rpath);
     }
 
-    let platform = ImagePlatform::new(&omf);
     let config = Config {
         arch: &arch,
         macos: omf.filetype == MH_EXECUTE
@@ -396,6 +397,7 @@ fn load_dependents(config: &Config, tree: &mut Tree, image: usize, rpaths: &[Str
         &pending.loader_path,
         config.security,
         place.level == 0,
+        config.platform == Some(PLATFORM_IOS),
     );
     for rpath in rpaths {
         if !stack.contains(rpath) {
@@ -767,6 +769,25 @@ fn candidate_paths(
         // matches.  Otherwise it never tries a load path still starting with
         // @, such as an @loader_path one of an inserted library
         // (Loader::forEachResolvedAtPathVar).
+        let ios = config.platform == Some(PLATFORM_IOS);
+        let dependency = match dependency {
+            // Some old iOS apps reference WebKit at its former location,
+            // which dyld redirects (rdar://problem/58959974).
+            "/System/Library/PrivateFrameworks/WebKit.framework/WebKit" if ios => {
+                "/System/Library/Frameworks/WebKit.framework/WebKit"
+            }
+            dependency => dependency,
+        };
+        // A Mac Catalyst process, or an iOS one on a Mac, looks for an
+        // absolute load path below /System/iOSSupport first, where the iOS
+        // variants of the system libraries are (the catalyst prefix of
+        // PathOverrides::forEachPathVariant).
+        if (ios || config.platform == Some(PLATFORM_MACCATALYST))
+            && dependency.starts_with('/')
+            && !dependency.starts_with(IOS_SUPPORT_SLASH)
+        {
+            candidates.push((format!("{IOS_SUPPORT}{dependency}"), mode));
+        }
         candidates.push((dependency.to_string(), mode));
     }
 
@@ -901,30 +922,44 @@ fn expand_at_path(path: &str, executable_path: Option<&str>, loader_path: Option
 // directory LOADER_PATH, and @executable_path the main executable one.  A
 // restricted process neither expands @executable_path nor the @loader_path
 // of the MAIN executable entries, and only takes the absolute entries, a
-// relative one being taken where dyld allows the @ paths.
+// relative one being taken where dyld allows the @ paths.  An iOS process on
+// a Mac (IOS) looks below /System/iOSSupport before each absolute entry.
 fn expand_rpaths(
     rpaths: &[String],
     executable_path: &str,
     loader_path: &str,
     security: Security,
     main: bool,
+    ios: bool,
 ) -> Vec<String> {
     let allow = security.allow_at_paths();
     let mut expanded: Vec<String> = Vec::new();
+    let mut push = |rpath: String| {
+        if !expanded.contains(&rpath) {
+            expanded.push(rpath);
+        }
+    };
     for rpath in rpaths {
+        if ios && rpath.starts_with('/') {
+            push(format!("{IOS_SUPPORT}{rpath}"));
+        }
         let rpath = expand_at_path(
             rpath,
             allow.then_some(executable_path),
             (allow || !main).then_some(loader_path),
         );
-        if (allow || rpath.starts_with('/')) && !expanded.contains(&rpath) {
-            expanded.push(rpath);
+        if allow || rpath.starts_with('/') {
+            push(rpath);
         }
     }
     expanded
 }
 
 const CRYPTEX_OS_PATH: &str = "/System/Volumes/Preboot/Cryptexes/OS";
+
+// The root of the iOS variants of the system libraries on a Mac.
+const IOS_SUPPORT: &str = "/System/iOSSupport";
+const IOS_SUPPORT_SLASH: &str = "/System/iOSSupport/";
 
 // The candidate path below the OS cryptex mount.
 fn cryptex_path(path: &Path) -> Option<PathBuf> {
@@ -2224,10 +2259,13 @@ mod tests {
             paths(macos, open, "/usr/lib/libz.dylib", true),
             ["/usr/lib/libz.dylib", "/usr/local/lib/libz.dylib"]
         );
-        // The other platforms.
+        // The other platforms, where the iOS ones on a Mac also look below
+        // /System/iOSSupport first.
+        let ios_dylib = "/System/iOSSupport/opt/lib/libfoo.dylib";
         assert_eq!(
             paths(Some(PLATFORM_IOS), open, dylib, true),
             [
+                ios_dylib,
                 dylib,
                 "/usr/local/lib/libfoo.dylib",
                 "/usr/lib/libfoo.dylib"
@@ -2235,13 +2273,14 @@ mod tests {
         );
         assert_eq!(
             paths(Some(PLATFORM_MACCATALYST), open, dylib, true),
-            [dylib, "/usr/local/lib/libfoo.dylib"]
+            [ios_dylib, dylib, "/usr/local/lib/libfoo.dylib"]
         );
         assert_eq!(
             paths(Some(PLATFORM_MACCATALYST), open, framework, true),
             [
-                framework,
-                "/System/Library/Frameworks/Foo.framework/Versions/A/Foo"
+                format!("/System/iOSSupport{framework}"),
+                framework.to_string(),
+                "/System/Library/Frameworks/Foo.framework/Versions/A/Foo".to_string()
             ]
         );
         assert_eq!(paths(Some(PLATFORM_DRIVERKIT), open, dylib, true), [dylib]);
@@ -2262,6 +2301,58 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn ios_support_prefix() {
+        let vars = DyldVars::default();
+        let open = Security::default();
+        let paths = |platform, dependency| {
+            candidates(Some(platform), open, &vars, dependency, false)
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect::<Vec<String>>()
+        };
+        let uikit = "/System/Library/Frameworks/UIKit.framework/Versions/A/UIKit";
+        for platform in [PLATFORM_MACCATALYST, PLATFORM_IOS] {
+            assert_eq!(
+                paths(platform, uikit),
+                [format!("/System/iOSSupport{uikit}"), uikit.to_string()]
+            );
+            // Not for a path already there, nor a relative one.
+            let ios = "/System/iOSSupport/usr/lib/libfoo.dylib";
+            assert_eq!(paths(platform, ios), [ios]);
+            assert_eq!(paths(platform, "libfoo.dylib"), ["libfoo.dylib"]);
+        }
+        assert_eq!(paths(PLATFORM_MACOS, uikit), [uikit]);
+        // An iOS process redirects the former WebKit location.
+        let webkit = "/System/Library/PrivateFrameworks/WebKit.framework/WebKit";
+        assert_eq!(
+            paths(PLATFORM_IOS, webkit),
+            [
+                "/System/iOSSupport/System/Library/Frameworks/WebKit.framework/WebKit",
+                "/System/Library/Frameworks/WebKit.framework/WebKit"
+            ]
+        );
+        assert_eq!(
+            paths(PLATFORM_MACCATALYST, webkit),
+            [format!("/System/iOSSupport{webkit}"), webkit.to_string()]
+        );
+
+        // An iOS process looks below /System/iOSSupport before the absolute
+        // LC_RPATH entries.
+        let rpaths = vec![
+            "/usr/lib/swift".to_string(),
+            "@executable_path/Frameworks".to_string(),
+        ];
+        assert_eq!(
+            expand_rpaths(&rpaths, "/app", "/app", open, true, true),
+            [
+                "/System/iOSSupport/usr/lib/swift",
+                "/usr/lib/swift",
+                "/app/Frameworks"
+            ]
+        );
     }
 
     #[test]
@@ -2728,7 +2819,8 @@ mod tests {
                 "@executable_path/Frameworks/"
             ]
         );
-        let expand = |security, main| expand_rpaths(&info.rpath, "/exe", "/loader", security, main);
+        let expand =
+            |security, main| expand_rpaths(&info.rpath, "/exe", "/loader", security, main, false);
         let unrestricted = Security::default();
         for main in [true, false] {
             assert_eq!(
@@ -2748,11 +2840,11 @@ mod tests {
         );
         let relative = vec!["lib".to_string(), "/usr/lib".to_string()];
         assert_eq!(
-            expand_rpaths(&relative, "/exe", "/loader", unrestricted, true),
+            expand_rpaths(&relative, "/exe", "/loader", unrestricted, true, false),
             ["lib", "/usr/lib"]
         );
         assert_eq!(
-            expand_rpaths(&relative, "/exe", "/loader", restricted, true),
+            expand_rpaths(&relative, "/exe", "/loader", restricted, true, false),
             ["/usr/lib"]
         );
     }
