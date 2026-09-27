@@ -1,3 +1,5 @@
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 
@@ -85,20 +87,27 @@ impl DepNode {
     }
 }
 
-impl arenatree::EqualString for DepNode {
+impl DepMode {
+    // Dependencies resolved through a search path list are recorded with
+    // the location they were found at, so they are matched by the leaf
+    // name (the same leaf always resolves to the same object).
     #[cfg(unix)]
-    fn eqstr(&self, other: &str) -> bool {
-        // Dependencies resolved through a search path list are recorded with
-        // the location they were found at, so they are matched by the leaf
-        // name (the same leaf always resolves to the same object).
-        if matches!(
-            self.mode,
+    fn matched_by_leaf(self) -> bool {
+        matches!(
+            self,
             DepMode::Preload
                 | DepMode::LdLibraryPath
                 | DepMode::LdFrameworkPath
                 | DepMode::LdFallbackLibraryPath
                 | DepMode::LdFallbackFrameworkPath
-        ) {
+        )
+    }
+}
+
+impl arenatree::EqualString for DepNode {
+    #[cfg(unix)]
+    fn eqstr(&self, other: &str) -> bool {
+        if self.mode.matched_by_leaf() {
             pathutils::get_name(&Path::new(other)) == self.name
         } else if self.path.is_none() || !Path::new(other).is_absolute() {
             *other == self.name
@@ -131,6 +140,66 @@ impl DepTree {
         if all {
             self.addnode(node, parent);
         }
+    }
+}
+
+// An index of the tree nodes of the objects found (neither the not found
+// entries nor the root), by the names DepNode::eqstr matches them with, so
+// looking up a name does not scan the whole tree: the ones resolved through a
+// search path list by their leaf name, and any other one by its name, or by
+// its full path for an absolute name.  It is updated with the nodes added
+// since the previous lookup, in tree order, so the first node matching a name
+// is the one found.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[derive(Default)]
+pub struct FoundIndex {
+    // The number of tree nodes already indexed.
+    indexed: usize,
+    names: HashMap<String, usize>,
+    // The names of the nodes without a path, also matched by an absolute
+    // name.
+    pathless: HashMap<String, usize>,
+    paths: HashMap<String, usize>,
+    leaves: HashMap<String, usize>,
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+impl FoundIndex {
+    fn update(&mut self, deptree: &DepTree) {
+        for (idx, node) in deptree.arena.iter().enumerate().skip(self.indexed) {
+            let val = &node.val;
+            if matches!(val.mode, DepMode::NotFound | DepMode::Executable) {
+                continue;
+            }
+            if val.mode.matched_by_leaf() {
+                self.leaves.entry(val.name.clone()).or_insert(idx);
+                continue;
+            }
+            self.names.entry(val.name.clone()).or_insert(idx);
+            match &val.path {
+                Some(path) => {
+                    self.paths
+                        .entry(pathutils::join(path, &val.name))
+                        .or_insert(idx);
+                }
+                None => {
+                    self.pathless.entry(val.name.clone()).or_insert(idx);
+                }
+            }
+        }
+        self.indexed = deptree.arena.len();
+    }
+
+    // The first node of DEPTREE for an object found that matches NAME.
+    pub fn find(&mut self, deptree: &DepTree, name: &str) -> Option<usize> {
+        self.update(deptree);
+        let direct = if Path::new(name).is_absolute() {
+            [self.paths.get(name), self.pathless.get(name)]
+        } else {
+            [self.names.get(name), None]
+        };
+        let leaf = self.leaves.get(&pathutils::get_name(&Path::new(name)));
+        direct.into_iter().chain([leaf]).flatten().min().copied()
     }
 }
 
@@ -276,5 +345,52 @@ mod tests {
             undefined(None, Some("kernel32.dll")),
             "sym, from kernel32.dll"
         );
+    }
+}
+
+#[cfg(all(test, unix, not(target_os = "macos")))]
+mod found_index_tests {
+    use super::arenatree::EqualString;
+    use super::*;
+
+    // The index finds the same node as the first found one eqstr matches.
+    #[test]
+    fn found_index_matches_eqstr() {
+        let mut deptree = DepTree::new();
+        let root = deptree.addroot(DepNode::new(
+            Some("/bin".to_string()),
+            "main".to_string(),
+            DepMode::Executable,
+        ));
+        let node = |path: &str, name: &str, mode| {
+            DepNode::new(Some(path.to_string()), name.to_string(), mode)
+        };
+        let mut index = FoundIndex::default();
+        deptree.addnode(DepNode::not_found("libx.so".to_string(), Vec::new()), root);
+        assert_eq!(index.find(&deptree, "libx.so"), None);
+        let x = deptree.addnode(node("/a", "libx.so", DepMode::DtRunpath), root);
+        let p = deptree.addnode(node("/p", "libp.so", DepMode::Preload), root);
+        let d = deptree.addnode(node("/d", "libd.so", DepMode::Direct), root);
+        // The not found entry does not hide the one found later.
+        assert_eq!(index.find(&deptree, "libx.so"), Some(x));
+        assert_eq!(index.find(&deptree, "/a/libx.so"), Some(x));
+        assert_eq!(index.find(&deptree, "/b/libx.so"), None);
+        // A preload entry matches any path with its leaf name.
+        assert_eq!(index.find(&deptree, "/q/libp.so"), Some(p));
+        assert_eq!(index.find(&deptree, "libd.so"), Some(d));
+        assert_eq!(index.find(&deptree, "main"), None);
+        for name in [
+            "libx.so",
+            "/a/libx.so",
+            "/b/libx.so",
+            "/q/libp.so",
+            "libd.so",
+            "main",
+        ] {
+            let first = deptree.arena.iter().position(|n| {
+                n.val.eqstr(name) && !matches!(n.val.mode, DepMode::NotFound | DepMode::Executable)
+            });
+            assert_eq!(index.find(&deptree, name), first, "{name}");
+        }
     }
 }

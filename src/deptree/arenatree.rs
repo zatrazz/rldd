@@ -23,8 +23,10 @@ where
     }
 }
 
-// The Mach-O backend matches the loaded images itself.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+// The ELF backend looks the names up through deptree::FoundIndex and the
+// Mach-O backend matches the loaded images itself, so only the relocation
+// checks of Linux and the PE backend still scan the tree.
+#[cfg_attr(all(unix, not(target_os = "linux")), allow(dead_code))]
 pub trait EqualString {
     fn eqstr(&self, other: &str) -> bool;
 }
@@ -62,12 +64,12 @@ where
     }
 
     // The first node matching VAL.
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[cfg_attr(all(unix, not(target_os = "linux")), allow(dead_code))]
     pub fn index(&self, val: &str) -> Option<usize> {
         self.arena.iter().position(|node| node.val.eqstr(val))
     }
 
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[cfg_attr(all(unix, not(target_os = "linux")), allow(dead_code))]
     pub fn get(&self, val: &str) -> Option<T> {
         self.index(val).map(|idx| self.arena[idx].val.clone())
     }

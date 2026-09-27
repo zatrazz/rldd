@@ -518,14 +518,6 @@ fn io_error_description(e: &std::io::Error) -> String {
 // fails the load with.
 type Resolution<'a> = Result<ResolvedDependency<'a>, String>;
 
-fn same_file(a: &str, b: &str) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    match (fs::metadata(a), fs::metadata(b)) {
-        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
-        _ => false,
-    }
-}
-
 fn match_elf_header(a1: &ElfInfo, a2: &ElfInfo) -> bool {
     a1.ei_class == a2.ei_class && a1.ei_data == a2.ei_data && a1.e_machine == a2.e_machine
 }
@@ -873,6 +865,15 @@ struct WorkItem {
     preload: bool,
 }
 
+// An object already loaded, used to resolve its own dependencies: its
+// information (rpath chain), its path (the libmap reference path), and the
+// namespace it was loaded in (Android only).
+struct LoadedObject {
+    elc: ElfInfo,
+    refpath: String,
+    namespace: ObjectNamespace,
+}
+
 // Resolve the dependencies in breadth-first order, mimicking the loader: each
 // object DT_NEEDED list is fully processed before the dependencies own
 // dependencies, so a shared dependency is attributed to the first object that
@@ -884,13 +885,17 @@ fn resolve_dependencies(
     deptree: &mut DepTree,
     root_depp: usize,
 ) {
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
+    use std::os::unix::fs::MetadataExt;
 
-    // The already loaded objects information, used to resolve their own
-    // dependencies (rpath chain and libmap reference path).
-    // Or, in the Android case, the already loaded objects information, along
-    // the namespace each one was loaded in.
-    let mut parents: Vec<(ElfInfo, String, ObjectNamespace)> = Vec::new();
+    // The already loaded objects, the input one first.
+    let mut parents: Vec<LoadedObject> = Vec::new();
+    // The tree nodes of the objects found, looked up by name.
+    let mut found = FoundIndex::default();
+    // The tree node of the first object loaded with each soname, and with
+    // each device and inode.
+    let mut sonames: HashMap<String, usize> = HashMap::new();
+    let mut file_ids: HashMap<(u64, u64), usize> = HashMap::new();
 
     let mut queue = VecDeque::new();
     // The glibc loader trace prints 'statically linked' for an object without
@@ -930,10 +935,20 @@ fn resolve_dependencies(
     #[cfg(target_os = "openbsd")]
     let mut openbsd_libc: Option<String> = None;
 
-    parents.push((root_elc, root_refpath, Default::default()));
+    parents.push(LoadedObject {
+        elc: root_elc,
+        refpath: root_refpath,
+        namespace: Default::default(),
+    });
 
     while let Some(item) = queue.pop_front() {
-        let (elc, refpath, namespace) = &parents[item.parent];
+        let LoadedObject {
+            elc,
+            refpath,
+            namespace,
+            ..
+        } = &parents[item.parent];
+        let root_elc = &parents[0].elc;
 
         // The tokens of a preload entry are expanded for the main object, and
         // an entry whose expansion fails is not loaded.
@@ -941,7 +956,7 @@ fn resolve_dependencies(
             match Rtld::expand_tokens(
                 &item.dependency,
                 TokenSite::Preload,
-                &parents[0].0,
+                root_elc,
                 config.platform,
             ) {
                 Some(dependency) => dependency,
@@ -1007,7 +1022,7 @@ fn resolve_dependencies(
         // The glibc and FreeBSD loaders also match a name against the main
         // object DT_SONAME.
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        if !elc.is_musl && parents[0].0.soname.as_deref() == Some(dependency.as_str()) {
+        if !elc.is_musl && root_elc.soname.as_deref() == Some(dependency.as_str()) {
             continue;
         }
 
@@ -1036,22 +1051,16 @@ fn resolve_dependencies(
         // A dependency referring back to the root object by its path is
         // resolved too, since the loader records the name on it and the
         // trace lists it once.
-        let found =
-            |entry: &DepNode| !matches!(entry.mode, DepMode::NotFound | DepMode::Executable);
+        let loaded = found.find(deptree, dependency);
         #[cfg(target_os = "linux")]
-        let loaded = deptree.get(dependency).filter(found).or_else(|| {
+        let loaded = loaded.or_else(|| {
             if elc.is_musl {
                 return None;
             }
-            parents
-                .iter()
-                .skip(1)
-                .find(|(pelc, _, _)| pelc.soname.as_deref() == Some(dependency.as_str()))
-                .and_then(|(_, refpath, _)| deptree.get(refpath))
+            sonames.get(dependency.as_str()).copied()
         });
-        #[cfg(not(target_os = "linux"))]
-        let loaded = deptree.get(dependency).filter(found);
-        if let Some(entry) = loaded {
+        if let Some(node) = loaded {
+            let entry = deptree.arena[node].val.clone();
             deptree.add_repeated(
                 config.all,
                 DepNode::repeat_of(&entry, pathutils::get_name(&Path::new(dependency))),
@@ -1066,7 +1075,7 @@ fn resolve_dependencies(
         // used whatever the object search paths say.
         #[cfg(target_os = "linux")]
         if !item.preload && interp::is_glibc_name(dependency) {
-            if let Some(interp) = &parents[0].0.interp {
+            if let Some(interp) = &root_elc.interp {
                 let path = Path::new(interp);
                 if pathutils::get_name(&path) == *dependency && path.exists() {
                     deptree.addnode(DepNode::from_path(&path, DepMode::Direct), item.depp);
@@ -1078,14 +1087,12 @@ fn resolve_dependencies(
         // A shared library naming the loader resolves through the cache and the
         // system directories.
         #[cfg(target_os = "linux")]
-        let resolved = if !item.preload
-            && interp::is_glibc_name(dependency)
-            && parents[0].0.interp.is_none()
-        {
-            resolve_loader(config, elc, dependency)
-        } else {
-            resolve_dependency_1(dependency, config, elc, namespace, item.preload)
-        };
+        let resolved =
+            if !item.preload && interp::is_glibc_name(dependency) && root_elc.interp.is_none() {
+                resolve_loader(config, elc, dependency)
+            } else {
+                resolve_dependency_1(dependency, config, elc, namespace, item.preload)
+            };
         #[cfg(not(target_os = "linux"))]
         let resolved = resolve_dependency_1(dependency, config, elc, namespace, item.preload);
         let mut dep = match resolved {
@@ -1132,13 +1139,12 @@ fn resolve_dependencies(
         };
         // The loaders recognize a file already loaded under another name
         // (through a symlink) by its device and inode, and record the new
-        // name on the loaded object instead of loading it again.
-        if let Some(entry) = parents
-            .iter()
-            .skip(1)
-            .find(|(_, refpath, _)| same_file(refpath, &depref))
-            .and_then(|(_, refpath, _)| deptree.get(refpath))
-        {
+        // name on the loaded object instead of loading it again.  The input
+        // object is not recorded (the glibc loader has no file identity for
+        // the executable it runs).
+        let file_id = fs::metadata(&depref).ok().map(|m| (m.dev(), m.ino()));
+        if let Some(node) = file_id.and_then(|id| file_ids.get(&id)) {
+            let entry = deptree.arena[*node].val.clone();
             deptree.add_repeated(
                 config.all,
                 DepNode::repeat_of(&entry, pathutils::get_name(&Path::new(dependency))),
@@ -1147,6 +1153,12 @@ fn resolve_dependencies(
             continue;
         }
         let c = deptree.addnode(DepNode::new(r.0, r.1, dep.mode), item.depp);
+        if let Some(id) = file_id {
+            file_ids.entry(id).or_insert(c);
+        }
+        if let Some(soname) = &dep.elc.soname {
+            sonames.entry(soname.clone()).or_insert(c);
+        }
 
         // The DT_RPATH scope used for the indirect dependencies is system
         // specific: the glibc loader searches the object own DT_RPATH and
@@ -1162,12 +1174,12 @@ fn resolve_dependencies(
         #[cfg(target_os = "linux")]
         dep.elc.rpath.extend(elc.rpath.clone());
         #[cfg(target_os = "freebsd")]
-        if !dep.elc.has_runpath && parents[0].0.interp.is_some() {
-            dep.elc.rpath.extend(parents[0].0.rpath.clone());
+        if !dep.elc.has_runpath && root_elc.interp.is_some() {
+            dep.elc.rpath.extend(root_elc.rpath.clone());
         }
         #[cfg(target_os = "openbsd")]
-        if parents[0].0.interp.is_some() {
-            dep.elc.rpath.extend(parents[0].0.rpath.clone());
+        if root_elc.interp.is_some() {
+            dep.elc.rpath.extend(root_elc.rpath.clone());
         }
 
         let parent = parents.len();
@@ -1179,10 +1191,14 @@ fn resolve_dependencies(
                 preload: item.preload,
             });
         }
-        parents.push((dep.elc, depref, dep.namespace));
+        parents.push(LoadedObject {
+            elc: dep.elc,
+            refpath: depref,
+            namespace: dep.namespace,
+        });
     }
 
-    Rtld::add_loader_dependency(config, &parents[0].0, deptree, root_depp);
+    Rtld::add_loader_dependency(config, &parents[0].elc, deptree, root_depp);
 }
 
 // The loader is not subject to the dependency search, and only the soname
