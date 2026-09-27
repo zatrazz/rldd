@@ -61,6 +61,50 @@ impl Image {
         SECTION_RVA + offset
     }
 
+    // The RVA the next data added lands at.
+    pub fn next_rva(&self) -> u32 {
+        Self::rva(self.section.len().next_multiple_of(8) as u32)
+    }
+
+    // Append a NUL terminated string, returning its RVA.
+    pub fn string(&mut self, string: &[u8]) -> u32 {
+        let mut data = string.to_vec();
+        data.push(0);
+        Self::rva(self.add(&data))
+    }
+
+    // Append a hint/name entry, returning its RVA.
+    pub fn hint_name(&mut self, name: &[u8]) -> u32 {
+        let mut data = vec![0, 0];
+        data.extend_from_slice(name);
+        data.push(0);
+        Self::rva(self.add(&data))
+    }
+
+    // Append a NUL terminated thunk array, returning its RVA.
+    pub fn thunks(&mut self, thunks: &[u64]) -> u32 {
+        let mut data = Vec::new();
+        for thunk in thunks.iter().chain(&[0]) {
+            match self.pe64 {
+                true => data.extend_from_slice(&thunk.to_le_bytes()),
+                false => data.extend_from_slice(&(*thunk as u32).to_le_bytes()),
+            }
+        }
+        Self::rva(self.add(&data))
+    }
+
+    // The import directory, with a descriptor of the original first thunk,
+    // the timestamp, the name and the first thunk for each entry.
+    pub fn imports(&mut self, descriptors: &[[u32; 4]]) {
+        let mut data = Vec::new();
+        for [original, timestamp, name, first] in descriptors.iter().chain(&[[0; 4]]) {
+            for field in [*original, *timestamp, 0, *name, *first] {
+                data.extend_from_slice(&field.to_le_bytes());
+            }
+        }
+        self.directory(pe::IMAGE_DIRECTORY_ENTRY_IMPORT, &data);
+    }
+
     pub fn build(&self) -> Vec<u8> {
         let (optional, dirs_at, image_base_at) = match self.pe64 {
             true => (240usize, 112usize, 24usize),

@@ -6,8 +6,7 @@ use std::path::Path;
 use std::{fs, str};
 
 use object::pe;
-use object::read::pe::ExportTarget;
-use object::read::pe::{ExportTable, ImageNtHeaders, ImageOptionalHeader, ImageThunkData, PeFile};
+use object::read::pe::{ImageNtHeaders, ImageOptionalHeader, ImageThunkData, PeFile};
 use object::{FileKind, LittleEndian as LE};
 
 use crate::deptree::*;
@@ -115,6 +114,16 @@ struct PeInfo {
 // the isolation aware wrappers, never for the static imports.
 const CREATEPROCESS_MANIFEST_RESOURCE_ID: u16 = 1;
 const ISOLATIONAWARE_MANIFEST_RESOURCE_ID: u16 = 2;
+
+// The most bytes of symbol names an object is read for, on the imports and on
+// the exports each.  A crafted object may point every import descriptor at the
+// same huge thunk array, or every export name at the same string, which would
+// otherwise take memory in proportion to the square of its size; the largest
+// system modules stay well under 1 MiB.
+const NAMES_BUDGET: usize = 16 << 20;
+
+// The longest symbol or module name read, the MSVC limit on a decorated name.
+const MAX_NAME: usize = 4096;
 
 const SIDE_BY_SIDE_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\SideBySide";
 const IMAGE_FILE_EXECUTION_OPTIONS_KEY: &str =
@@ -1000,6 +1009,7 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
             && il_any_cpu(&file),
     };
 
+    let mut budget = NAMES_BUDGET;
     if let Ok(Some(table)) = file.import_table() {
         if let Ok(mut descriptors) = table.descriptors() {
             while let Ok(Some(descriptor)) = descriptors.next() {
@@ -1019,7 +1029,7 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
                     pei.deps.push(PeDep {
                         name: String::from_utf8_lossy(name).into_owned(),
                         attrs,
-                        imports: import_names::<Pe>(&file, thunks),
+                        imports: import_names::<Pe>(&file, thunks, &mut budget),
                     });
                 }
             }
@@ -1037,6 +1047,7 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
                         imports: import_names::<Pe>(
                             &file,
                             descriptor.import_name_table_rva.get(LE),
+                            &mut budget,
                         ),
                     });
                 }
@@ -1044,9 +1055,7 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8]) -> Result<PeInfo, &'static str> {
         }
     }
 
-    if let Ok(Some(table)) = file.export_table() {
-        pei.exports = parse_exports(&table);
-    }
+    pei.exports = parse_exports(&file);
 
     if let Some(manifest) = manifest_resource(&file, ISOLATIONAWARE_MANIFEST_RESOURCE_ID) {
         pei.assemblies = sxs::parse_manifest(manifest);
@@ -1176,11 +1185,30 @@ fn rva_data<'data, Pe: ImageNtHeaders>(file: &PeFile<'data, Pe>, rva: u32) -> Op
 
 fn rva_name<'data, Pe: ImageNtHeaders>(file: &PeFile<'data, Pe>, rva: u32) -> Option<&'data [u8]> {
     let data = rva_data(file, rva)?;
+    let data = &data[..data.len().min(MAX_NAME + 1)];
     let end = data.iter().position(|byte| *byte == 0)?;
     Some(&data[..end])
 }
 
-fn import_names<Pe: ImageNtHeaders>(file: &PeFile<Pe>, rva: u32) -> Vec<ImportName> {
+// Take COST out of BUDGET, telling whether it covered it.
+fn spend(budget: &mut usize, cost: usize) -> bool {
+    match budget.checked_sub(cost) {
+        Some(left) => {
+            *budget = left;
+            true
+        }
+        None => {
+            *budget = 0;
+            false
+        }
+    }
+}
+
+fn import_names<Pe: ImageNtHeaders>(
+    file: &PeFile<Pe>,
+    rva: u32,
+    budget: &mut usize,
+) -> Vec<ImportName> {
     let mut names = Vec::new();
     let Some(mut data) = rva_data(file, rva) else {
         return names;
@@ -1191,6 +1219,9 @@ fn import_names<Pe: ImageNtHeaders>(file: &PeFile<Pe>, rva: u32) -> Vec<ImportNa
             break;
         }
         if thunk.is_ordinal() {
+            if !spend(budget, std::mem::size_of::<ImportName>()) {
+                break;
+            }
             names.push(ImportName::Ordinal(thunk.ordinal()));
             continue;
         }
@@ -1199,29 +1230,102 @@ fn import_names<Pe: ImageNtHeaders>(file: &PeFile<Pe>, rva: u32) -> Vec<ImportNa
         let Some(name) = rva_name(file, thunk.address().wrapping_add(2)) else {
             break;
         };
+        if !spend(budget, std::mem::size_of::<ImportName>() + name.len()) {
+            break;
+        }
         names.push(ImportName::Name(String::from_utf8_lossy(name).into_owned()));
     }
     names
 }
 
-fn parse_exports(table: &ExportTable) -> PeExports {
+// The COUNT little endian 32 and 16 bit entries of the table at RVA, as many
+// as the image holds.
+fn rva_u32s<'data, Pe: ImageNtHeaders>(
+    file: &PeFile<'data, Pe>,
+    rva: u32,
+    count: u32,
+) -> impl Iterator<Item = u32> + 'data {
+    let data = rva_data(file, rva).unwrap_or_default();
+    let entries = data.as_chunks::<4>().0.iter().take(count as usize);
+    entries.map(|entry| u32::from_le_bytes(*entry))
+}
+
+fn rva_u16s<'data, Pe: ImageNtHeaders>(
+    file: &PeFile<'data, Pe>,
+    rva: u32,
+    count: u32,
+) -> impl Iterator<Item = u16> + 'data {
+    let data = rva_data(file, rva).unwrap_or_default();
+    let entries = data.as_chunks::<2>().0.iter().take(count as usize);
+    entries.map(|entry| u16::from_le_bytes(*entry))
+}
+
+// The exports, read entry by entry, so a malformed one (a forwarder string
+// without a symbol, a name out of the image) only drops that entry.  The
+// object crate's ExportTable::exports fails the whole table on the first
+// one, which made -d report every import from such a module.  As the loader
+// does, an address inside the export directory is a forwarder.
+fn parse_exports<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> PeExports {
     let mut exports = PeExports::default();
-    let Ok(list) = table.exports() else {
+    let Some((start, size)) = file
+        .data_directories()
+        .get(pe::IMAGE_DIRECTORY_ENTRY_EXPORT)
+        .map(|directory| directory.address_range())
+    else {
         return exports;
     };
-    for export in list {
-        let forward = match export.target {
-            ExportTarget::ForwardByName(module, _) | ExportTarget::ForwardByOrdinal(module, _) => {
-                Some(forward_module(module))
-            }
-            ExportTarget::Address(_) => None,
-        };
-        if let Some(name) = export.name {
-            exports
-                .names
-                .insert(String::from_utf8_lossy(name).into_owned(), forward.clone());
+    let Some(Ok((directory, _))) =
+        rva_data(file, start).map(object::pod::from_bytes::<pe::ImageExportDirectory>)
+    else {
+        return exports;
+    };
+    let mut budget = NAMES_BUDGET;
+
+    // The target of each address table entry, None for a malformed one.
+    let functions = directory.number_of_functions.get(LE);
+    let mut targets = Vec::new();
+    for address in rva_u32s(file, directory.address_of_functions.get(LE), functions) {
+        if address.wrapping_sub(start) >= size {
+            targets.push(Some(None));
+            continue;
         }
-        exports.ordinals.insert(export.ordinal.0, forward);
+        // 'MODULE.Symbol' or 'MODULE.#ordinal'.
+        let target = rva_name(file, address).and_then(|forward| {
+            let dot = forward.iter().rposition(|byte| *byte == b'.')?;
+            (dot > 0 && dot + 1 < forward.len()).then(|| forward_module(&forward[..dot]))
+        });
+        let cost = target.as_ref().map_or(0, String::len);
+        if !spend(&mut budget, std::mem::size_of::<Option<String>>() + cost) {
+            break;
+        }
+        targets.push(target.map(Some));
+    }
+
+    let base = directory.base.get(LE);
+    for (index, target) in targets.iter().enumerate() {
+        let ordinal = u16::try_from(u64::from(base) + index as u64);
+        if let (Some(target), Ok(ordinal)) = (target, ordinal) {
+            exports.ordinals.insert(ordinal, target.clone());
+        }
+    }
+
+    let count = directory.number_of_names.get(LE);
+    let names = rva_u32s(file, directory.address_of_names.get(LE), count);
+    let indexes = rva_u16s(file, directory.address_of_name_ordinals.get(LE), count);
+    for (name, index) in names.zip(indexes) {
+        let Some(Some(target)) = targets.get(usize::from(index)) else {
+            continue;
+        };
+        let Some(name) = rva_name(file, name) else {
+            continue;
+        };
+        let cost = name.len() + target.as_ref().map_or(0, String::len);
+        if !spend(&mut budget, std::mem::size_of::<String>() + cost) {
+            break;
+        }
+        exports
+            .names
+            .insert(String::from_utf8_lossy(name).into_owned(), target.clone());
     }
     exports
 }
@@ -1680,6 +1784,124 @@ mod tests {
         );
         // Not searched along the order.
         assert_eq!(find(&format!(r"\{}", r"p\m.dll")), None);
+    }
+
+    // An export directory whose address table holds the ADDRESSES, a
+    // forwarder string standing for each None, and the NAMES pointing at
+    // their index, with a name RVA of 0 standing for one out of the image.
+    fn export_image(forwarders: &[Option<&[u8]>], names: &[(&[u8], u16)]) -> Vec<u8> {
+        let mut image = testimage::Image::dll(pe::IMAGE_FILE_MACHINE_AMD64, true);
+        let start = image.next_rva();
+        // The directory, the three tables, then the strings.
+        let header = std::mem::size_of::<pe::ImageExportDirectory>();
+        let functions = header;
+        let name_table = functions + 4 * forwarders.len();
+        let ordinal_table = name_table + 4 * names.len();
+        let mut strings = ordinal_table + 2 * names.len();
+        let mut data = vec![0u8; strings];
+        let put = |data: &mut Vec<u8>, at: usize, value: u32| {
+            data[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        let rva = |offset: usize| start + offset as u32;
+        put(&mut data, 16, 10);
+        put(&mut data, 20, forwarders.len() as u32);
+        put(&mut data, 24, names.len() as u32);
+        put(&mut data, 28, rva(functions));
+        put(&mut data, 32, rva(name_table));
+        put(&mut data, 36, rva(ordinal_table));
+        for (i, forwarder) in forwarders.iter().enumerate() {
+            let address = match forwarder {
+                // A local address past the directory.
+                None => start + 0x10000,
+                Some(string) => {
+                    let at = rva(strings);
+                    data.extend_from_slice(string);
+                    data.push(0);
+                    strings += string.len() + 1;
+                    at
+                }
+            };
+            put(&mut data, functions + 4 * i, address);
+        }
+        for (i, (name, index)) in names.iter().enumerate() {
+            let at = match name.is_empty() {
+                true => 0xffff_0000,
+                false => rva(strings),
+            };
+            data.extend_from_slice(name);
+            data.push(0);
+            strings += name.len() + 1;
+            put(&mut data, name_table + 4 * i, at);
+            data[ordinal_table + 2 * i..ordinal_table + 2 * i + 2]
+                .copy_from_slice(&index.to_le_bytes());
+        }
+        image.directory(pe::IMAGE_DIRECTORY_ENTRY_EXPORT, &data);
+        image.build()
+    }
+
+    // A malformed export entry only drops itself, not the whole table.
+    #[test]
+    fn malformed_exports() {
+        let data = export_image(
+            &[None, Some(b"OTHER.Func"), Some(b"NODOT"), Some(b"MOD.")],
+            &[
+                (b"Local", 0),
+                (b"Forwarded", 1),
+                (b"NoDot", 2),
+                (b"NoSymbol", 3),
+                (b"", 0),
+                (b"OutOfTable", 9),
+            ],
+        );
+        let exports = parse_object(&data).unwrap().exports;
+        let lookup = |name: &str| exports.lookup(&ImportName::Name(name.to_string()));
+        assert!(matches!(lookup("Local"), ExportLookup::Local));
+        assert!(matches!(
+            lookup("Forwarded"),
+            ExportLookup::Forwarded("OTHER.dll")
+        ));
+        assert!(matches!(lookup("NoDot"), ExportLookup::Missing));
+        assert!(matches!(lookup("NoSymbol"), ExportLookup::Missing));
+        assert!(matches!(lookup("OutOfTable"), ExportLookup::Missing));
+        assert_eq!(exports.names.len(), 2);
+        // The ordinals start at the base.
+        assert!(matches!(
+            exports.lookup(&ImportName::Ordinal(10)),
+            ExportLookup::Local
+        ));
+        assert!(matches!(
+            exports.lookup(&ImportName::Ordinal(11)),
+            ExportLookup::Forwarded("OTHER.dll")
+        ));
+        assert!(matches!(
+            exports.lookup(&ImportName::Ordinal(12)),
+            ExportLookup::Missing
+        ));
+    }
+
+    // Import descriptors sharing a huge thunk array are only read up to the
+    // names budget, instead of taking memory in proportion to their product.
+    #[test]
+    fn import_names_budget() {
+        let mut image = testimage::Image::dll(pe::IMAGE_FILE_MACHINE_AMD64, true);
+        let long = vec![b'x'; MAX_NAME];
+        let name = image.hint_name(&long);
+        let thunks = image.thunks(&vec![u64::from(name); 4096]);
+        let module = image.string(b"m.dll");
+        image.imports(&vec![[thunks, 0, module, thunks]; 2048]);
+        let pei = parse_object(&image.build()).unwrap();
+        assert_eq!(pei.deps.len(), 2048);
+        let read: usize = pei.deps.iter().map(|dep| dep.imports.len()).sum();
+        assert!(read > 0 && read * MAX_NAME <= NAMES_BUDGET, "{read}");
+
+        // A name longer than any the linker writes is not read.
+        let mut image = testimage::Image::dll(pe::IMAGE_FILE_MACHINE_AMD64, true);
+        let name = image.hint_name(&vec![b'x'; MAX_NAME + 1]);
+        let thunks = image.thunks(&[u64::from(name)]);
+        let module = image.string(b"m.dll");
+        image.imports(&[[thunks, 0, module, thunks]]);
+        let pei = parse_object(&image.build()).unwrap();
+        assert!(pei.deps[0].imports.is_empty());
     }
 
     #[test]
