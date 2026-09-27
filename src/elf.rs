@@ -110,6 +110,11 @@ struct ElfInfo {
     // DT_AUXILIARY and DT_FILTER entries.
     filters: DepsVec,
     nodeflibs: bool,
+    // Only read where a musl object can be loaded, or its rules differ.
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "android", target_os = "freebsd")),
+        allow(dead_code)
+    )]
     is_musl: bool,
     // The $LIB expansion of the glibc loader resolving the input object,
     // handed down to every object it loads.
@@ -1006,9 +1011,9 @@ fn resolve_dependencies(
     let mut queue = VecDeque::new();
     // The glibc loader trace prints 'statically linked' for an object without
     // any DT_NEEDED entry, whatever else was preloaded, so the preload
-    // entries are only tracked for objects with dependencies.  The musl
-    // loader always loads the preloaded objects.
-    if root_elc.is_musl || !root_elc.deps.is_empty() {
+    // entries are only tracked for objects with dependencies unless the
+    // loader loads them regardless.
+    if Rtld::preload_without_needed(&root_elc) || !root_elc.deps.is_empty() {
         for name in config.ld_preload {
             queue.push_back(WorkItem {
                 dependency: name.clone(),

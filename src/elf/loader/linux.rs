@@ -57,6 +57,12 @@ impl Loader for Linux {
         Vec::new()
     }
 
+    // The musl loader always loads the preloaded objects (load_preload runs
+    // before load_deps).
+    fn preload_without_needed(elc: &ElfInfo) -> bool {
+        elc.is_musl
+    }
+
     // The glibc loader splits LD_PRELOAD on spaces and colons only, and
     // silently skips an entry that does not fit a path (handle_preload_list),
     // while the musl one splits it on any whitespace or colon (load_preload).

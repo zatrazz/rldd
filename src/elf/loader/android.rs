@@ -54,6 +54,13 @@ impl Loader for Android {
         bionic::preload_list(list)
     }
 
+    // The linker loads the LD_PRELOAD objects along with the DT_NEEDED ones,
+    // so an executable without any DT_NEEDED entry still loads them (and
+    // linker --list shows them).
+    fn preload_without_needed(_elc: &ElfInfo) -> bool {
+        true
+    }
+
     // The DT_RUNPATH entries with $ORIGIN and $LIB expanded, and the
     // LD_LIBRARY_PATH ones without any token, both resolved to their real
     // path the way the linker keeps them.

@@ -82,6 +82,13 @@ pub(super) trait Loader {
         Vec::new()
     }
 
+    // Whether the loader loads the preload entries for the ELC input object
+    // when it has no DT_NEEDED entry.  The glibc loader trace reports such an
+    // object as statically linked whatever was preloaded.
+    fn preload_without_needed(_elc: &ElfInfo) -> bool {
+        false
+    }
+
     // The entries of the --preload LIST (LD_PRELOAD) for the ELC input
     // object.  Most loaders separate them with colons or whitespace.
     fn preload_list(list: &str, _elc: &ElfInfo) -> Vec<String> {
