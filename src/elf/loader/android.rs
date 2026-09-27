@@ -74,6 +74,47 @@ impl Loader for Android {
         }
     }
 
+    // The linker takes the first file a search list opens, and fails the
+    // load on the namespace unless it is a shared object for its own ABI
+    // (ElfReader::VerifyElfHeader), without checking the OS ABI.
+    fn check_candidate(
+        data: &[u8],
+        parsed: &Result<ElfInfo, &'static str>,
+        melc: &ElfInfo,
+    ) -> Result<(), Rejection> {
+        let elc = parsed
+            .as_ref()
+            .map_err(|e| Rejection::Fatal(e.to_string()))?;
+        if elc.ei_class != melc.ei_class {
+            let bits = |class| if class == ELFCLASS64 { 64 } else { 32 };
+            return Err(Rejection::Fatal(format!(
+                "is {}-bit instead of {}-bit",
+                bits(elc.ei_class),
+                bits(melc.ei_class)
+            )));
+        }
+        if elc.ei_data != melc.ei_data {
+            return Err(Rejection::Fatal("has the wrong byte order".to_string()));
+        }
+        if elc.e_machine != melc.e_machine {
+            return Err(Rejection::Fatal(format!(
+                "is for e_machine {} instead of {}",
+                elc.e_machine, melc.e_machine
+            )));
+        }
+        let e_type = data.get(16..18).map(|e_type| match elc.ei_data {
+            ELFDATA2LSB => u16::from_le_bytes([e_type[0], e_type[1]]),
+            _ => u16::from_be_bytes([e_type[0], e_type[1]]),
+        });
+        match e_type {
+            Some(e_type) if e_type == ET_DYN.0 => Ok(()),
+            e_type => Err(Rejection::Fatal(format!(
+                "has unexpected e_type: {}",
+                e_type.unwrap_or_default()
+            ))),
+        }
+    }
+
     // No token is expanded on DT_NEEDED nor on LD_PRELOAD.
     fn expand_tokens(
         input: &str,
@@ -395,18 +436,19 @@ fn load_library<'a>(
     }
 }
 
-// The bionic open_library: the file NAME is on the NS namespace, the path
+// The bionic open_library: the file NAME opens on the NS namespace, the path
 // itself for a name with a slash, or else the first one of the
 // LD_LIBRARY_PATH directories (default namespace only), the DT_RUNPATH ones
 // of the ELC requesting object (only when the namespace can access the file
-// found there), and the namespace search paths.
+// found there), and the namespace search paths.  Any file that opens ends
+// the search, whether it is an object the linker loads or not.
 fn open_library<'a>(
     config: &'a Config,
     elc: &'a ElfInfo,
     ns: &Namespace<'a>,
     name: &'a String,
 ) -> Option<(&'a String, DepMode, PathBuf)> {
-    let candidate = |path: &PathBuf| open_dependency(path, elc, config.platform).is_ok();
+    let candidate = |path: &PathBuf| fs::File::open(path).is_ok();
 
     if name.contains('/') {
         let path = PathBuf::from(name);
