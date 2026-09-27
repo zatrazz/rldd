@@ -36,6 +36,8 @@ struct MachOInfo {
     rpath: Vec<String>,
     // Whether the image has a __RESTRICT,__restrict section.
     restricted: bool,
+    // The LC_DYLD_ENVIRONMENT variables (KEY=VALUE).
+    dyld_environment: Vec<String>,
     deps: DepsVec,
     // The LC_ID_DYLIB install name.
     id: Option<String>,
@@ -53,7 +55,7 @@ struct MachOInfo {
 
 // The DYLD_* environment variables, mimicked with command line options like
 // the ELF backend does for LD_LIBRARY_PATH, as given.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct DyldVars {
     library_path: String,
     framework_path: String,
@@ -61,6 +63,60 @@ struct DyldVars {
     fallback_framework_path: String,
     insert_libraries: String,
     image_suffix: Option<String>,
+}
+
+impl DyldVars {
+    // Add the main executable LC_DYLD_ENVIRONMENT variables VARS after the
+    // environment ones, the way dyld does (PathOverrides::addEnvVar): the
+    // search path lists, the inserted libraries, and the image suffix, a
+    // variable already set being extended with a colon.  An entry starting
+    // with @executable_path/ or @loader_path/ is below the main executable
+    // directory, and one starting with @ is dropped where dyld does not allow
+    // the @ paths.  dyld4 honors them unless AMFI forbids it
+    // (allowEmbeddedVars), and dyld2 honored the path lists of any process,
+    // restricted or not, so they are always taken.
+    fn add_embedded(&mut self, vars: &[String], executable_path: &str, security: Security) {
+        let append = |var: &mut String, value: &str| {
+            if !var.is_empty() {
+                var.push(':');
+            }
+            var.push_str(value);
+        };
+        for var in vars {
+            let Some((key, value)) = var.split_once('=') else {
+                continue;
+            };
+            let value = if value.contains('@') {
+                value
+                    .split(':')
+                    .filter(|entry| security.allow_at_paths() || !entry.starts_with('@'))
+                    .map(|entry| {
+                        match entry
+                            .strip_prefix("@executable_path/")
+                            .or_else(|| entry.strip_prefix("@loader_path/"))
+                        {
+                            Some(rest) => format!("{executable_path}/{rest}"),
+                            None => entry.to_string(),
+                        }
+                    })
+                    .collect::<Vec<String>>()
+                    .join(":")
+            } else {
+                value.to_string()
+            };
+            match key {
+                "DYLD_LIBRARY_PATH" => append(&mut self.library_path, &value),
+                "DYLD_FRAMEWORK_PATH" => append(&mut self.framework_path, &value),
+                "DYLD_FALLBACK_LIBRARY_PATH" => append(&mut self.fallback_library_path, &value),
+                "DYLD_FALLBACK_FRAMEWORK_PATH" => append(&mut self.fallback_framework_path, &value),
+                "DYLD_INSERT_LIBRARIES" => append(&mut self.insert_libraries, &value),
+                "DYLD_IMAGE_SUFFIX" => {
+                    append(self.image_suffix.get_or_insert_with(String::new), &value)
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 // The DYLD_* environment a process runs with: the search path lists, the
@@ -227,14 +283,16 @@ pub fn resolve_binary(ctx: &mut MachOContext, arg: &str) -> Result<DepTree, std:
         "failed to get path of input file {arg}"
     )))?;
 
-    // A restricted process does not take the DYLD_* variables.
+    // A restricted process does not take the DYLD_* variables, while the
+    // main executable may set its own.
     let security = Security::new(&filename, from_cache, &omf);
-    let no_vars = DyldVars::default();
-    let env = DyldEnv::new(if security.allow_env_vars_path() {
-        &ctx.vars
+    let mut vars = if security.allow_env_vars_path() {
+        ctx.vars.clone()
     } else {
-        &no_vars
-    });
+        DyldVars::default()
+    };
+    vars.add_embedded(&omf.dyld_environment, &executable_path, security);
+    let env = DyldEnv::new(&vars);
     let main_rpath = expand_rpaths(
         &omf.rpath,
         &executable_path,
@@ -492,6 +550,12 @@ fn print_object_information(
     if let Some(reason) = security.restricted {
         lines.push(format!(
             "  restricted: {reason} (the DYLD_* options and @executable_path are ignored)"
+        ));
+    }
+    if !omf.dyld_environment.is_empty() {
+        lines.push(format!(
+            "  dyld environment: {}",
+            omf.dyld_environment.join(" ")
         ));
     }
     lines.push(format!(
@@ -1184,6 +1248,7 @@ fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
             Some(LoadCommand::Platform(platform)) => platforms.push(platform),
             Some(LoadCommand::Uuid(uuid)) => info.uuid = Some(uuid),
             Some(LoadCommand::Restrict) => info.restricted = true,
+            Some(LoadCommand::DyldEnvironment(var)) => info.dyld_environment.push(var),
             None => {}
         }
     }
@@ -1249,6 +1314,8 @@ enum LoadCommand {
     Uuid(String),
     // A segment with the __RESTRICT,__restrict section.
     Restrict,
+    // A LC_DYLD_ENVIRONMENT variable.
+    DyldEnvironment(String),
 }
 
 // Whether a segment is the __RESTRICT one holding a __restrict section, the
@@ -1422,6 +1489,9 @@ fn parse_load_command<Mach: MachHeader>(
             }))
         }
         LoadCommandVariant::Uuid(x) => Some(LoadCommand::Uuid(format_uuid(&x.uuid))),
+        LoadCommandVariant::DyldEnvironment(x) => Some(LoadCommand::DyldEnvironment(
+            parse_string::<Mach>(endian, &command, x.name)?,
+        )),
         LoadCommandVariant::Segment32(segment, data) => {
             restrict_section(endian, segment, data).then_some(LoadCommand::Restrict)
         }
@@ -2366,6 +2436,104 @@ mod tests {
         assert_eq!(security(&plain), None);
         assert_eq!(security(&restrict), Some("__RESTRICT,__restrict section"));
         assert_eq!(security(&setuid), Some("setuid or setgid program"));
+    }
+
+    #[test]
+    fn embedded_variables() {
+        let vars = |embedded: &[&str], security| {
+            let mut vars = DyldVars {
+                library_path: "/env".to_string(),
+                image_suffix: Some("_env".to_string()),
+                ..Default::default()
+            };
+            let embedded: Vec<String> = embedded.iter().map(|var| var.to_string()).collect();
+            vars.add_embedded(&embedded, "/app/MacOS", security);
+            vars
+        };
+        let embedded = [
+            "DYLD_LIBRARY_PATH=@executable_path/../lib:/opt/lib:@rpath/x",
+            "DYLD_FALLBACK_LIBRARY_PATH=@loader_path/fb",
+            "DYLD_FRAMEWORK_PATH=/fw",
+            "DYLD_FALLBACK_FRAMEWORK_PATH=/fbfw",
+            "DYLD_INSERT_LIBRARIES=/pre/libp.dylib",
+            "DYLD_IMAGE_SUFFIX=_debug",
+            "DYLD_PRINT_LIBRARIES=1",
+            "DYLD_NO_VALUE",
+        ];
+        let all = vars(&embedded, Security::default());
+        assert_eq!(all.library_path, "/env:/app/MacOS/../lib:/opt/lib:@rpath/x");
+        assert_eq!(all.fallback_library_path, "/app/MacOS/fb");
+        assert_eq!(all.framework_path, "/fw");
+        assert_eq!(all.fallback_framework_path, "/fbfw");
+        assert_eq!(all.insert_libraries, "/pre/libp.dylib");
+        assert_eq!(all.image_suffix.as_deref(), Some("_env:_debug"));
+        // A restricted process drops the @ entries.
+        let restricted = vars(
+            &embedded,
+            Security {
+                restricted: Some("test"),
+            },
+        );
+        assert_eq!(restricted.library_path, "/env:/opt/lib");
+        assert_eq!(restricted.fallback_library_path, "");
+    }
+
+    #[test]
+    fn embedded_library_path() {
+        // The main executable sets its DYLD_LIBRARY_PATH, which also applies
+        // to a restricted process.
+        let dir = Scratch::new("dyldenv");
+        let lib = dir.write("lp/libfoo.dylib", &x86_64_dylib(&[]));
+        let inserted = dir.write("pre/libp.dylib", &x86_64_dylib(&[]));
+        let missing = dir.path("missing/libfoo.dylib");
+        let env = |var: &str| string_command(LC_DYLD_ENVIRONMENT, &[], var);
+        let cmds = [
+            load(&missing),
+            env("DYLD_LIBRARY_PATH=@executable_path/../lp"),
+            env(&format!("DYLD_INSERT_LIBRARIES={inserted}")),
+        ];
+        let exe = dir.write("bin/exe", &x86_64_exe(&cmds));
+        let arch = Arch::new(None).unwrap();
+        assert_eq!(
+            parse(&std::fs::read(&exe).unwrap(), &arch)
+                .unwrap()
+                .dyld_environment,
+            [
+                "DYLD_LIBRARY_PATH=@executable_path/../lp".to_string(),
+                format!("DYLD_INSERT_LIBRARIES={inserted}")
+            ]
+        );
+        let mut ctx = context(None);
+        assert_eq!(
+            resolve(&mut ctx, &exe),
+            [
+                node(&inserted, DepMode::Preload),
+                node(&lib, DepMode::LdLibraryPath),
+            ]
+        );
+
+        let mut cmds = cmds.to_vec();
+        cmds.push(segment64("__RESTRICT", &["__restrict"]));
+        let restricted = dir.write("bin/restricted", &x86_64_exe(&cmds));
+        let absolute = dir.write(
+            "bin/absolute",
+            &x86_64_exe(&[
+                load(&missing),
+                env(&format!("DYLD_LIBRARY_PATH={}", dir.path("lp"))),
+                segment64("__RESTRICT", &["__restrict"]),
+            ]),
+        );
+        assert_eq!(
+            resolve(&mut ctx, &restricted),
+            [
+                node(&inserted, DepMode::Preload),
+                node(&missing, DepMode::NotFound),
+            ]
+        );
+        assert_eq!(
+            resolve(&mut ctx, &absolute),
+            [node(&lib, DepMode::LdLibraryPath)]
+        );
     }
 
     #[test]
