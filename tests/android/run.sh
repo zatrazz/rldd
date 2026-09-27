@@ -157,16 +157,31 @@ ndk_linker() {
     return 1
 }
 
+# Build rldd for a target, setting RLDD_BIN to the binary cargo reports.  A
+# fixed path below target/ would be a stale binary (or none at all) when
+# CARGO_TARGET_DIR or build.target-dir moves the build elsewhere.
 build_target() {
+    RLDD_BIN=
     if linker=$(ndk_linker "$1"); then
         var=$(printf 'CARGO_TARGET_%s_LINKER' "$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')")
         export "$var=$(native_path "$linker")"
     fi
 
-    if ! ( cd "$REPO_ROOT" && cargo build --quiet -r --target "$1" ); then
+    if ! json=$(cd "$REPO_ROOT" &&
+        cargo build --quiet -r --target "$1" --message-format=json); then
         fail "cargo build -r --target $1 failed (is the target installed?)"
         return 1
     fi
+
+    # The last artifact with an executable is the rldd binary, whose path has
+    # its backslashes escaped on Windows.
+    RLDD_BIN=$(printf '%s\n' "$json" |
+        sed -n 's/.*"executable":"\([^"]*\)".*/\1/p' | tail -1 | sed 's/\\\\/\\/g')
+    if [ -z "$RLDD_BIN" ]; then
+        fail "cargo build -r --target $1 did not report the rldd binary"
+        return 1
+    fi
+    RLDD_BIN=$(msys_path "$RLDD_BIN")
 }
 
 adb_sh() {
@@ -259,7 +274,7 @@ run_device() {
 
     build_target "$target" || return 1
 
-    rldd="$REPO_ROOT/target/$target/release/rldd"
+    rldd=$RLDD_BIN
     if [ ! -f "$rldd" ]; then
         fail "$dev: $rldd is missing"
         return 1
