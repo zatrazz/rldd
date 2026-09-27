@@ -302,7 +302,7 @@ pub fn get_system_dirs(_elc: &ElfInfo) -> Result<search_path::SearchPathVec, std
 // RTLD_DEFAULT_LIBRARY_PATH/$(MLIBDIR) directoryafter the default one.
 // The subdirectory name follows the compat directories the system
 // provides for each host architecture.
-#[cfg(target_os = "netbsd")]
+#[cfg(any(target_os = "netbsd", all(test, target_os = "linux")))]
 pub fn netbsd_compat_subdir(
     e_machine: object::elf::Machine,
     ei_class: object::elf::FileClass,
@@ -343,9 +343,9 @@ pub fn get_system_dirs(elc: &ElfInfo) -> Result<search_path::SearchPathVec, std:
     Ok(search_path::fixed_list(dirs))
 }
 
-#[cfg(all(test, target_os = "netbsd"))]
-mod tests {
-    use super::*;
+#[cfg(all(test, any(target_os = "netbsd", target_os = "linux")))]
+mod netbsd_tests {
+    use super::netbsd_compat_subdir;
     use object::elf::*;
 
     #[test]
