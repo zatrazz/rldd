@@ -34,19 +34,6 @@ impl Loader for NetBsd {
         single_search_list(elc);
     }
 
-    // The NetBSD loader expands the $ORIGIN token to the executable directory for
-    // every object, so the requesting object value is propagated.
-    fn origin_directory<P: AsRef<Path>>(filename: &P, melc: Option<&ElfInfo>) -> Option<String> {
-        match melc {
-            Some(melc) => melc.origin.clone(),
-            None => filename
-                .as_ref()
-                .parent()
-                .and_then(Path::to_str)
-                .map(str::to_string),
-        }
-    }
-
     // The NetBSD loader does not check the EI_OSABI field.
     fn check_elf_header(_elc: &ElfInfo) -> bool {
         true
@@ -81,5 +68,16 @@ mod tests {
             assert!(elc.runpath.is_empty());
             assert!(!elc.has_runpath);
         }
+    }
+
+    // A library expands $ORIGIN to the directory of the path it was found
+    // at, whatever object loads it.
+    #[test]
+    fn origin_of_the_object() {
+        let melc = ElfInfo::for_test(EM_X86_64, FileFlags(0));
+        assert_eq!(
+            NetBsd::origin_directory(&"/usr/pkg/lib/../lib/libx.so.1", Some(&melc)).as_deref(),
+            Some("/usr/pkg/lib/../lib")
+        );
     }
 }
