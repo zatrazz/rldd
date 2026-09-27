@@ -86,29 +86,30 @@ impl NamespaceConfig {
             }
         }
 
+        let file = realpath.as_bytes();
         ld_library_paths
             .iter()
             .chain(&self.search_paths)
-            .any(|dir| file_is_in_dir(realpath, &dir.path))
+            .any(|dir| file_is_in_dir(file, dir.path.as_bytes()))
             || self
                 .permitted_paths
                 .iter()
-                .any(|dir| file_is_under_dir(realpath, dir))
+                .any(|dir| file_is_under_dir(file, dir.as_bytes()))
     }
 }
 
 // The bionic file_is_in_dir: FILE is directly in DIR, compared as strings.
-fn file_is_in_dir(file: &str, dir: &str) -> bool {
+fn file_is_in_dir(file: &[u8], dir: &[u8]) -> bool {
     file.strip_prefix(dir)
-        .and_then(|rest| rest.strip_prefix('/'))
-        .is_some_and(|name| !name.contains('/'))
+        .and_then(|rest| rest.strip_prefix(b"/"))
+        .is_some_and(|name| !name.contains(&b'/'))
 }
 
 // The bionic file_is_under_dir: FILE is anywhere below DIR, compared as
-// strings (so an empty DIR takes any absolute path).
-fn file_is_under_dir(file: &str, dir: &str) -> bool {
+// strings (so an empty DIR takes any absolute path, while '/' takes none).
+fn file_is_under_dir(file: &[u8], dir: &[u8]) -> bool {
     file.strip_prefix(dir)
-        .is_some_and(|rest| rest.starts_with('/'))
+        .is_some_and(|rest| rest.starts_with(b"/"))
 }
 
 const DEFAULT_NAME_CONFIG: &str = "default";
@@ -461,7 +462,7 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
     let content = std::fs::read(filename).map_err(|_| "Could not open the filename")?;
     let lines: Vec<&[u8]> = content.split(|&c| c == b'\n').collect();
 
-    let section = find_initial_section(binary, &lines, interp.is_none())?;
+    let section = find_initial_section(binary, &lines, interp.is_none(), release)?;
 
     let start = find_section(&section, &lines)?;
 
@@ -605,6 +606,7 @@ fn find_initial_section<P: AsRef<Path>>(
     binary: &P,
     lines: &[&[u8]],
     fallback: bool,
+    release: AndroidRelease,
 ) -> Result<Vec<u8>, &'static str> {
     // The mappings, in file order, with the directory already resolved.
     let mut dirs: Vec<(Vec<u8>, std::path::PathBuf)> = Vec::new();
@@ -616,12 +618,37 @@ fn find_initial_section<P: AsRef<Path>>(
                     continue;
                 };
 
-                if let Ok(resolved) = std::fs::canonicalize(OsStr::from_bytes(value)) {
-                    if binary.as_ref().starts_with(&resolved) {
-                        return Ok(section.to_vec());
-                    }
-                    dirs.push((section.to_vec(), resolved));
+                // The bionic parse_config_file drops the trailing slashes and
+                // ignores an empty directory.
+                let mut value = value;
+                while let Some(stripped) = value.strip_suffix(b"/") {
+                    value = stripped;
                 }
+                if value.is_empty() {
+                    continue;
+                }
+
+                // Android 10 resolves the directory, skipping one that does not
+                // exist and taking it as written when it can not be resolved
+                // otherwise.  The older releases always take it as written.
+                let dir = std::path::PathBuf::from(OsStr::from_bytes(value));
+                let resolved = if release >= AndroidRelease::R29 {
+                    match std::fs::canonicalize(&dir) {
+                        Ok(resolved) => resolved,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(_) => dir,
+                    }
+                } else {
+                    dir
+                };
+
+                if file_is_under_dir(
+                    binary.as_ref().as_os_str().as_bytes(),
+                    resolved.as_os_str().as_bytes(),
+                ) {
+                    return Ok(section.to_vec());
+                }
+                dirs.push((section.to_vec(), resolved));
             }
             Some(Token::Section(_)) => break,
             // Bionic loader ignore ill formatted lines.
@@ -1054,7 +1081,12 @@ mod tests {
             format!("{}/{path}", self.base)
         }
 
-        fn parse_as(&self, config: &[u8], interp: &str) -> Result<LdCache, &'static str> {
+        fn parse_with(
+            &self,
+            config: &[u8],
+            interp: &str,
+            props: &SystemProperties,
+        ) -> Result<LdCache, &'static str> {
             let cfgpath = Path::new(&self.base).join("ld.config.txt");
             fs::write(&cfgpath, config).map_err(|_| "could not write the configuration")?;
             parse_ld_config_txt(
@@ -1062,8 +1094,12 @@ mod tests {
                 &self.path("bin/binary"),
                 Some(interp),
                 ELFCLASS64,
-                &props(),
+                props,
             )
+        }
+
+        fn parse_as(&self, config: &[u8], interp: &str) -> Result<LdCache, &'static str> {
+            self.parse_with(config, interp, &props())
         }
 
         fn parse_bytes(&self, config: &[u8]) -> Result<LdCache, &'static str> {
@@ -1259,6 +1295,53 @@ mod tests {
             default_ns.permitted_paths,
             vec![format!("/data/asan{}/lib64", fixture.base)]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn section_directories() -> Result<(), Error> {
+        let fixture = Fixture::new()?;
+        std::os::unix::fs::symlink(fixture.path("bin"), fixture.path("link"))?;
+        let section = |config: &str, release: u32| {
+            let props = SystemProperties {
+                release: AndroidRelease(release),
+                ..props()
+            };
+            let config = format!(
+                "{config}\n\
+                 [first]\n\
+                 namespace.default.search.paths = {{base}}/lib\n\
+                 [second]\n\
+                 namespace.default.search.paths = {{base}}/lib64\n"
+            )
+            .replace("{base}", &fixture.base);
+            fixture
+                .parse_with(config.as_bytes(), "/system/bin/linker64", &props)
+                .map(|ldcache| search_paths(&ldcache, "default"))
+        };
+        let first = Ok(vec![fixture.path("lib")]);
+        let second = Ok(vec![fixture.path("lib64")]);
+
+        // The trailing slashes are dropped, and an empty directory ignored.
+        assert_eq!(
+            section("dir.first = /\ndir.second = {base}/bin//", 31),
+            second
+        );
+        // Only a whole directory matches.
+        assert_eq!(
+            section("dir.first = {base}/bi\ndir.second = {base}", 31),
+            second
+        );
+        // Android 10 resolves the directory, the older releases do not.
+        assert_eq!(
+            section("dir.first = {base}/link\ndir.second = {base}", 31),
+            first
+        );
+        assert_eq!(
+            section("dir.first = {base}/link\ndir.second = {base}", 28),
+            second
+        );
+        assert!(section("dir.first = {base}/missing", 31).is_err());
         Ok(())
     }
 
