@@ -57,7 +57,13 @@ where
         return Err(Error::other("Invalid elfhints_hdr version"));
     }
 
-    let dirlistoff: u64 = (i64::from(hdr.hh_strtab) + i64::from(hdr.hh_dirlist)) as u64;
+    // The loader trusts the offsets, which are checked here to be within the
+    // file (without any overflow).
+    let dirlistoff = i64::from(hdr.hh_strtab)
+        .checked_add(i64::from(hdr.hh_dirlist))
+        .and_then(|offset| u64::try_from(offset).ok())
+        .filter(|offset| *offset < hsize)
+        .ok_or_else(|| Error::other("Invalid directory list offset"))?;
     file.seek(SeekFrom::Start(dirlistoff))?;
 
     // OpenBSD header file does not specify the hh_dirlist len, but it encodes it as a
@@ -81,10 +87,22 @@ mod tests {
     where
         hints_header<Long>: Pod,
     {
+        write_adjusted_hints::<Long>(path, dirlist, |_| {})
+    }
+
+    // Likewise, with the header fields then changed by ADJUST.
+    fn write_adjusted_hints<Long: From<i32>>(
+        path: &Path,
+        dirlist: &str,
+        adjust: impl FnOnce(&mut hints_header<Long>),
+    ) -> Result<()>
+    where
+        hints_header<Long>: Pod,
+    {
         let long = |value: usize| Long::from(value as i32);
         let hdr_size = std::mem::size_of::<hints_header<Long>>();
         let strtab = format!("{dirlist}\0");
-        let hdr = hints_header {
+        let mut hdr = hints_header {
             hh_magic: Long::from(HH_MAGIC as i32),
             hh_version: Long::from(LD_HINTS_VERSION_2 as i32),
             hh_hashtab: long(hdr_size),
@@ -94,6 +112,7 @@ mod tests {
             hh_ehints: long(hdr_size + strtab.len()),
             hh_dirlist: long(0),
         };
+        adjust(&mut hdr);
         let mut data = object::pod::bytes_of(&hdr).to_vec();
         data.extend_from_slice(strtab.as_bytes());
         fs::write(path, data)
@@ -148,6 +167,28 @@ mod tests {
         }
         assert!(parse_hints::<_, i64>(&hints32).is_err());
         assert!(parse_hints::<_, i32>(&hints64).is_err());
+        Ok(())
+    }
+
+    // A directory list offset that overflows, is negative, or lies past the
+    // end of the file is rejected.
+    #[test]
+    fn reject_bad_dirlist_offset() -> Result<()> {
+        let tmpdir = TempDir::new()?;
+        let hints = tmpdir.path().join("ld.so.hints");
+
+        let adjusts: [fn(&mut hints_header<i64>); 3] = [
+            |hdr| {
+                hdr.hh_strtab = i64::MAX;
+                hdr.hh_dirlist = 16;
+            },
+            |hdr| hdr.hh_dirlist = -hdr.hh_strtab - 1,
+            |hdr| hdr.hh_dirlist = hdr.hh_strtab_sz,
+        ];
+        for adjust in adjusts {
+            write_adjusted_hints::<i64>(&hints, "/usr/lib", adjust)?;
+            assert!(parse_hints::<_, i64>(&hints).is_err());
+        }
         Ok(())
     }
 

@@ -29,10 +29,10 @@ const _: () = assert!(std::mem::size_of::<elfhints_hdr>() == (6 + 26) * 4);
 
 const ELFHINTS_MAGIC: u32 = 0x746e6845;
 const ELFHINTS_VERSION: u32 = 0x1;
-const ELFHINTS_MAXFILESIZE: u64 = 16 * 1024;
 
 pub fn parse_ld_so_hints<P: AsRef<Path>>(filename: &P) -> Result<search_path::SearchPathVec> {
-    let (mut file, _, hdr) = ld_hints::open::<_, elfhints_hdr>(filename, ELFHINTS_MAXFILESIZE)?;
+    // The loader does not limit the file size.
+    let (mut file, size, hdr) = ld_hints::open::<_, elfhints_hdr>(filename, u64::MAX)?;
 
     if hdr.magic != ELFHINTS_MAGIC {
         return Err(Error::other("Invalid ELFHINTS_MAGIC"));
@@ -41,11 +41,26 @@ pub fn parse_ld_so_hints<P: AsRef<Path>>(filename: &P) -> Result<search_path::Se
         return Err(Error::other("Invalid elfhints_hdr version"));
     }
 
-    let mut dirlist: Vec<u8> = vec![0; hdr.dirlistlen as usize];
+    // Like gethints, reject a list whose offsets overflow or which ends past the
+    // end of the file before reading it, along with its terminating NUL.
+    if hdr.dirlistlen > u32::MAX / 2 {
+        return Err(Error::other("Directory list too long"));
+    }
+    let dirlistoff = hdr
+        .strtab
+        .checked_add(hdr.dirlist)
+        .ok_or_else(|| Error::other("Invalid string table position"))?;
+    match dirlistoff.checked_add(hdr.dirlistlen) {
+        Some(end) if u64::from(end) <= size => {}
+        _ => return Err(Error::other("Truncated hints file")),
+    }
 
-    let dirlistoff: u64 = (hdr.strtab + hdr.dirlist).into();
-    file.seek(SeekFrom::Start(dirlistoff))?;
+    let mut dirlist: Vec<u8> = vec![0; hdr.dirlistlen as usize + 1];
+    file.seek(SeekFrom::Start(dirlistoff.into()))?;
     file.read_exact(&mut dirlist)?;
+    if dirlist.last() != Some(&0) {
+        return Err(Error::other("Directory list not terminated"));
+    }
 
     ld_hints::parse_dirlist(&dirlist, &[':'])
 }
@@ -58,34 +73,34 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
 
-    fn write_elf_hints(file: &mut File, dirlist: Option<&Vec<&str>>) -> Result<()> {
-        let mut dirlistlen = 0u32;
-        if let Some(dirlist) = &dirlist {
-            dirlistlen = dirlist.iter().fold(0, |len, s| len + s.len() as u32);
-            // Add the ':' separator.
-            dirlistlen += dirlist.len() as u32 - 1;
-        }
-
-        let hdr = elfhints_hdr {
+    // Write a hints file with the DIRLIST directory list after the header,
+    // whose fields ADJUST then changes.
+    fn write_hints(
+        file: &mut File,
+        dirlist: &str,
+        adjust: impl FnOnce(&mut elfhints_hdr),
+    ) -> Result<()> {
+        let mut hdr = elfhints_hdr {
             magic: ELFHINTS_MAGIC,
             version: 1,
             strtab: 0,
             strsize: 0,
             dirlist: std::mem::size_of::<elfhints_hdr>() as u32,
-            dirlistlen,
+            dirlistlen: dirlist.len() as u32,
             spare: [0; 26usize],
         };
+        adjust(&mut hdr);
 
         file.write_all(object::pod::bytes_of(&hdr))?;
-        if let Some(dirlist) = dirlist {
-            for dir in dirlist {
-                file.write_all(dir.as_bytes())?;
-                file.write_all(&[b':'; 1])?;
-            }
-        }
+        file.write_all(dirlist.as_bytes())?;
         file.write_all(&[b'\0'; 1])?;
 
         Ok(())
+    }
+
+    fn write_elf_hints(file: &mut File, dirlist: Option<&Vec<&str>>) -> Result<()> {
+        let dirlist = dirlist.map_or(String::new(), |dirlist| dirlist.join(":"));
+        write_hints(file, &dirlist, |_| {})
     }
 
     #[test]
@@ -169,5 +184,31 @@ mod tests {
             }
             Err(e) => Err(Error::other(e)),
         }
+    }
+
+    // A list whose offsets overflow, which ends past the end of the file, or
+    // which lacks its terminating NUL is rejected (and not read).
+    #[test]
+    fn parse_ld_so_hints_bad_dirlist() -> Result<()> {
+        let tmpdir = TempDir::new()?;
+        let filepath = tmpdir.path().join("ld-elf.so.hints");
+
+        let adjusts: [fn(&mut elfhints_hdr); 6] = [
+            |hdr| hdr.strtab = u32::MAX - 0xf,
+            |hdr| {
+                hdr.strtab = u32::MAX - 0x100;
+                hdr.dirlistlen = 0x100;
+            },
+            |hdr| hdr.dirlistlen = u32::MAX,
+            |hdr| hdr.dirlistlen = u32::MAX / 2,
+            |hdr| hdr.dirlistlen += 1,
+            |hdr| hdr.dirlistlen -= 1,
+        ];
+        for adjust in adjusts {
+            let mut file = File::create(&filepath)?;
+            write_hints(&mut file, "/lib:/usr/lib", adjust)?;
+            assert!(parse_ld_so_hints(&filepath).is_err());
+        }
+        Ok(())
     }
 }
