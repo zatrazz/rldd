@@ -842,7 +842,7 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
 
     // The cache/hints/config file is usually an optional file and failing to open it
     // does not incur on a resolution failure.
-    Rtld::load_so_cache(&mut ctx.ld_cache, &filename, &elc);
+    Rtld::load_so_cache(&mut ctx.ld_cache, &filename, &elc, ctx.platform.as_ref());
 
     #[cfg(target_os = "linux")]
     let loader = elc.interp.clone().or_else(|| {

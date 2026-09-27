@@ -23,9 +23,10 @@ impl Loader for NetBsd {
         ld_cache: &mut Option<Self::Cache>,
         _binary: &P,
         elc: &ElfInfo,
+        platform: Option<&String>,
     ) {
         *ld_cache = ld_so_conf_netbsd::parse_ld_so_conf(&Path::new("/etc/ld.so.conf"), |dir| {
-            Self::expand_tokens(dir, TokenSite::LibraryPath, elc, None)
+            Self::expand_tokens(dir, TokenSite::LibraryPath, elc, platform)
         })
         .ok()
     }

@@ -24,6 +24,7 @@ impl Loader for OpenBsd {
         ld_cache: &mut Option<Self::Cache>,
         _binary: &P,
         _ecl: &ElfInfo,
+        _platform: Option<&String>,
     ) {
         if ld_cache.is_none() {
             *ld_cache = ld_hints_openbsd::parse_ld_so_hints(&Path::new("/var/run/ld.so.hints")).ok()

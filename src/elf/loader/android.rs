@@ -18,6 +18,7 @@ impl Loader for Android {
         ld_cache: &mut Option<Self::Cache>,
         binary: &P,
         elc: &ElfInfo,
+        _platform: Option<&String>,
     ) {
         let Some(props) = bionic::SystemProperties::current() else {
             return;

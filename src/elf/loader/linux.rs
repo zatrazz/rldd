@@ -27,6 +27,7 @@ impl Loader for Linux {
         ld_cache: &mut Option<Self::Cache>,
         _binary: &P,
         elc: &ElfInfo,
+        _platform: Option<&String>,
     ) {
         // Only the glibc loader reads the cache, so an object for another
         // loader does not use the one of a previous object.

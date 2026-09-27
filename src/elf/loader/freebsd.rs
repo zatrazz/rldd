@@ -13,6 +13,7 @@ impl Loader for FreeBsd {
         ld_cache: &mut Option<Self::Cache>,
         _binary: &P,
         elc: &ElfInfo,
+        _platform: Option<&String>,
     ) {
         // The 32-bit compat objects use a separate hints file (the rtld
         // COMPAT_libcompat suffix), so the cache is reloaded for each binary.

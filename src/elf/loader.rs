@@ -61,13 +61,15 @@ pub(super) trait Loader {
         Self::SEARCH_ORDER
     }
 
-    // Load the loader search cache for BINARY.  The cache/hints/config file is
-    // usually an optional file and failing to open it does not incur on a
-    // resolution failure.
+    // Load the loader search cache for BINARY, with PLATFORM the --platform
+    // value for the configuration files that expand $PLATFORM.  The
+    // cache/hints/config file is usually an optional file and failing to open
+    // it does not incur on a resolution failure.
     fn load_so_cache<P: AsRef<Path>>(
         _ld_cache: &mut Option<Self::Cache>,
         _binary: &P,
         _elc: &ElfInfo,
+        _platform: Option<&String>,
     ) {
     }
 
