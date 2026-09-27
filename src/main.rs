@@ -28,12 +28,10 @@ mod output;
 #[cfg(test)]
 mod tempdir;
 
-mod printer;
-use printer::*;
 mod deptree;
 mod pathutils;
+mod printer;
 mod search_path;
-use deptree::*;
 
 #[cfg(all(target_family = "unix", not(target_os = "macos")))]
 mod elf;
@@ -49,70 +47,6 @@ use macho::*;
 mod pe;
 #[cfg(windows)]
 use pe::*;
-
-fn print_deps(p: &Printer, deps: &DepTree) {
-    let bin = deps.arena.first().unwrap();
-    p.print_executable(&bin.val.path, &bin.val.name);
-
-    #[cfg(all(target_family = "unix", not(target_os = "macos")))]
-    if bin.children.is_empty() {
-        p.print_statically_linked();
-        return;
-    }
-
-    let mut deptrace = Vec::<bool>::new();
-    print_deps_children(p, deps, &bin.children, &mut deptrace);
-}
-
-fn print_deps_children(p: &Printer, deps: &DepTree, children: &[usize], deptrace: &mut Vec<bool>) {
-    let mut iter = children.iter().peekable();
-    while let Some(c) = iter.next() {
-        let dep = &deps.arena[*c];
-        deptrace.push(children.len() > 1);
-        let mut mode = if dep.val.attrs.is_empty() {
-            dep.val.mode.to_string()
-        } else {
-            format!("[{}] {}", dep.val.attrs.join(" "), dep.val.mode)
-        };
-        // The load command versions (Mach-O only), shown in verbose mode the
-        // way otool -L reports them.
-        if p.is_verbose() {
-            if let Some(version) = &dep.val.version {
-                mode = format!("{mode} ({version})");
-            }
-        }
-        if dep.val.mode == deptree::DepMode::NotFound {
-            p.print_not_found(
-                &dep.val.name,
-                dep.val.alias.as_deref(),
-                &dep.val.attrs,
-                &dep.val.searched,
-                deptrace,
-            );
-        } else if dep.val.found {
-            p.print_already_found(
-                &dep.val.name,
-                dep.val.alias.as_deref(),
-                dep.val.path.as_ref().unwrap(),
-                &mode,
-                deptrace,
-            );
-        } else {
-            p.print_dependency(
-                &dep.val.name,
-                dep.val.alias.as_deref(),
-                dep.val.path.as_ref().unwrap(),
-                &mode,
-                deptrace,
-            );
-        }
-        deptrace.pop();
-
-        deptrace.push(children.len() > 1 && iter.peek().is_some());
-        print_deps_children(p, deps, &dep.children, deptrace);
-        deptrace.pop();
-    }
-}
 
 #[derive(FromArgs, ArgsInfo)]
 /// Print shared object dependencies
@@ -539,14 +473,14 @@ fn main() {
                     };
                     #[cfg(windows)]
                     let undefined = check_imports(&ctx, &deptree, opts.function_relocs);
-                    print_deps(&printer, &deptree);
+                    printer.print_deps(&deptree);
                     for undef in undefined {
                         outln!("undefined symbol: {undef}\t({})", undef.object);
                     }
                     continue;
                 }
 
-                print_deps(&printer, &deptree);
+                printer.print_deps(&deptree);
 
                 // The musl ldd always processes the relocations (musl has no
                 // lazy binding), reporting the unresolved references after
