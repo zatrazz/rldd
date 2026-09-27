@@ -48,7 +48,7 @@ windows-sys = { version = "0.61.2", features = [
 strip = true
 opt-level = "z"
 lto = true
-# Defaultimproves compile times, but prevents some optimizations.
+# The default improves compile times, but prevents some optimizations.
 codegen-units = 1
 # Remove stack unwinder and backtrace.
 panic = "abort"
