@@ -37,7 +37,7 @@ does not pull it away.
 | Check | What it covers |
 | --- | --- |
 | dependency lists | every object lists the same dependencies as `ldd`, each one resolved to the same file |
-| panics | no object makes rldd panic, and rldd reads every object ldd traces |
+| panics | no object makes rldd panic, crash (killed by a signal) or time out, and rldd reads every object ldd traces |
 
 The order of the listing is not compared.  The NetBSD ldd is asked for its
 `-f` format with the library name pieces, from which the `DT_NEEDED` name is

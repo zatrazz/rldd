@@ -12,7 +12,7 @@ The report lines are tab separated:
   UNTRACED n         objects ldd traces nothing for (another machine, static)
   UNREADABLE n       objects without read permission
   UNREADABLE-DIRS n  directories the walk could not enter
-  PANIC path what    the object made rldd panic, or time out
+  PANIC path what    the object made rldd panic, crash (a signal) or time out
   REFUSED path what  ldd traces the object, rldd refused it
   DIFF path what     the two listings differ
   UNRESOLVED path name
@@ -46,6 +46,8 @@ RLDD = None
 
 
 def run(cmd):
+    """(status, stdout, stderr) of CMD, where a negative status is the signal
+    that killed it, and -1 with a 'timeout' error the time limit."""
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
                            timeout=300, env=ENV)
@@ -53,7 +55,15 @@ def run(cmd):
     except subprocess.TimeoutExpired:
         return -1, "", "timeout"
     except OSError as e:
-        return -1, "", str(e)
+        # The status of a shell that cannot run the command.
+        return 127, "", str(e)
+
+
+def signal_name(signum):
+    try:
+        return signal.Signals(signum).name
+    except ValueError:
+        return "signal %d" % signum
 
 
 ET_EXEC, ET_DYN = 2, 3
@@ -400,9 +410,20 @@ def check(path):
     interp = info[1]
 
     rc, out, err = run([RLDD, "-l", path])
-    if "panicked" in err or (rc == -1 and err == "timeout"):
+    # A panic, a timeout, or rldd killed by a signal (a negative status), like
+    # the abort of a stack overflow or the SIGBUS of a file truncated while
+    # mapped.
+    if "panicked" in err or rc < 0:
         what = [l for l in err.split("\n") if "panicked" in l]
-        return [("PANIC", path, what[0] if what else err.strip())]
+        if what:
+            what = what[0]
+        elif rc == -1 and err == "timeout":
+            what = err
+        else:
+            what = "killed by " + signal_name(-rc)
+            if err.strip():
+                what += ": " + err.strip().split("\n")[-1]
+        return [("PANIC", path, what)]
     if rc != 0 and not out:
         rldd_status, rldd_deps = "error", set()
         refused = err.strip().split("\n")[0] if err.strip() else "exit status %d" % rc

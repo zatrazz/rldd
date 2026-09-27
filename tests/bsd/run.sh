@@ -150,8 +150,8 @@ check_sweep() {
         DIFF:*) fail "$n objects list other dependencies or paths than ldd" ;;
         REFUSED:0) pass "every object ldd traces is read" ;;
         REFUSED:*) fail "$n objects ldd traces were refused by rldd" ;;
-        PANIC:0) pass "no object made rldd panic" ;;
-        PANIC:*) fail "$n objects made rldd panic" ;;
+        PANIC:0) pass "no object made rldd panic or crash" ;;
+        PANIC:*) fail "$n objects made rldd panic or crash" ;;
         esac
         printf '%s\n' "$failures" | grep . | head -10 |
             awk -F'\t' '{ printf "        %s\n            %s\n", $2, $3 }'
