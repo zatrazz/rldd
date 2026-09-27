@@ -1,8 +1,8 @@
 // FreeBSD libmap.conf(5) parsing, used to filter and remap shared object names.
-// The semantics follow the rtld lm.c implementation: mappings can be constrained
-// to a program (exact path, directory prefix, or basename), only the first
-// matching constrained list is considered, and the unconstrained mappings are
-// used as fallback.
+// The semantics follow the rtld libmap.c implementation: mappings can be
+// constrained to a program (exact path, directory prefix, or basename), only
+// the matching section defined last is considered, and the unconstrained
+// mappings are used as fallback.  For both, the mapping defined last wins.
 
 use std::fs;
 use std::io::Read;
@@ -22,6 +22,8 @@ enum ConstraintType {
 struct Constraint {
     ctype: ConstraintType,
     spec: String,
+    // In definition order, while rtld inserts each one at the head of its
+    // list (lm_add).
     mappings: Vec<(String, String)>,
 }
 
@@ -41,59 +43,76 @@ impl Constraint {
         }
     }
 
+    // The lmp_find match of the program REFPATH.
     fn matches(&self, refpath: &str) -> bool {
         match self.ctype {
             ConstraintType::Exact => refpath == self.spec,
             ConstraintType::Directory => refpath.starts_with(&self.spec),
-            ConstraintType::Basename => pathutils::get_name(&Path::new(refpath)) == self.spec,
+            ConstraintType::Basename => quickbasename(refpath) == self.spec,
         }
+    }
+
+    // The lml_find mapping of NAME, the one defined last.
+    fn find(&self, name: &str) -> Option<&str> {
+        self.mappings
+            .iter()
+            .rev()
+            .find(|(from, _)| from == name)
+            .map(|(_, to)| to.as_str())
     }
 }
 
+// The part of PATH after the last slash, which is empty for a directory.
+fn quickbasename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+// rtld keeps the unconstrained mappings on a basename section with this name.
+const DEFAULT_SECTION: &str = "$DEFAULT$";
+
 #[derive(Debug, Default)]
 pub struct LibMap {
-    default: Vec<(String, String)>,
-    constraints: Vec<Constraint>,
+    // In definition order, while rtld inserts each one at the head of its list
+    // (lmp_init), the unconstrained one included.
+    sections: Vec<Constraint>,
     // The files (by path, and by device and inode) and the directories (by
     // path) already parsed.
     parsed: Vec<(String, Option<(u64, u64)>)>,
 }
 
-fn find_mapping<'a>(mappings: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    mappings
-        .iter()
-        .find(|(from, _)| from == name)
-        .map(|(_, to)| to.as_str())
-}
-
 impl LibMap {
-    pub fn lookup<'a>(&'a self, refpath: &str, name: &str) -> Option<&'a str> {
-        if let Some(constraint) = self.constraints.iter().find(|c| c.matches(refpath)) {
-            if let Some(target) = find_mapping(&constraint.mappings, name) {
-                return Some(target);
-            }
-        }
-        find_mapping(&self.default, name)
+    // The lmp_find section of the program PATH: the one defined last whose
+    // constraint matches.
+    fn section(&self, path: &str) -> Option<&Constraint> {
+        self.sections.iter().rev().find(|c| c.matches(path))
     }
 
+    // The lm_find mapping of NAME for the object REFPATH.  On a constrained
+    // hit rtld also adds the result as an unconstrained mapping, which a
+    // library name never uses again (the object is loaded under that name,
+    // which rtld matches before mapping it), so it is left out.
+    pub fn lookup<'a>(&'a self, refpath: &str, name: &str) -> Option<&'a str> {
+        if let Some(target) = self.section(refpath).and_then(|c| c.find(name)) {
+            return Some(target);
+        }
+        self.section(DEFAULT_SECTION).and_then(|c| c.find(name))
+    }
+
+    // Like lm_add, the section is found with the lmp_find matching, so a
+    // section adds to a matching one defined before it (for instance
+    // [/usr/local/] to [/usr/]) instead of being created.
     fn add_mapping(&mut self, constraint: &Option<String>, from: &str, to: &str) {
-        let mappings = match constraint {
-            Some(spec) => {
-                if !self.constraints.iter().any(|c| c.spec == *spec) {
-                    self.constraints.push(Constraint::new(spec));
-                }
-                let constraint = self
-                    .constraints
-                    .iter_mut()
-                    .find(|c| c.spec == *spec)
-                    .unwrap();
-                &mut constraint.mappings
+        let spec = constraint.as_deref().unwrap_or(DEFAULT_SECTION);
+        let section = match self.sections.iter().rposition(|c| c.matches(spec)) {
+            Some(section) => section,
+            None => {
+                self.sections.push(Constraint::new(spec));
+                self.sections.len() - 1
             }
-            None => &mut self.default,
         };
-        // Only the first mapping for a name is used.
-        if find_mapping(mappings, from).is_none() {
-            mappings.push((from.to_string(), to.to_string()));
+        let section = &mut self.sections[section];
+        if section.find(from) != Some(to) {
+            section.mappings.push((from.to_string(), to.to_string()));
         }
     }
 }
@@ -268,6 +287,83 @@ mod tests {
     }
 
     #[test]
+    fn mapping_defined_last_wins() {
+        let libmap = parse_str(
+            "libfoo.so.1 libfirst.so.1\n\
+             libfoo.so.1 liblast.so.1\n\
+             [prog]\n\
+             libbar.so.1 libfirst.so.1\n\
+             libbar.so.1 liblast.so.1\n",
+        );
+        assert_eq!(libmap.lookup("/bin/x", "libfoo.so.1"), Some("liblast.so.1"));
+        assert_eq!(
+            libmap.lookup("/bin/prog", "libbar.so.1"),
+            Some("liblast.so.1")
+        );
+    }
+
+    #[test]
+    fn section_defined_last_wins() {
+        let libmap = parse_str(
+            "[/usr/local/]\n\
+             libz.so.1 libdir.so.1\n\
+             [prog]\n\
+             libz.so.1 libbase.so.1\n",
+        );
+        assert_eq!(
+            libmap.lookup("/usr/local/bin/prog", "libz.so.1"),
+            Some("libbase.so.1")
+        );
+        assert_eq!(
+            libmap.lookup("/usr/local/bin/other", "libz.so.1"),
+            Some("libdir.so.1")
+        );
+
+        let libmap = parse_str(
+            "[prog]\n\
+             libz.so.1 libbase.so.1\n\
+             [/usr/local/]\n\
+             libz.so.1 libdir.so.1\n",
+        );
+        assert_eq!(
+            libmap.lookup("/usr/local/bin/prog", "libz.so.1"),
+            Some("libdir.so.1")
+        );
+        assert_eq!(
+            libmap.lookup("/usr/bin/prog", "libz.so.1"),
+            Some("libbase.so.1")
+        );
+    }
+
+    // A section matching an earlier one, taken as a program path, adds its
+    // mappings to it.
+    #[test]
+    fn section_adds_to_matching_section() {
+        let libmap = parse_str(
+            "[/usr/]\n\
+             liba.so.1 libusr.so.1\n\
+             [/usr/local/]\n\
+             libb.so.1 liblocal.so.1\n\
+             [prog]\n\
+             libc.so.1 libbase.so.1\n\
+             [/usr/bin/prog]\n\
+             libd.so.1 libexact.so.1\n",
+        );
+        assert_eq!(
+            libmap.lookup("/usr/bin/x", "libb.so.1"),
+            Some("liblocal.so.1")
+        );
+        assert_eq!(
+            libmap.lookup("/usr/local/bin/x", "liba.so.1"),
+            Some("libusr.so.1")
+        );
+        assert_eq!(
+            libmap.lookup("/opt/prog", "libd.so.1"),
+            Some("libexact.so.1")
+        );
+    }
+
+    #[test]
     fn parse_include() -> std::io::Result<()> {
         let tmpdir = TempDir::new()?;
         let included = tmpdir.path().join("included.conf");
@@ -288,6 +384,28 @@ mod tests {
             Some("libincluded.so.1")
         );
         assert!(parse_libmap(&tmpdir.path().join("missing.conf")).is_none());
+        Ok(())
+    }
+
+    // A file included again is not parsed again, so it does not override the
+    // mappings defined after its first inclusion.
+    #[test]
+    fn parse_include_again() -> std::io::Result<()> {
+        let tmpdir = TempDir::new()?;
+        let included = tmpdir.path().join("included.conf");
+        fs::write(&included, "libfoo.so.1 libincluded.so.1\n")?;
+        let conf = tmpdir.path().join("libmap.conf");
+        let include = format!("include {}\n", included.display());
+        fs::write(
+            &conf,
+            format!("{include}libfoo.so.1 libmain.so.1\n{include}"),
+        )?;
+
+        let libmap = parse_libmap(&conf).unwrap();
+        assert_eq!(
+            libmap.lookup("/bin/prog", "libfoo.so.1"),
+            Some("libmain.so.1")
+        );
         Ok(())
     }
 
