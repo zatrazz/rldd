@@ -361,12 +361,45 @@ mod tests {
     }
 }
 
+// The ld.so.1 default directories (_elf_def_dirs), which only depend on the
+// class the loader is built for, whatever the architecture: /lib/64 and
+// /usr/lib/64 for the 64-bit one.
+#[cfg(any(
+    target_os = "illumos",
+    target_os = "solaris",
+    all(test, target_os = "linux")
+))]
+fn solaris_default_dirs(ei_class: FileClass) -> Result<[&'static str; 2], std::io::Error> {
+    match ei_class {
+        ELFCLASS32 => Ok(["/lib", "/usr/lib"]),
+        ELFCLASS64 => Ok(["/lib/64", "/usr/lib/64"]),
+        _ => return_error(),
+    }
+}
+
 #[cfg(any(target_os = "illumos", target_os = "solaris"))]
 pub fn get_system_dirs(elc: &ElfInfo) -> Result<search_path::SearchPathVec, std::io::Error> {
-    match elc.e_machine {
-        EM_386 => Ok(search_path::fixed_list(["/lib", "/usr/lib"])),
-        EM_X86_64 => Ok(search_path::fixed_list(["/lib64", "/usr/lib/64"])),
-        _ => return_error(),
+    Ok(search_path::fixed_list(solaris_default_dirs(elc.ei_class)?))
+}
+
+#[cfg(all(
+    test,
+    any(target_os = "illumos", target_os = "solaris", target_os = "linux")
+))]
+mod solaris_tests {
+    use super::*;
+
+    #[test]
+    fn default_dirs() {
+        assert_eq!(
+            solaris_default_dirs(ELFCLASS32).unwrap(),
+            ["/lib", "/usr/lib"]
+        );
+        assert_eq!(
+            solaris_default_dirs(ELFCLASS64).unwrap(),
+            ["/lib/64", "/usr/lib/64"]
+        );
+        assert!(solaris_default_dirs(ELFCLASSNONE).is_err());
     }
 }
 
