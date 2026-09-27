@@ -11,6 +11,7 @@
 #   FILES n         objects inspected
 #   ERRORS n        objects rldd refused (a shell script, or no read permission)
 #   PANIC path      the object made rldd panic
+#   CRASH path n    rldd was killed by signal n
 #   UNRESOLVED path count loadable
 #                   the object has unresolved dependencies; 'loadable' is no
 #                   when the device has no loader for its ELF class, so it
@@ -19,7 +20,7 @@
 rldd=$1
 shift
 
-# Whether the device can load an object at all. The class is # the fifth byte
+# Whether the device can load an object at all.  The class is the fifth byte
 # of the ELF header (1 for ELFCLASS32, 2 for ELFCLASS64).
 loadable() {
     class=$(dd if="$1" bs=1 skip=4 count=1 2>/dev/null | od -An -tu1 | tr -d ' \n')
@@ -39,12 +40,21 @@ for f in $@; do
     files=$((files + 1))
 
     out=$("$rldd" -l "$f" 2>&1)
+    status=$?
 
+    # A panic prints its message whether it unwinds or aborts (the release
+    # build aborts), and any other fatal signal is a crash as well.
     case $out in
     *panicked*)
         echo "PANIC $f"
         continue
         ;;
+    esac
+    if [ "$status" -gt 128 ]; then
+        echo "CRASH $f $((status - 128))"
+        continue
+    fi
+    case $out in
     error:*)
         errors=$((errors + 1))
         continue

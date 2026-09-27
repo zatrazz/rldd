@@ -68,7 +68,7 @@ device, in a single adb round trip:
 
 | Check | What it covers |
 | --- | --- |
-| panics | no object makes rldd panic |
+| crashes | no object makes rldd panic or die from a signal |
 | resolution | every dependency of every object resolves |
 
 Between them these cover the search rules the image drives, since an object

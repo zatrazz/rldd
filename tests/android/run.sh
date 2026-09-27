@@ -200,6 +200,7 @@ check_sweep() {
     files=$(printf '%s\n' "$report" | sed -n 's/^FILES //p')
     errors=$(printf '%s\n' "$report" | sed -n 's/^ERRORS //p')
     panics=$(printf '%s\n' "$report" | grep -c '^PANIC ' || true)
+    crashes=$(printf '%s\n' "$report" | grep -c '^CRASH ' || true)
     unloadable=$(printf '%s\n' "$report" | grep -c '^UNRESOLVED .* no$' || true)
     unresolved=$(printf '%s\n' "$report" | grep -c '^UNRESOLVED .* yes$' || true)
 
@@ -211,11 +212,13 @@ check_sweep() {
     fi
     summary="$files objects, ${errors:-0} not readable"
 
-    if [ "$panics" -gt 0 ]; then
-        fail "sweep: $panics object(s) panicked"
+    if [ "$panics" -gt 0 ] || [ "$crashes" -gt 0 ]; then
+        fail "sweep: $panics object(s) panicked, $crashes killed by a signal"
         printf '%s\n' "$report" | grep '^PANIC ' | sed 's/^PANIC /        /'
+        printf '%s\n' "$report" | grep '^CRASH ' |
+            awk '{ printf "        %s (signal %s)\n", $2, $3 }'
     else
-        pass "sweep: no panics ($summary)"
+        pass "sweep: no panics nor crashes ($summary)"
     fi
 
     if [ "$unresolved" -gt 0 ]; then
