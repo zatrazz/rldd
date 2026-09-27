@@ -102,6 +102,13 @@ impl Loader for Android {
     fn rpath_search(_elc: &ElfInfo) -> bool {
         false
     }
+
+    // The linker ignores DF_1_NODEFLIB (it is not among the DT_FLAGS_1 flags
+    // prelink_image supports), searching the namespace directories
+    // regardless.
+    fn nodeflib_rule(_step: SearchStep, _elc: &ElfInfo) -> NodeflibRule {
+        NodeflibRule::Search
+    }
 }
 
 impl SearchCache for ld_config_txt::LdCache {
