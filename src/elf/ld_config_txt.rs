@@ -293,15 +293,26 @@ pub fn get_ld_config_path<P: AsRef<Path>>(
     get_vndk_ld_config_path(e_machine, ei_class, linkerconfig, props)
 }
 
-pub fn read_version_file<P: AsRef<Path>>(binary: &P) -> Result<i64, &'static str> {
-    if let Some(parent) = binary.as_ref().parent() {
-        if let Ok(version_str) = std::fs::read_to_string(parent.join(".version")) {
-            if let Ok(value) = version_str.parse::<i64>() {
-                return Ok(value);
-            }
-        }
+// The target SDK version set by the '.version' file next to the binary, read
+// the way the bionic Config::read_binary_config does: a missing file keeps
+// the default version, while a file that can not be read or that does not
+// hold a positive number (once trimmed) fails the whole configuration.
+fn read_version_file<P: AsRef<Path>>(binary: &P) -> Result<Option<i64>, &'static str> {
+    let Some(parent) = binary.as_ref().parent() else {
+        return Ok(None);
+    };
+    let content = match std::fs::read(parent.join(".version")) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("error reading version file"),
+    };
+    match std::str::from_utf8(trim(&content))
+        .ok()
+        .and_then(|version| version.parse::<i64>().ok())
+    {
+        Some(version) if version > 0 => Ok(Some(version)),
+        _ => Err("invalid version"),
     }
-    Err("error reading version file")
 }
 
 pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
@@ -345,16 +356,14 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
         }
     }
 
-    // The '.version' file is only present for the binaries the configuration
-    // opts in, the running release is used otherwise (and if the file can not
-    // be read, the way the loader falls back to the current version).
-    properties.target_sdk_version = if properties.get_bool("enable.target.sdk.version") {
-        read_version_file(binary)
-            .map(|version| version.to_string())
-            .unwrap_or_else(|_| release.to_string())
-    } else {
-        release.to_string()
-    };
+    // The '.version' file is only read for the sections that opt in, the
+    // running release is used otherwise.
+    properties.target_sdk_version = release.to_string();
+    if properties.get_bool("enable.target.sdk.version") {
+        if let Some(version) = read_version_file(binary)? {
+            properties.target_sdk_version = version.to_string();
+        }
+    }
 
     let mut ldcache = LdCache::new();
 
@@ -1044,6 +1053,41 @@ mod tests {
                  namespace.default.links =\n"
             )
             .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn version_file() -> Result<(), Error> {
+        let fixture = Fixture::new()?;
+        for dir in ["sdk26", "sdk31"] {
+            fs::create_dir(fixture.path(dir))?;
+        }
+        let config = "dir.test = {base}/bin\n\
+                      [test]\n\
+                      enable.target.sdk.version = true\n\
+                      namespace.default.search.paths = {base}/sdk${SDK_VER}\n";
+        let version = fixture.path("bin/.version");
+
+        // Without the file, the default version applies.
+        let ldcache = fixture.parse(config).map_err(Error::other)?;
+        assert_eq!(
+            search_paths(&ldcache, "default"),
+            vec![fixture.path("sdk31")]
+        );
+
+        // The content is trimmed.
+        fs::write(&version, "26\n")?;
+        let ldcache = fixture.parse(config).map_err(Error::other)?;
+        assert_eq!(
+            search_paths(&ldcache, "default"),
+            vec![fixture.path("sdk26")]
+        );
+
+        // Anything but a positive number fails the configuration.
+        for invalid in ["", "abc", "0", "-26", "26 27"] {
+            fs::write(&version, invalid)?;
+            assert!(fixture.parse(config).is_err(), "{invalid:?}");
+        }
         Ok(())
     }
 
