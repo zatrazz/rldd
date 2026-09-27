@@ -895,7 +895,7 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
         platform: ctx.platform.as_ref(),
         all: ctx.all,
         #[cfg(target_os = "freebsd")]
-        libmap: ld_libmap_freebsd::parse_libmap(&Path::new("/etc/libmap.conf"))
+        libmap: ld_libmap_freebsd::parse_libmap(&ld_libmap_freebsd::libmap_path(elc.ei_class))
             .map(std::cell::RefCell::new),
         #[cfg(all(test, target_os = "linux"))]
         libmap: None,

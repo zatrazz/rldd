@@ -264,6 +264,17 @@ pub fn parse_libmap<P: AsRef<Path>>(filename: &P) -> Option<LibMap> {
     Some(libmap)
 }
 
+// The libmap.conf of the rtld loading an object of the EI_CLASS class, where
+// the 32-bit compat rtld of a 64-bit system has its "32" COMPAT_libcompat
+// suffix (_PATH_LIBMAP_CONF).
+pub fn libmap_path(ei_class: object::elf::FileClass) -> &'static str {
+    if cfg!(target_pointer_width = "64") && ei_class == object::elf::ELFCLASS32 {
+        "/etc/libmap32.conf"
+    } else {
+        "/etc/libmap.conf"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,6 +399,14 @@ mod tests {
         let mut libmap = LibMap::default();
         parse_content(&mut libmap, b"# caf\xe9\nlibfoo.so.1 libbar.so.1\n");
         assert_eq!(libmap.lookup("/bin/x", "libfoo.so.1"), Some("libbar.so.1"));
+    }
+
+    #[test]
+    fn compat_libmap() {
+        assert_eq!(libmap_path(object::elf::ELFCLASS64), "/etc/libmap.conf");
+        if cfg!(target_pointer_width = "64") {
+            assert_eq!(libmap_path(object::elf::ELFCLASS32), "/etc/libmap32.conf");
+        }
     }
 
     // A mapping of the object section also becomes an unconstrained one,
