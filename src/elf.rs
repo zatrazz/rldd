@@ -101,7 +101,8 @@ struct ElfInfo {
     // (ignoring DT_RPATH) only depend on the tag presence.
     has_runpath: bool,
     // Whether the last of the DT_RPATH and DT_RUNPATH entries is a DT_RUNPATH
-    // one, for the loaders where the last entry of either wins (NetBSD).
+    // one, for the loaders where the last entry of either wins (NetBSD and
+    // illumos).
     #[allow(dead_code)]
     runpath_last: bool,
     // Whether the object has any DT_NEEDED entry.

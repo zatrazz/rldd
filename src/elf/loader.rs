@@ -312,8 +312,8 @@ pub(super) trait SearchCache {
 #[derive(Clone, Debug, Default)]
 pub(super) struct NoNamespace;
 
-// The hints and configuration files holding a directory list (the BSD and the
-// Solaris loaders).
+// The hints and configuration files holding a directory list (the FreeBSD,
+// NetBSD and Solaris loaders).
 impl SearchCache for search_path::SearchPathVec {
     type Namespace = NoNamespace;
 
