@@ -247,6 +247,13 @@ pub(super) trait Loader {
         true
     }
 
+    // Whether the ELC input object keeps its DT_RPATH when it also has
+    // DT_RUNPATH, for the dependencies inheriting it.  Most loaders ignore
+    // it altogether.
+    fn keep_main_rpath(_elc: &ElfInfo) -> bool {
+        false
+    }
+
     // How DF_1_NODEFLIB on ELC, the object requesting a dependency, restricts
     // the STEP search.  Most loaders skip the loader cache and the default
     // directories.

@@ -188,6 +188,13 @@ impl Loader for OpenBsd {
         !elc.has_runpath
     }
 
+    // The executable DT_RPATH is kept even when it has DT_RUNPATH, as the
+    // fallback of the libraries without DT_RUNPATH (_dl_finalize_object with
+    // OBJTYPE_EXE).
+    fn keep_main_rpath(elc: &ElfInfo) -> bool {
+        elc.interp.is_some()
+    }
+
     // The OpenBSD loader does not implement DF_1_NODEFLIB, so every step is
     // searched.
     fn nodeflib_rule(_step: SearchStep, _elc: &ElfInfo) -> NodeflibRule {
@@ -260,6 +267,18 @@ fn uname_values() -> &'static [Option<String>; 3] {
 mod tests {
     use super::*;
     use crate::tempdir::TempDir;
+
+    // The executable keeps its DT_RPATH with DT_RUNPATH, which it does not
+    // search itself.
+    #[test]
+    fn main_rpath_with_runpath() {
+        let mut elc = ElfInfo::for_test(EM_X86_64, FileFlags(0));
+        elc.has_runpath = true;
+        assert!(!OpenBsd::keep_main_rpath(&elc));
+        elc.interp = Some("/usr/libexec/ld.so".to_string());
+        assert!(OpenBsd::keep_main_rpath(&elc));
+        assert!(!OpenBsd::rpath_search(&elc));
+    }
 
     // A candidate that is not a shared object of the loader machine fails
     // the load, whatever its OS ABI.

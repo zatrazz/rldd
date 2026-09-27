@@ -885,8 +885,9 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
     }
 
     // DT_RPATH is ignored if the object also defines DT_RUNPATH (the latter only
-    // applies to the object own dependencies, so it is not propagated).
-    if elc.has_runpath {
+    // applies to the object own dependencies, so it is not propagated), unless
+    // the loader keeps it for the dependencies.
+    if elc.has_runpath && !Rtld::keep_main_rpath(&elc) {
         elc.rpath.clear();
     }
 
