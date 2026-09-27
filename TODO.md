@@ -54,20 +54,46 @@
 
 ### TODO
 
-- [ ] Side-by-side: read the Win32 publisher policy.  The highest installed build of the requested major and minor version is used instead, and a Windows 11 install carries no Win32 policy assembly to check it against (the '*_policy.*' ones on WinSxS are managed assemblies).
+- [ ] Side-by-side: read the Win32 publisher policy.  The highest installed build of the requested major and minor version is used instead, and a Windows 11 install carries no Win32 policy assembly to check it against (the `*_policy.*` ones on WinSxS are managed assemblies).
 - [ ] The package dependency graph of a packaged application.
 - [ ] API set schema version 4 (Windows 8.1), only version 6 is parsed.
+- [ ] The system default activation context: the loader maps comctl32 from
+      the version 5.82 assembly of WinSxS, and gdiplus from the version 1.1
+      one, even for an executable without a manifest, while rldd takes them
+      from the search order (the WinSxS manifests of the context are
+      compressed).
+- [ ] The API set schema extensions, which add sets to the apisetschema.dll
+      ones.
+- [ ] The application compatibility shims, which the loader maps (apphelp.dll,
+      AcLayers.dll and the modules they pull in) for the executables the
+      compatibility database lists.
+- [ ] The ExcludeFromKnownDlls registry value, which removes modules from the
+      known DLLs.
+- [ ] Check the known DLL directories on an ARM64 host for the x86 (CHPE) and
+      the 32-bit ARM images, which are unverified.
 
 
 ## Done
 
 - [x] PE: Follow the export forwarders, including for the modules already
-      resolved through another importer.
-- [x] PE: Resolve the side-by-side assemblies of the embedded and the
-      external manifests.
-- [x] PE: Handle the '.local' DLL redirection and the known DLL dependencies.
+      resolved through another importer, and the forwarder chains.
+- [x] PE: Resolve the side-by-side assemblies of the manifest the loader
+      activates for the executable (the resource 1, the external file, or the
+      resource 2) and for the DLLs (the resource 2).
+- [x] PE: Parse the manifests as XML, and match the shortened WinSxS
+      directory names.
+- [x] PE: Handle the '.local' DLL redirection, ignored when the process starts
+      with a manifest unless DevOverrideEnable is set.
+- [x] PE: Take the known DLLs from the sections smss creates for each
+      architecture (the registry list and its static import closure).
+- [x] PE: Apply the WOW64 file system redirection to the searched directories.
+- [x] PE: Stop the search on a candidate the loader cannot map (bad image).
+- [x] PE: Resolve an IL only any CPU .NET image as a native process, and add
+      the mscoree.dll the loader maps for a .NET image.
+- [x] PE: Tell the ARM64EC objects from the ARM64X ones.
 - [x] PE: Report the bound imports.
-- [x] PE: Check the imports against the export tables (-d and -r).
+- [x] PE: Check the imports against the export tables (-d and -r), through
+      the forwarders.
 - [x] MachO: Implement DYLD_FALLBACK_LIBRARY_PATH.
 - [x] MachO: Implement DYLD_FRAMEWORK_PATH and DYLD_FALLBACK_FRAMEWORK_PATH.
 - [x] Take symbol versioning in consideration on the -d/-r/-u relocation checks.
