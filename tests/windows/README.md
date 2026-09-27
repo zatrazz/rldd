@@ -56,7 +56,7 @@ to.
 | --- | --- |
 | dependency names | the imports and the delay load imports are the ones `dumpbin /dependents` lists, in the same order |
 | name spelling | each name is printed as its own import directory records it, not as the first entry that resolved to the module spells it |
-| panics | no object makes rldd panic |
+| crashes | no object makes rldd panic or die of an exception |
 | errors | rldd reads every object dumpbin reads |
 | resolved paths | every resolved dependency names a file that exists |
 | loader paths (`-Paths`) | the static dependencies of each executable resolve to the files the loader maps |
@@ -64,6 +64,13 @@ to.
 The dependency name check is what turned up the delay load imports dropped when
 the descriptors and the names live on different sections, and the name spelling
 one is what turned up the entries printed with the spelling of another import.
+
+A crash is either a panic message or an exit status that is an NTSTATUS of the
+error severity (0xC0000000 and above, as an unsigned 32 bit value), which is
+how a process an exception kills exits, possibly after a complete looking
+output: a stack overflow (0xC00000FD), an access violation (0xC0000005), or the
+fast fail (0xC0000409, STATUS_STACK_BUFFER_OVERRUN) the release build aborts
+with on a panic.  The report names the code, and the common ones by name.
 
 ## The loader paths
 

@@ -504,6 +504,39 @@ function Compare-Paths($Loader, $Strict, $Loose) {
     [pscustomobject]@{ Differences = $differences.ToArray(); SystemDefault = $default; Shims = [int]($shims -gt 0) }
 }
 
+# The NTSTATUS exception codes a process killed by an exception exits with,
+# named for the common ones.  The release build of rldd aborts on a panic,
+# which is a fast fail (STATUS_STACK_BUFFER_OVERRUN).
+$ExceptionNames = @{
+    0xC0000005u = 'STATUS_ACCESS_VIOLATION'
+    0xC0000017u = 'STATUS_NO_MEMORY'
+    0xC000001Du = 'STATUS_ILLEGAL_INSTRUCTION'
+    0xC0000094u = 'STATUS_INTEGER_DIVIDE_BY_ZERO'
+    0xC00000FDu = 'STATUS_STACK_OVERFLOW'
+    0xC000013Au = 'STATUS_CONTROL_C_EXIT'
+    0xC0000374u = 'STATUS_HEAP_CORRUPTION'
+    0xC0000409u = 'STATUS_STACK_BUFFER_OVERRUN'
+}
+
+# How an rldd run ended, when an exception killed it: an exit status that is
+# an NTSTATUS of the error severity (0xC0000000 on, as an unsigned 32 bit
+# value), which a complete looking output does not tell.
+function Get-Crash($ExitCode, [string]$Run) {
+    if ($null -eq $ExitCode) {
+        return ''
+    }
+    $status = [uint32]([int64]$ExitCode -band 0xFFFFFFFFL)
+    if (($status -band 0xC0000000u) -ne 0xC0000000u) {
+        return ''
+    }
+    $name = $ExceptionNames[$status]
+    $code = '0x{0:X8}' -f $status
+    if ($name) {
+        $code = "$code ($name)"
+    }
+    return "rldd $Run exited with $code"
+}
+
 # The binary under test is always rebuilt, which is a no-op when it is up to
 # date.
 & cargo build --release --manifest-path (Join-Path $RepoRoot 'Cargo.toml')
@@ -550,7 +583,7 @@ if ($binaries.Count -eq 0) {
 
 $mismatch = [System.Collections.Generic.List[string]]::new()
 $caseonly = [System.Collections.Generic.List[string]]::new()
-$panics = [System.Collections.Generic.List[string]]::new()
+$crashes = [System.Collections.Generic.List[string]]::new()
 $errors = [System.Collections.Generic.List[string]]::new()
 $missing = [System.Collections.Generic.List[string]]::new()
 $notFound = [System.Collections.Generic.List[string]]::new()
@@ -570,13 +603,17 @@ try {
     # The workers start the tools and the comparison is done here as the
     # results arrive, which keeps a sweep of the whole system within memory.
     $binaries | ForEach-Object -ThrottleLimit $Throttle -Parallel {
+        $dumpbin = & $using:Dumpbin /nologo /dependents $_ 2>&1 | Out-String
+        $rldd = & $using:Rldd -a -p --depth 1 $_ 2>&1 | Out-String
         $result = [pscustomobject]@{
-            File    = $_
-            Dumpbin = (& $using:Dumpbin /nologo /dependents $_ 2>&1 | Out-String)
-            Rldd    = (& $using:Rldd -a -p --depth 1 $_ 2>&1 | Out-String)
-            Loader  = $null
-            Strict  = $null
-            Loose   = $null
+            File     = $_
+            Dumpbin  = $dumpbin
+            Rldd     = $rldd
+            RlddExit = $LASTEXITCODE
+            Loader   = $null
+            Strict   = $null
+            Loose    = $null
+            TreeExit = $null
         }
         # Starting WerFault.exe, even up to the loader breakpoint, gets the
         # process that started it killed a moment later.
@@ -586,7 +623,9 @@ try {
             }
             Set-Location -LiteralPath $using:Scratch
             $result.Loader = [RlddLoaderOracle]::Run($_, $using:Scratch, $using:Timeout * 1000)
-            $whole = ConvertFrom-Rldd (& $using:Rldd -a -p --depth 0 $_ 2>&1 | Out-String)
+            $text = & $using:Rldd -a -p --depth 0 $_ 2>&1 | Out-String
+            $result.TreeExit = $LASTEXITCODE
+            $whole = ConvertFrom-Rldd $text
             $result.Strict = Get-StaticModules $whole
             $result.Loose = Get-StaticModules $whole -Loose
         }
@@ -595,11 +634,19 @@ try {
         $output = $_
         $tree = ConvertFrom-Rldd $output.Rldd
         $reference = ConvertFrom-Dumpbin $output.Dumpbin
+        # A panic prints its message, while an exception may kill the process
+        # after a complete looking output, which only the exit status tells.
+        $crash = @(
+            if ($tree.Failure -match 'panicked at') { $tree.Failure }
+            Get-Crash $output.RlddExit '-a -p --depth 1'
+            Get-Crash $output.TreeExit '-a -p --depth 0'
+        ) | Where-Object { $_ }
+        if ($crash) {
+            $crashes.Add("$($output.File): $($crash -join ', ')")
+            return
+        }
         if ($tree.Failure) {
-            if ($tree.Failure -match 'panicked at') {
-                $panics.Add("$($output.File): $($tree.Failure)")
-            }
-            elseif ($reference.Failure) {
+            if ($reference.Failure) {
                 # Neither tool takes it as a PE object.
                 $unreadable++
             }
@@ -687,7 +734,7 @@ Write-Host "$compared compared in ${elapsed}s, $unreadable not a PE object, $ref
 $checks = @(
     @{ Failures = $mismatch; Pass = "the dependency names match on all $compared objects"; Fail = 'objects have another dependency list' }
     @{ Failures = $caseonly; Pass = 'every name is printed as the import directory records it'; Fail = 'objects print a name with another case' }
-    @{ Failures = $panics; Pass = 'no object made rldd panic'; Fail = 'objects made rldd panic' }
+    @{ Failures = $crashes; Pass = 'no object made rldd crash'; Fail = 'objects made rldd crash (a panic or an exception)' }
     @{ Failures = $errors; Pass = 'rldd reads every object dumpbin reads'; Fail = 'objects dumpbin reads made rldd fail' }
     @{ Failures = $missing; Pass = 'every resolved dependency names a file that exists'; Fail = 'objects resolved a dependency to a path that does not exist' }
 )
