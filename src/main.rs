@@ -3,6 +3,25 @@ use std::io::{Error, ErrorKind};
 
 use argh::{ArgsInfo, FromArgs};
 
+// Only the systems whose loader is emulated are supported, and any other
+// would fail to build with obscure errors (such as the missing loader type
+// of the ELF backend).
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "illumos",
+    target_os = "solaris",
+    target_os = "macos",
+    windows
+)))]
+compile_error!(
+    "unsupported target: rldd builds for the linux, android, freebsd, netbsd, \
+     openbsd, illumos, solaris, macos, and windows target_os only"
+);
+
 #[macro_use]
 mod output;
 
