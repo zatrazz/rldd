@@ -1760,6 +1760,34 @@ mod tests {
     }
 
     #[test]
+    fn framework_partial_paths() {
+        for (path, partial) in [
+            (
+                "/System/Library/Frameworks/Foo.framework/Versions/A/Foo",
+                Some("Foo.framework/Versions/A/Foo"),
+            ),
+            (
+                "/Library/Frameworks/Foo.framework/Foo",
+                Some("Foo.framework/Foo"),
+            ),
+            ("@rpath/Foo.framework/Foo", Some("Foo.framework/Foo")),
+            ("Foo.framework/Foo", Some("Foo.framework/Foo")),
+            // The last framework directory of a nested one.
+            (
+                "/F/Foo.framework/Versions/A/Frameworks/Bar.framework/Bar",
+                Some("Bar.framework/Bar"),
+            ),
+            // The leaf name is not the framework name.
+            ("/F/Foo.framework/Versions/A/Bar", None),
+            ("/F/Foo.framework/Versions/A/Libraries/libfoo.dylib", None),
+            ("/F/Foo.framework", None),
+            ("/usr/lib/libz.dylib", None),
+        ] {
+            assert_eq!(framework_partial_path(path), partial, "{path}");
+        }
+    }
+
+    #[test]
     fn insert_libraries_list() {
         assert_eq!(insert_libraries(""), Vec::<String>::new());
         assert_eq!(
