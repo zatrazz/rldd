@@ -78,8 +78,24 @@ impl Loader for OpenBsd {
         canonical_origin_directory(filename)
     }
 
-    fn check_elf_header(elc: &ElfInfo) -> bool {
-        elc.ei_osabi == ELFOSABI_SYSV || elc.ei_osabi == ELFOSABI_OPENBSD
+    // _dl_tryload_shlib fails the load of the file found unless it is an ELF
+    // shared object (ET_DYN) of the loader machine, whatever its OS ABI.
+    fn check_candidate(
+        data: &[u8],
+        parsed: &Result<ElfInfo, &'static str>,
+        melc: &ElfInfo,
+    ) -> Result<(), Rejection> {
+        let e_type = data.get(16..18).map(|e_type| {
+            let e_type = [e_type[0], e_type[1]];
+            FileType(match DataEncoding(data[5]) {
+                ELFDATA2MSB => u16::from_be_bytes(e_type),
+                _ => u16::from_le_bytes(e_type),
+            })
+        });
+        match parsed {
+            Ok(elc) if e_type == Some(ET_DYN) && match_elf_header(melc, elc) => Ok(()),
+            _ => Err(Rejection::Fatal("not an ELF shared object".to_string())),
+        }
     }
 
     // The OpenBSD loader matches a library by name and major version, picking the best
@@ -244,6 +260,41 @@ fn uname_values() -> &'static [Option<String>; 3] {
 mod tests {
     use super::*;
     use crate::tempdir::TempDir;
+
+    // A candidate that is not a shared object of the loader machine fails
+    // the load, whatever its OS ABI.
+    #[test]
+    fn candidate_mismatch_is_fatal() {
+        let header = |e_type: u16| {
+            let mut data = vec![0u8; 64];
+            data[..4].copy_from_slice(&ELFMAG);
+            data[4] = ELFCLASS64.0;
+            data[5] = ELFDATA2LSB.0;
+            data[16..18].copy_from_slice(&e_type.to_le_bytes());
+            data
+        };
+        let melc = ElfInfo::for_test(EM_X86_64, FileFlags(0));
+        let mut gnu = ElfInfo::for_test(EM_X86_64, FileFlags(0));
+        gnu.ei_osabi = ELFOSABI_GNU;
+        let fatal = Err(Rejection::Fatal("not an ELF shared object".to_string()));
+        let check = |data: &[u8], parsed| OpenBsd::check_candidate(data, &parsed, &melc);
+        assert_eq!(check(&header(ET_DYN.0), Ok(gnu)), Ok(()));
+        assert_eq!(
+            check(
+                &header(ET_EXEC.0),
+                Ok(ElfInfo::for_test(EM_X86_64, FileFlags(0)))
+            ),
+            fatal
+        );
+        assert_eq!(
+            check(
+                &header(ET_DYN.0),
+                Ok(ElfInfo::for_test(EM_386, FileFlags(0)))
+            ),
+            fatal
+        );
+        assert_eq!(check(&[], Err("Invalid object")), fatal);
+    }
 
     #[test]
     fn origin_subst_path_tokens() {

@@ -326,7 +326,12 @@ pub(super) enum Rejection {
     Skip(String),
     // It fails the load of the dependency with the error given.
     #[cfg_attr(
-        not(any(target_os = "linux", target_os = "android", target_os = "freebsd")),
+        not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "freebsd",
+            target_os = "openbsd"
+        )),
         allow(dead_code)
     )]
     Fatal(String),
