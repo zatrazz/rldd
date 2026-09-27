@@ -27,13 +27,11 @@ impl Loader for NetBsd {
         }
     }
 
-    // The NetBSD loader handles DT_RPATH and DT_RUNPATH the same way, where both
-    // are recorded as the object rpath (the last tag wins).
+    // The NetBSD loader records DT_RPATH and DT_RUNPATH in the same slot, so
+    // the last entry of either wins (_rtld_digest_dynamic), searched as the
+    // object rpath.
     fn handle_search_paths(elc: &mut ElfInfo) {
-        if elc.has_runpath {
-            elc.rpath = std::mem::take(&mut elc.runpath);
-            elc.has_runpath = false;
-        }
+        single_search_list(elc);
     }
 
     // The NetBSD loader expands the $ORIGIN token to the executable directory for
@@ -52,5 +50,36 @@ impl Loader for NetBsd {
     // The NetBSD loader does not check the EI_OSABI field.
     fn check_elf_header(_elc: &ElfInfo) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn object(rpath: &[&str], runpath: &[&str], runpath_last: bool) -> ElfInfo {
+        let mut elc = ElfInfo::for_test(EM_X86_64, FileFlags(0));
+        elc.rpath = search_path::fixed_list(rpath.iter().copied());
+        elc.runpath = search_path::fixed_list(runpath.iter().copied());
+        elc.has_runpath = !runpath.is_empty();
+        elc.runpath_last = runpath_last;
+        elc
+    }
+
+    // A single rpath list, from the last of the DT_RPATH and DT_RUNPATH
+    // entries.
+    #[test]
+    fn last_search_list_entry_wins() {
+        for (mut elc, rpath) in [
+            (object(&["/r"], &["/u"], true), "/u"),
+            (object(&["/r"], &["/u"], false), "/r"),
+            (object(&[], &["/u"], true), "/u"),
+            (object(&["/r"], &[], false), "/r"),
+        ] {
+            NetBsd::handle_search_paths(&mut elc);
+            assert_eq!(elc.rpath, search_path::fixed_list([rpath]));
+            assert!(elc.runpath.is_empty());
+            assert!(!elc.has_runpath);
+        }
     }
 }

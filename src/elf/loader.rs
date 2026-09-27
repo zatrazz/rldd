@@ -13,9 +13,9 @@ mod android;
 mod freebsd;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "netbsd")]
+// The BSD rules are also built for the Linux tests, which check them.
+#[cfg(any(target_os = "netbsd", all(test, target_os = "linux")))]
 mod netbsd;
-// Also built for the Linux tests, which check its dependency matching.
 #[cfg(any(target_os = "openbsd", all(test, target_os = "linux")))]
 mod openbsd;
 #[cfg(any(target_os = "illumos", target_os = "solaris"))]
@@ -340,4 +340,16 @@ fn replace_token(input: &str, token: &str, value: &str) -> String {
 fn canonical_origin_directory<P: AsRef<Path>>(filename: &P) -> Option<String> {
     let path = fs::canonicalize(filename).unwrap_or_else(|_| filename.as_ref().to_path_buf());
     path.parent().and_then(Path::to_str).map(str::to_string)
+}
+
+// The loaders recording DT_RPATH and DT_RUNPATH in a single slot, where the
+// last entry of either wins, search it as the object rpath.
+#[cfg(any(target_os = "netbsd", all(test, target_os = "linux")))]
+fn single_search_list(elc: &mut ElfInfo) {
+    if elc.runpath_last {
+        elc.rpath = std::mem::take(&mut elc.runpath);
+    } else {
+        elc.runpath.clear();
+    }
+    elc.has_runpath = false;
 }
