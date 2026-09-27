@@ -25,7 +25,7 @@ compile_error!(
 #[macro_use]
 mod output;
 
-#[cfg(all(test, any(target_os = "android", target_os = "freebsd", windows)))]
+#[cfg(test)]
 mod tempdir;
 
 mod printer;
@@ -666,13 +666,31 @@ mod tests {
         );
         assert_eq!(error(Error::other("not a PE object")), "a: not a PE object");
         assert_eq!(error(Error::other("")), "a: ");
+    }
 
-        let dir = std::env::temp_dir();
-        let dir = dir.to_str().unwrap();
+    #[test]
+    fn format_check() {
+        let dir = tempdir::TempDir::new().unwrap();
+        let path = |name| dir.path().join(name).to_str().unwrap().to_string();
+        std::fs::write(path("text"), "text\n").unwrap();
+
+        let (article, host) = host_format();
         assert_eq!(
-            check_format(dir).unwrap_err().kind(),
+            check_format(&path("text")).unwrap_err().to_string(),
+            format!("not {article} {host} object")
+        );
+        assert_eq!(
+            check_format(&path("")).unwrap_err().kind(),
             ErrorKind::IsADirectory
         );
+        // A missing file is left for the Mach-O backend, which also looks up
+        // the dyld shared cache.
+        let missing = check_format(&path("missing"));
+        if cfg!(target_os = "macos") {
+            assert!(missing.is_ok());
+        } else {
+            assert_eq!(missing.unwrap_err().kind(), ErrorKind::NotFound);
+        }
     }
 
     #[test]
