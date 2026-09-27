@@ -201,6 +201,22 @@ impl Properties {
     }
 }
 
+// The bionic resolve_path the search paths go through: the canonical path of
+// an existing directory, so a library found through a symlinked directory is
+// reported (and matched against the namespace directories) at its real
+// location.  The loader falls back to the normalized path when it can not
+// canonicalize an existing directory, and also accepts a directory inside a
+// zip file, neither of which rldd can search.
+fn resolve_path(path: &str) -> Option<String> {
+    if path.is_empty() {
+        return None;
+    }
+    let resolved = std::fs::canonicalize(path).ok()?;
+    resolved
+        .is_dir()
+        .then(|| resolved.to_string_lossy().into_owned())
+}
+
 // The bionic format_string: each '$NAME' or '${NAME}' of a variable in PARAMS
 // is replaced, the variables tried in order with NAME matched as a prefix of
 // what follows the '$' (so '$LIBFOO' is 'lib64FOO').  A replacement is not
@@ -496,7 +512,9 @@ pub fn parse_ld_config_txt<P1: AsRef<Path>, P2: AsRef<Path>>(
             ei_class,
             props,
         ) {
-            ns.search_paths.add_path(&path);
+            if let Some(path) = resolve_path(&path) {
+                ns.search_paths.add_path(&path);
+            }
         }
 
         // Skip the permitted.paths, since it is not required for program loading.
@@ -1081,6 +1099,27 @@ mod tests {
         assert_eq!(
             search_paths(&ldcache, "default"),
             vec![fixture.path("lib64")]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resolved_search_paths() -> Result<(), Error> {
+        let fixture = Fixture::new()?;
+        std::os::unix::fs::symlink(fixture.path("lib64"), fixture.path("link"))?;
+        let ldcache = fixture
+            .parse(
+                "dir.test = {base}/bin\n\
+                 [test]\n\
+                 namespace.default.search.paths = {base}/link:{base}/bin/binary\n\
+                 namespace.default.search.paths += {base}/missing::{base}/lib/../lib\n",
+            )
+            .map_err(Error::other)?;
+        // The symlink and the '..' are resolved, while a file, a missing
+        // directory and an empty entry are dropped.
+        assert_eq!(
+            search_paths(&ldcache, "default"),
+            vec![fixture.path("lib64"), fixture.path("lib")]
         );
         Ok(())
     }
