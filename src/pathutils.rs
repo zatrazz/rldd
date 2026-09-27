@@ -55,18 +55,27 @@ pub fn map_file<P: AsRef<Path>>(filename: &P) -> Result<Mmap> {
 
 // Whether PATH starts with any of PREFIXES (the --ignore-prefix option).  The
 // Windows paths are compared without regard to ASCII case, the way the
-// filesystem does, while the unix ones are compared exactly.
+// filesystem does, and take either separator, while the unix ones are
+// compared exactly.
 #[cfg(any(target_os = "macos", windows))]
 pub fn has_prefix(path: &str, prefixes: &[String]) -> bool {
     prefixes.iter().any(|prefix| {
-        if cfg!(windows) {
-            path.as_bytes()
-                .get(..prefix.len())
-                .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
-        } else {
-            path.starts_with(prefix.as_str())
-        }
+        path.len() >= prefix.len()
+            && path
+                .bytes()
+                .zip(prefix.bytes())
+                .all(|(a, b)| same_path_byte(a, b))
     })
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn same_path_byte(a: u8, b: u8) -> bool {
+    if cfg!(windows) {
+        let is_separator = |c: u8| std::path::is_separator(char::from(c));
+        a.eq_ignore_ascii_case(&b) || (is_separator(a) && is_separator(b))
+    } else {
+        a == b
+    }
 }
 
 // The lines of FILENAME, for the loader configuration files.
@@ -136,6 +145,16 @@ mod tests {
         assert_eq!(map_file(&missing).unwrap_err().kind(), ErrorKind::NotFound);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ignore_prefix() {
+        let prefixes = ["/usr/lib".to_string(), "/System".to_string()];
+        assert!(has_prefix("/usr/lib/libSystem.B.dylib", &prefixes));
+        assert!(has_prefix("/System/Library", &prefixes));
+        assert!(!has_prefix("/USR/lib/libz.dylib", &prefixes));
+        assert!(!has_prefix("/usr/li", &prefixes));
+    }
+
     #[cfg(windows)]
     #[test]
     fn ignore_prefix() {
@@ -146,6 +165,17 @@ mod tests {
         assert!(!has_prefix(r"D:\Windows", &prefixes));
         // The prefix length falls inside the two byte 'é' of the path.
         assert!(!has_prefix("C:\\é", &[r"C:\x".to_string()]));
+        // Either separator matches the other.
+        assert!(has_prefix(
+            r"C:\Windows\System32",
+            &["C:/Windows".to_string()]
+        ));
+        assert!(has_prefix(
+            "C:/Windows/System32",
+            &[r"c:\windows\".to_string()]
+        ));
+        assert!(!has_prefix(r"C:\Windows", &["C:/Windows/".to_string()]));
+        assert!(!has_prefix(r"C:\Windows", &[]));
     }
 
     #[cfg(windows)]
