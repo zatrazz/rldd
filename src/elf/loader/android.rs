@@ -68,7 +68,7 @@ impl SearchCache for ld_config_txt::LdCache {
         platform: Option<&String>,
         elc: &'a ElfInfo,
         namespace: &Option<String>,
-    ) -> Option<ResolvedDependency<'a>> {
+    ) -> Option<Resolution<'a>> {
         // The search starts on the namespace the requesting object was loaded in
         // (the default one for the executable itself) and follows the namespaces
         // it links against, without following further links.  An object resolved

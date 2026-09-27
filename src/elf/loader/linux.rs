@@ -84,6 +84,7 @@ impl Loader for Linux {
         if let Some(melc) = melc {
             elc.is_musl = melc.is_musl;
             elc.dst_lib = melc.dst_lib.clone();
+            elc.loader_flags = melc.loader_flags;
             return;
         }
         elc.is_musl = interp::is_musl(&elc.interp)
@@ -236,7 +237,7 @@ impl Loader for Linux {
         // resolves).  The object search paths do not apply, since the loader is
         // not subject to the dependency search.
         for name in interp::glibc_names() {
-            if let Some(dep) = resolve_loader(config, elc, name) {
+            if let Some(Ok(dep)) = resolve_loader(config, elc, name) {
                 deptree.addnode(
                     DepNode::new(Some(dep.path.to_string()), dep.filename.clone(), dep.mode),
                     root_depp,
@@ -248,6 +249,24 @@ impl Loader for Linux {
 
     fn rpath_search(elc: &ElfInfo) -> bool {
         !elc.has_runpath
+    }
+
+    // The glibc loader skips a file of another class or machine, and fails
+    // the load on anything else wrong.  The musl one takes the first file it
+    // opens, checking nothing but its program headers (map_library), so any
+    // problem fails the load.
+    fn check_candidate(
+        data: &[u8],
+        parsed: &Result<ElfInfo, &'static str>,
+        melc: &ElfInfo,
+    ) -> Result<(), Rejection> {
+        if !melc.is_musl {
+            return glibc_verify(data, parsed, melc);
+        }
+        match parsed {
+            Ok(elc) if match_elf_header(melc, elc) => Ok(()),
+            _ => Err(Rejection::Fatal("Exec format error".to_string())),
+        }
     }
 
     // The glibc loader skips the default directories, and the cache entries
@@ -276,7 +295,7 @@ impl SearchCache for ld_so_cache::LdCache {
         platform: Option<&String>,
         elc: &'a ElfInfo,
         _namespace: &NoNamespace,
-    ) -> Option<ResolvedDependency<'a>> {
+    ) -> Option<Resolution<'a>> {
         let dir = self.get(dtneeded)?;
         search_dir(
             dir,
@@ -287,6 +306,168 @@ impl SearchCache for ld_so_cache::LdCache {
             &Default::default(),
         )
     }
+}
+
+// The checks of the glibc loader on DATA, a candidate file for a dependency of
+// MELC parsed as PARSED, in the order it makes them: open_verify skips a file
+// of another class or machine, and fails the load on any other mismatch, as
+// does _dl_map_object_from_fd on an object it can not load.
+fn glibc_verify(
+    data: &[u8],
+    parsed: &Result<ElfInfo, &'static str>,
+    melc: &ElfInfo,
+) -> Result<(), Rejection> {
+    let fatal = |error: &str| Err(Rejection::Fatal(error.to_string()));
+
+    let class64 = melc.ei_class == ELFCLASS64;
+    if data.len() < if class64 { 64 } else { 52 } {
+        return fatal("file too short");
+    }
+    // The e_ident fields.
+    if data[..4] != ELFMAG {
+        return fatal("invalid ELF header");
+    }
+    if FileClass(data[4]) != melc.ei_class {
+        let other = if class64 { "ELFCLASS32" } else { "ELFCLASS64" };
+        return Err(Rejection::Skip(format!("wrong ELF class: {other}")));
+    }
+    let big_endian = melc.ei_data == ELFDATA2MSB;
+    if DataEncoding(data[5]) != melc.ei_data {
+        return fatal(if big_endian {
+            "ELF file data encoding not big-endian"
+        } else {
+            "ELF file data encoding not little-endian"
+        });
+    }
+    if data[6] != EV_CURRENT.0 {
+        return fatal("ELF file version ident does not match current one");
+    }
+    // The OS ABI fields the loader architecture takes.
+    let (os_abi, abi_version) = (OsAbi(data[7]), data[8]);
+    if !gnu_osabi_valid(melc.e_machine, os_abi) {
+        return fatal("ELF file OS ABI invalid");
+    }
+    if !gnu_abiversion_valid(melc.e_machine, os_abi, abi_version) {
+        return fatal("ELF file ABI version invalid");
+    }
+    if data[9..16].iter().any(|&b| b != 0) {
+        return fatal("nonzero padding in e_ident");
+    }
+
+    let u16_at = |offset: usize| {
+        let bytes = [data[offset], data[offset + 1]];
+        if big_endian {
+            u16::from_be_bytes(bytes)
+        } else {
+            u16::from_le_bytes(bytes)
+        }
+    };
+    let u32_at = |offset: usize| {
+        let bytes = [
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ];
+        if big_endian {
+            u32::from_be_bytes(bytes)
+        } else {
+            u32::from_le_bytes(bytes)
+        }
+    };
+    let e_type = FileType(u16_at(16));
+    let e_machine = Machine(u16_at(18));
+    let e_version = u32_at(20);
+    let e_flags = FileFlags(u32_at(if class64 { 48 } else { 36 }));
+    let e_phentsize = u16_at(if class64 { 54 } else { 42 });
+
+    // The ARM float ABI is checked along with the identification, which the
+    // diagnostics do not tell apart (VALID_ELF_HEADER).
+    if melc.e_machine == EM_ARM && !arm_float_abi_valid(melc.loader_flags, e_flags) {
+        return fatal("internal error");
+    }
+    if e_version != u32::from(EV_CURRENT.0) {
+        return fatal("ELF file version does not match current one");
+    }
+    if !machine_matches_host(melc, e_machine, e_flags) {
+        return Err(Rejection::Skip(
+            "cannot open shared object file: No such file or directory".to_string(),
+        ));
+    }
+    if e_type != ET_DYN && e_type != ET_EXEC {
+        return fatal("only ET_DYN and ET_EXEC can be loaded");
+    }
+    if e_phentsize != if class64 { 56 } else { 32 } {
+        return fatal("ELF file's phentsize not the expected size");
+    }
+    if e_type == ET_EXEC {
+        return fatal("cannot dynamically load executable");
+    }
+    match parsed {
+        Err("No dynamic segments found" | "Object file has no dynamic section") => {
+            fatal("object file has no dynamic section")
+        }
+        Err(e) => fatal(e),
+        Ok(elc) if elc.pie => fatal("cannot dynamically load position-independent executable"),
+        Ok(_) => Ok(()),
+    }
+}
+
+// Whether the loader for the objects of MELC takes an object of the
+// E_MACHINE and E_FLAGS, where the ABI variant (and so the loader) follows the
+// input object (elf_machine_matches_host).
+fn machine_matches_host(melc: &ElfInfo, e_machine: Machine, e_flags: FileFlags) -> bool {
+    const EM_S390_OLD: Machine = Machine(0xa390);
+    let loader_flags = melc.loader_flags;
+    match melc.e_machine {
+        EM_MIPS | EM_MIPS_RS3_LE => {
+            // The o32 and n32 objects are not mixed, nor the NaN encodings, and
+            // the old o32 FP64 ABI is not supported.
+            let abi2 = |flags: FileFlags| flags.contains(EF_MIPS_ABI2);
+            let nan2008 = |flags: FileFlags| flags.contains(EF_MIPS_NAN2008);
+            matches!(e_machine, EM_MIPS | EM_MIPS_RS3_LE)
+                && (melc.ei_class != ELFCLASS32 || abi2(e_flags) == abi2(loader_flags))
+                && nan2008(e_flags) == nan2008(loader_flags)
+                && !e_flags.contains(EF_MIPS_FP64)
+        }
+        EM_RISCV => {
+            // The float ABI is either the double or the soft one.
+            let float_abi = |flags: FileFlags| flags & FileFlags(EF_RISCV_FLOAT_ABI);
+            let double = float_abi(loader_flags) == EF_RISCV_FLOAT_ABI_DOUBLE;
+            e_machine == EM_RISCV
+                && float_abi(e_flags)
+                    == if double {
+                        EF_RISCV_FLOAT_ABI_DOUBLE
+                    } else {
+                        EF_RISCV_FLOAT_ABI_SOFT
+                    }
+        }
+        EM_PPC64 => {
+            // An unspecified ABI version is the ELFv1 one on big-endian.
+            let loader_abi = match loader_flags.ppc64_abi() {
+                0 if melc.ei_data == ELFDATA2MSB => 1,
+                0 => 2,
+                abi => abi,
+            };
+            e_machine == EM_PPC64 && (e_flags.ppc64_abi() == 0 || e_flags.ppc64_abi() == loader_abi)
+        }
+        EM_SPARC | EM_SPARC32PLUS => matches!(e_machine, EM_SPARC | EM_SPARC32PLUS),
+        EM_S390 | EM_S390_OLD => matches!(e_machine, EM_S390 | EM_S390_OLD),
+        machine => e_machine == machine,
+    }
+}
+
+// Whether the ARM loader following the LOADER_FLAGS float ABI takes an EABI
+// version 5 object of E_FLAGS (VALID_FLOAT_ABI): a hard-float loader rejects
+// the soft-float objects, and the other way around.
+fn arm_float_abi_valid(loader_flags: FileFlags, e_flags: FileFlags) -> bool {
+    let hard = loader_flags.contains(FileFlags(EF_ARM_ABI_FLOAT_HARD));
+    let other = if hard {
+        EF_ARM_ABI_FLOAT_SOFT
+    } else {
+        EF_ARM_ABI_FLOAT_HARD
+    };
+    e_flags.arm_eabi() != EF_ARM_EABI_VER5 || !e_flags.contains(FileFlags(other))
 }
 
 // The length of the NAME dynamic string token at the start of INPUT (right

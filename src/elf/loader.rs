@@ -156,31 +156,25 @@ pub(super) trait Loader {
     // Check the ELF header OS ABI fields, which for the GNU loaders (glibc and
     // bionic) depend on the architecture.
     fn check_elf_header(elc: &ElfInfo) -> bool {
-        let maxver = match elc.e_machine {
-            EM_MIPS | EM_MIPS_RS3_LE => 6,
-            EM_PPC | EM_PPC64 | EM_SPARC | EM_X86_64 | EM_RISCV => 5,
-            _ => 4,
-        };
+        gnu_osabi_valid(elc.e_machine, elc.ei_osabi)
+            && gnu_abiversion_valid(elc.e_machine, elc.ei_osabi, elc.ei_abiver)
+    }
 
-        let check_elf_osabi = match elc.e_machine {
-            EM_ARM => |osabi: OsAbi| {
-                osabi == ELFOSABI_SYSV || osabi == ELFOSABI_GNU || osabi == ELFOSABI_ARM_AEABI
-            },
-            _ => |osabi: OsAbi| osabi == ELFOSABI_SYSV || osabi == ELFOSABI_GNU,
-        };
-
-        let check_elf_abiversion = match elc.e_machine {
-            EM_MIPS => |osabi: OsAbi, ver: u8, maxver: u8| {
-                ver == 0
-                    || (osabi == ELFOSABI_SYSV && ver < 6)
-                    || (osabi == ELFOSABI_GNU && ver < maxver)
-            },
-            _ => |osabi: OsAbi, ver: u8, maxver: u8| {
-                ver == 0 || (osabi == ELFOSABI_GNU && ver < maxver)
-            },
-        };
-
-        check_elf_osabi(elc.ei_osabi) && check_elf_abiversion(elc.ei_osabi, elc.ei_abiver, maxver)
+    // Check a candidate file for a dependency of MELC, whose DATA is parsed as
+    // PARSED (or the parse error), the way the loader does when it opens it:
+    // Ok when the loader takes it, otherwise whether it goes on with the
+    // search or fails the load.  Most loaders go on with the search on any
+    // mismatch.
+    fn check_candidate(
+        _data: &[u8],
+        parsed: &Result<ElfInfo, &'static str>,
+        melc: &ElfInfo,
+    ) -> Result<(), Rejection> {
+        match parsed {
+            Ok(elc) if Self::check_elf_header(elc) && match_elf_header(melc, elc) => Ok(()),
+            Ok(_) => Err(Rejection::Skip("wrong ELF header".to_string())),
+            Err(e) => Err(Rejection::Skip(e.to_string())),
+        }
     }
 
     // Remap the dependency name for the referencing object path.
@@ -252,7 +246,7 @@ pub(super) trait SearchCache {
         platform: Option<&String>,
         elc: &'a ElfInfo,
         namespace: &Self::Namespace,
-    ) -> Option<ResolvedDependency<'a>>;
+    ) -> Option<Resolution<'a>>;
 }
 
 // The loaders without linker namespaces.
@@ -274,7 +268,7 @@ impl SearchCache for search_path::SearchPathVec {
         platform: Option<&String>,
         elc: &'a ElfInfo,
         _namespace: &NoNamespace,
-    ) -> Option<ResolvedDependency<'a>> {
+    ) -> Option<Resolution<'a>> {
         search_dirs(
             self,
             dtneeded,
@@ -284,6 +278,36 @@ impl SearchCache for search_path::SearchPathVec {
             &Default::default(),
         )
     }
+}
+
+// Why the loader does not take a candidate file for a dependency.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Rejection {
+    // It goes on with the search, for the reason given.
+    Skip(String),
+    // It fails the load of the dependency with the error given.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Fatal(String),
+}
+
+// The EI_OSABI values the GNU loaders take on E_MACHINE (VALID_ELF_OSABI).
+fn gnu_osabi_valid(e_machine: Machine, osabi: OsAbi) -> bool {
+    osabi == ELFOSABI_SYSV
+        || osabi == ELFOSABI_GNU
+        || (e_machine == EM_ARM && osabi == ELFOSABI_ARM_AEABI)
+}
+
+// The EI_ABIVERSION values the GNU loaders take on E_MACHINE
+// (VALID_ELF_ABIVERSION, below the LIBC_ABI_MAX of the architecture).
+fn gnu_abiversion_valid(e_machine: Machine, osabi: OsAbi, ver: u8) -> bool {
+    let maxver = match e_machine {
+        EM_MIPS | EM_MIPS_RS3_LE => 6,
+        EM_PPC | EM_PPC64 | EM_SPARC | EM_X86_64 | EM_RISCV => 5,
+        _ => 4,
+    };
+    ver == 0
+        || (e_machine == EM_MIPS && osabi == ELFOSABI_SYSV && ver < 6)
+        || (osabi == ELFOSABI_GNU && ver < maxver)
 }
 
 // Replace the $TOKEN and ${TOKEN} occurrences of INPUT with VALUE.

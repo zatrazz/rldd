@@ -48,7 +48,7 @@ mod ld_so_conf_netbsd;
 mod loader;
 #[cfg(target_os = "linux")]
 mod symbols;
-use loader::{Loader, Rtld, SearchCache};
+use loader::{Loader, Rejection, Rtld, SearchCache};
 
 type LoaderCache = <Rtld as Loader>::Cache;
 type ObjectNamespace = <LoaderCache as SearchCache>::Namespace;
@@ -109,6 +109,13 @@ struct ElfInfo {
     // handed down to every object it loads.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     dst_lib: Option<String>,
+    // The ELF header flags of the input object, which the ABI of its loader
+    // follows, handed down to every object it loads.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    loader_flags: FileFlags,
+    // Whether DF_1_PIE is set.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pie: bool,
     // The $ORIGIN expansion, None when the directory is not valid UTF-8.
     origin: Option<String>,
     // The search list entries and the dependencies dropped because of a
@@ -265,6 +272,8 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
             filters: DepsVec::new(),
             is_musl: false,
             dst_lib: None,
+            loader_flags: elf.e_flags(endian),
+            pie: DynamicFlags1(tags.flags_1).contains(DF_1_PIE),
             origin: None,
             unexpanded: Vec::new(),
         });
@@ -440,38 +449,74 @@ fn expand_object(elc: &mut ElfInfo, platform: Option<&String>) {
     Rtld::handle_search_paths(elc);
 }
 
+// Open FILENAME, the input object when MELC is None or a dependency of MELC
+// otherwise.  The open error of the input object is returned as is.
 fn open_elf_file<P: AsRef<Path>>(
     filename: &P,
     melc: Option<&ElfInfo>,
     platform: Option<&String>,
-    preload: bool,
+    _preload: bool,
 ) -> Result<ElfInfo, std::io::Error> {
-    let file = fs::File::open(filename).map_err(|_| Error::other("Failed to open file"))?;
+    if let Some(melc) = melc {
+        return open_dependency(filename, melc, platform).map_err(|e| match e {
+            Rejection::Skip(e) | Rejection::Fatal(e) => Error::other(e),
+        });
+    }
+    let file = fs::File::open(filename)?;
     let mmap = pathutils::map(&file)?;
 
     let mut elc = parse_object(&mmap).map_err(Error::other)?;
-    if let Some(melc) = melc {
-        // Skip DT_NEEDED and SONAME checks for preload objects.
-        if !preload && !match_elf_name(melc, &elc) {
-            return Err(Error::other("Error parsing ELF object"));
-        }
-    }
-
-    elc.origin = Rtld::origin_directory(filename, melc);
-    Rtld::handle_loader(&mut elc, melc);
+    elc.origin = Rtld::origin_directory(filename, None);
     // The tokens of the input object are expanded by the caller, once its
     // loader is known.
-    if melc.is_some() {
-        expand_object(&mut elc, platform);
-    }
+    Rtld::handle_loader(&mut elc, None);
     Ok(elc)
 }
 
-// The loaders do not check the DT_SONAME of the file they open against the
-// name requested, only the ELF header against the loading object.
-fn match_elf_name(melc: &ElfInfo, elc: &ElfInfo) -> bool {
-    Rtld::check_elf_header(elc) && match_elf_header(melc, elc)
+// Open FILENAME as a candidate for a dependency (or a preload entry) of the
+// MELC object, following the loader checks.  The loaders do not check the
+// DT_SONAME of the file they open against the name requested, only its ELF
+// header against the loading object.
+fn open_dependency<P: AsRef<Path>>(
+    filename: &P,
+    melc: &ElfInfo,
+    platform: Option<&String>,
+) -> Result<ElfInfo, Rejection> {
+    // The loaders go on with the search on a file they can not open.
+    let file = fs::File::open(filename).map_err(|e| {
+        Rejection::Skip(format!(
+            "cannot open shared object file: {}",
+            io_error_description(&e)
+        ))
+    })?;
+    // A file that can not be read (a directory) is checked as an empty one.
+    let mmap = pathutils::map(&file).ok();
+    let data: &[u8] = mmap.as_deref().unwrap_or_default();
+
+    let parsed = parse_object(data);
+    Rtld::check_candidate(data, &parsed, melc)?;
+    let Ok(mut elc) = parsed else {
+        return Err(Rejection::Skip("not a dynamic object".to_string()));
+    };
+
+    elc.origin = Rtld::origin_directory(filename, Some(melc));
+    Rtld::handle_loader(&mut elc, Some(melc));
+    expand_object(&mut elc, platform);
+    Ok(elc)
 }
+
+// The description of the E error, without the code the Display adds.
+fn io_error_description(e: &std::io::Error) -> String {
+    let s = e.to_string();
+    match s.find(" (os error") {
+        Some(pos) => s[..pos].to_string(),
+        None => s,
+    }
+}
+
+// The resolution of a dependency: the object found, or the error the loader
+// fails the load with.
+type Resolution<'a> = Result<ResolvedDependency<'a>, String>;
 
 fn same_file(a: &str, b: &str) -> bool {
     use std::os::unix::fs::MetadataExt;
@@ -1043,85 +1088,98 @@ fn resolve_dependencies(
         };
         #[cfg(not(target_os = "linux"))]
         let resolved = resolve_dependency_1(dependency, config, elc, namespace, item.preload);
-        if let Some(mut dep) = resolved {
-            // The preload entries are always shown with the preload mode,
-            // wherever the search resolved them.
-            if item.preload {
-                dep.mode = DepMode::Preload;
-            }
-            let r = if dep.mode == DepMode::Direct
-                || (item.preload && dependency.contains(std::path::MAIN_SEPARATOR))
-            {
-                // Decompose the direct object path in path and filename so when
-                // print the dependencies only the file name is showed in
-                // default mode.  The preload entries given as a file path are
-                // resolved with the full path, so they are decomposed the same
-                // way.
-                let p = Path::new(dependency);
-                (pathutils::get_path(&p), pathutils::get_name(&p))
-            } else {
-                (Some(dep.path.to_string()), dep.filename.clone())
-            };
-            // The resolved path of this dependency, used as the reference path
-            // for its own dependencies resolution.
-            let depref = match &r.0 {
-                Some(path) => pathutils::join(path, &r.1),
-                None => r.1.clone(),
-            };
-            // The loaders recognize a file already loaded under another name
-            // (through a symlink) by its device and inode, and record the new
-            // name on the loaded object instead of loading it again.
-            if let Some(entry) = parents
-                .iter()
-                .skip(1)
-                .find(|(_, refpath, _)| same_file(refpath, &depref))
-                .and_then(|(_, refpath, _)| deptree.get(refpath))
-            {
-                deptree.add_repeated(
-                    config.all,
-                    DepNode::repeat_of(&entry, pathutils::get_name(&Path::new(dependency))),
+        let mut dep = match resolved {
+            Some(Ok(dep)) => dep,
+            // The loader fails the load on the file it found (it is not an
+            // object it loads), which the verbose mode shows along with the
+            // error.
+            Some(Err(error)) => {
+                deptree.addnode(
+                    DepNode::not_found(dependency.clone(), vec![error]),
                     item.depp,
                 );
                 continue;
             }
-            let c = deptree.addnode(DepNode::new(r.0, r.1, dep.mode), item.depp);
-
-            // The DT_RPATH scope used for the indirect dependencies is system
-            // specific: the glibc loader searches the object own DT_RPATH and
-            // then walks up the chain of loading objects (up to the
-            // executable), the FreeBSD and OpenBSD loaders search the object
-            // own DT_RPATH and then the main object one, while the NetBSD
-            // loader only searches the requesting object DT_RPATH.  In all
-            // cases an object DT_RPATH is ignored if the object also defines
-            // DT_RUNPATH, without affecting the inherited part
-            if dep.elc.has_runpath {
-                dep.elc.rpath.clear();
+            None => {
+                let searched = searched_locations(config, elc, dependency, item.preload);
+                deptree.addnode(DepNode::not_found(dependency.clone(), searched), item.depp);
+                continue;
             }
-            #[cfg(target_os = "linux")]
-            dep.elc.rpath.extend(elc.rpath.clone());
-            #[cfg(target_os = "freebsd")]
-            if !dep.elc.has_runpath && parents[0].0.interp.is_some() {
-                dep.elc.rpath.extend(parents[0].0.rpath.clone());
-            }
-            #[cfg(target_os = "openbsd")]
-            if parents[0].0.interp.is_some() {
-                dep.elc.rpath.extend(parents[0].0.rpath.clone());
-            }
-
-            let parent = parents.len();
-            for sdep in &dep.elc.deps {
-                queue.push_back(WorkItem {
-                    dependency: sdep.clone(),
-                    parent,
-                    depp: c,
-                    preload: item.preload,
-                });
-            }
-            parents.push((dep.elc, depref, dep.namespace));
-        } else {
-            let searched = searched_locations(config, elc, dependency, item.preload);
-            deptree.addnode(DepNode::not_found(dependency.clone(), searched), item.depp);
+        };
+        // The preload entries are always shown with the preload mode,
+        // wherever the search resolved them.
+        if item.preload {
+            dep.mode = DepMode::Preload;
         }
+        let r = if dep.mode == DepMode::Direct
+            || (item.preload && dependency.contains(std::path::MAIN_SEPARATOR))
+        {
+            // Decompose the direct object path in path and filename so when
+            // print the dependencies only the file name is showed in
+            // default mode.  The preload entries given as a file path are
+            // resolved with the full path, so they are decomposed the same
+            // way.
+            let p = Path::new(dependency);
+            (pathutils::get_path(&p), pathutils::get_name(&p))
+        } else {
+            (Some(dep.path.to_string()), dep.filename.clone())
+        };
+        // The resolved path of this dependency, used as the reference path
+        // for its own dependencies resolution.
+        let depref = match &r.0 {
+            Some(path) => pathutils::join(path, &r.1),
+            None => r.1.clone(),
+        };
+        // The loaders recognize a file already loaded under another name
+        // (through a symlink) by its device and inode, and record the new
+        // name on the loaded object instead of loading it again.
+        if let Some(entry) = parents
+            .iter()
+            .skip(1)
+            .find(|(_, refpath, _)| same_file(refpath, &depref))
+            .and_then(|(_, refpath, _)| deptree.get(refpath))
+        {
+            deptree.add_repeated(
+                config.all,
+                DepNode::repeat_of(&entry, pathutils::get_name(&Path::new(dependency))),
+                item.depp,
+            );
+            continue;
+        }
+        let c = deptree.addnode(DepNode::new(r.0, r.1, dep.mode), item.depp);
+
+        // The DT_RPATH scope used for the indirect dependencies is system
+        // specific: the glibc loader searches the object own DT_RPATH and
+        // then walks up the chain of loading objects (up to the
+        // executable), the FreeBSD and OpenBSD loaders search the object
+        // own DT_RPATH and then the main object one, while the NetBSD
+        // loader only searches the requesting object DT_RPATH.  In all
+        // cases an object DT_RPATH is ignored if the object also defines
+        // DT_RUNPATH, without affecting the inherited part
+        if dep.elc.has_runpath {
+            dep.elc.rpath.clear();
+        }
+        #[cfg(target_os = "linux")]
+        dep.elc.rpath.extend(elc.rpath.clone());
+        #[cfg(target_os = "freebsd")]
+        if !dep.elc.has_runpath && parents[0].0.interp.is_some() {
+            dep.elc.rpath.extend(parents[0].0.rpath.clone());
+        }
+        #[cfg(target_os = "openbsd")]
+        if parents[0].0.interp.is_some() {
+            dep.elc.rpath.extend(parents[0].0.rpath.clone());
+        }
+
+        let parent = parents.len();
+        for sdep in &dep.elc.deps {
+            queue.push_back(WorkItem {
+                dependency: sdep.clone(),
+                parent,
+                depp: c,
+                preload: item.preload,
+            });
+        }
+        parents.push((dep.elc, depref, dep.namespace));
     }
 
     Rtld::add_loader_dependency(config, &parents[0].0, deptree, root_depp);
@@ -1134,7 +1192,7 @@ fn resolve_loader<'a>(
     config: &'a Config,
     elc: &'a ElfInfo,
     dtneeded: &str,
-) -> Option<ResolvedDependency<'a>> {
+) -> Option<Resolution<'a>> {
     if let Some(ld_cache) = config.ld_cache {
         if let Some(dep) = ld_cache.resolve(dtneeded, config.platform, elc, &Default::default()) {
             return Some(dep);
@@ -1151,7 +1209,8 @@ fn resolve_loader<'a>(
 }
 
 // Try DTNEEDED on the DIR directory, returning it when the object there
-// matches the requesting ELC one.
+// matches the requesting ELC one, or the error when the loader fails the
+// load on it.
 fn search_dir<'a>(
     dir: &'a String,
     dtneeded: &str,
@@ -1159,20 +1218,23 @@ fn search_dir<'a>(
     platform: Option<&String>,
     mode: DepMode,
     namespace: &ObjectNamespace,
-) -> Option<ResolvedDependency<'a>> {
+) -> Option<Resolution<'a>> {
     let path = Rtld::dependency_path(dir, dtneeded);
-    let elc = open_elf_file(&path, Some(elc), platform, false).ok()?;
-    Some(ResolvedDependency {
-        elc,
-        path: dir,
-        filename: pathutils::get_name(&path),
-        mode,
-        namespace: namespace.clone(),
-    })
+    match open_dependency(&path, elc, platform) {
+        Ok(elc) => Some(Ok(ResolvedDependency {
+            elc,
+            path: dir,
+            filename: pathutils::get_name(&path),
+            mode,
+            namespace: namespace.clone(),
+        })),
+        Err(Rejection::Skip(_)) => None,
+        Err(Rejection::Fatal(e)) => Some(Err(format!("{}: {e}", path.display()))),
+    }
 }
 
 // Search DTNEEDED on each of the SEARCHPATHS in order, returning the first
-// directory with a matching object.
+// directory with a matching object (or where the loader fails).
 fn search_dirs<'a>(
     searchpaths: &'a search_path::SearchPathVec,
     dtneeded: &str,
@@ -1180,7 +1242,7 @@ fn search_dirs<'a>(
     platform: Option<&String>,
     mode: DepMode,
     namespace: &ObjectNamespace,
-) -> Option<ResolvedDependency<'a>> {
+) -> Option<Resolution<'a>> {
     searchpaths.iter().find_map(|searchpath| {
         search_dir(&searchpath.path, dtneeded, elc, platform, mode, namespace)
     })
@@ -1193,7 +1255,7 @@ fn resolve_dependency_1<'a>(
     // Android only: the namespace of the object requesting the dependency.
     namespace: &ObjectNamespace,
     preload: bool,
-) -> Option<ResolvedDependency<'a>> {
+) -> Option<Resolution<'a>> {
     let path = Path::new(&dtneeded);
 
     // A name containing a slash is a file path, relative to the current
@@ -1204,8 +1266,9 @@ fn resolve_dependency_1<'a>(
     let is_path =
         dtneeded.contains(std::path::MAIN_SEPARATOR) || (preload && cfg!(target_os = "netbsd"));
     if is_path {
-        if let Ok(elc) = open_elf_file(&path, Some(elc), config.platform, preload) {
-            return Some(ResolvedDependency {
+        // The preload entries go through the same checks.
+        return Some(match open_dependency(&path, elc, config.platform) {
+            Ok(elc) => Ok(ResolvedDependency {
                 elc,
                 path: dtneeded,
                 filename: pathutils::get_name(&path),
@@ -1215,9 +1278,9 @@ fn resolve_dependency_1<'a>(
                     DepMode::Direct
                 },
                 namespace: namespace.clone(),
-            });
-        }
-        return None;
+            }),
+            Err(Rejection::Skip(e) | Rejection::Fatal(e)) => Err(format!("{dtneeded}: {e}")),
+        });
     }
 
     let search = |searchpaths: &'a search_path::SearchPathVec, mode: DepMode| {
@@ -1244,9 +1307,12 @@ fn resolve_dependency_1<'a>(
                 .and_then(|ld_cache| ld_cache.resolve(dtneeded, config.platform, elc, namespace)),
             SearchStep::SystemDirs => search(&config.system_dirs, DepMode::SystemDirs),
         };
-        let dep = dep.filter(|dep| {
-            rule != NodeflibRule::OutsideSystemDirs
-                || !in_system_dirs(&config.system_dirs, dep.path, &dep.filename)
+        let dep = dep.filter(|dep| match dep {
+            Ok(dep) => {
+                rule != NodeflibRule::OutsideSystemDirs
+                    || !in_system_dirs(&config.system_dirs, dep.path, &dep.filename)
+            }
+            Err(_) => true,
         });
         if dep.is_some() {
             return dep;
