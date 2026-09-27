@@ -1,11 +1,17 @@
+// The CPU capabilities the glibc loader selects its glibc-hwcaps
+// subdirectories with, which also apply to the ld.so.cache entries.
+
+use object::elf::*;
+
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-pub mod cpuid {
+mod cpuid {
     #[cfg(target_arch = "x86")]
     use std::arch::x86::{__cpuid, __cpuid_count, _xgetbv};
     #[cfg(target_arch = "x86_64")]
     use std::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
 
     use object::elf::{
+        DataEncoding, FileClass, Machine, ELFCLASS32, ELFCLASS64, ELFDATA2LSB, EM_X86_64,
         GNU_PROPERTY_X86_ISA_1_BASELINE, GNU_PROPERTY_X86_ISA_1_V2, GNU_PROPERTY_X86_ISA_1_V3,
         GNU_PROPERTY_X86_ISA_1_V4,
     };
@@ -201,6 +207,18 @@ pub mod cpuid {
         .collect()
     }
 
+    // The x86-64 and x32 ABIs have glibc-hwcaps subdirectories
+    // (sysdeps/x86_64/dl-hwcaps-subdirs.c), while i386 has none.
+    pub fn has_glibc_hwcaps(
+        e_machine: Machine,
+        ei_class: FileClass,
+        ei_data: DataEncoding,
+    ) -> bool {
+        e_machine == EM_X86_64
+            && matches!(ei_class, ELFCLASS32 | ELFCLASS64)
+            && ei_data == ELFDATA2LSB
+    }
+
     pub fn supported() -> Result<Vec<&'static str>, std::io::Error> {
         // Priority sorted, best-fit first (the glibc _dl_hwcaps_subdirs order).
         Ok(subdirs(Features::read().isa_level()))
@@ -301,13 +319,25 @@ pub mod cpuid {
 }
 
 #[cfg(target_arch = "powerpc64")]
-pub mod cpuid {
+mod cpuid {
     mod auxv;
+
+    use object::elf::{DataEncoding, FileClass, Machine, ELFCLASS64, ELFDATA2LSB, EM_PPC64};
 
     pub const PPC_FEATURE2_ARCH_3_00: auxv::AuxvType = 0x00800000; // ISA 3.0
     pub const PPC_FEATURE2_HAS_IEEE128: auxv::AuxvType = 0x00400000; // VSX IEEE Binary Float 128-bit
     pub const PPC_FEATURE2_ARCH_3_1: auxv::AuxvType = 0x00040000; // ISA 3.1
     pub const PPC_FEATURE2_MMA: auxv::AuxvType = 0x00020000; //  Matrix-Multiply Assist
+
+    // Only the little-endian ABI has glibc-hwcaps subdirectories
+    // (sysdeps/powerpc/powerpc64/le/dl-hwcaps-subdirs.c).
+    pub fn has_glibc_hwcaps(
+        e_machine: Machine,
+        ei_class: FileClass,
+        ei_data: DataEncoding,
+    ) -> bool {
+        e_machine == EM_PPC64 && ei_class == ELFCLASS64 && ei_data == ELFDATA2LSB
+    }
 
     pub fn supported() -> Result<Vec<&'static str>, std::io::Error> {
         // Priority sorted, best-fit first (the glibc _dl_hwcaps_subdirs order).
@@ -324,8 +354,10 @@ pub mod cpuid {
 }
 
 #[cfg(target_arch = "s390x")]
-pub mod cpuid {
+mod cpuid {
     mod auxv;
+
+    use object::elf::{DataEncoding, FileClass, Machine, ELFCLASS64, ELFDATA2MSB, EM_S390};
 
     // s390x AT_HWCAP
     pub const HWCAP_S390_VX: auxv::AuxvType = 1 << 11;
@@ -335,6 +367,16 @@ pub mod cpuid {
     pub const HWCAP_S390_VXRS_EXT2: auxv::AuxvType = 1 << 15;
     pub const HWCAP_S390_VXRS_PDE: auxv::AuxvType = 1 << 16;
     pub const HWCAP_S390_VXRS_PDE2: auxv::AuxvType = 1 << 19;
+
+    // Only the 64-bit ABI has glibc-hwcaps subdirectories
+    // (sysdeps/s390/s390-64/dl-hwcaps-subdirs.c).
+    pub fn has_glibc_hwcaps(
+        e_machine: Machine,
+        ei_class: FileClass,
+        ei_data: DataEncoding,
+    ) -> bool {
+        e_machine == EM_S390 && ei_class == ELFCLASS64 && ei_data == ELFDATA2MSB
+    }
 
     pub fn supported() -> Result<Vec<&'static str>, std::io::Error> {
         // Priority sorted, best-fit first (the glibc _dl_hwcaps_subdirs order).
@@ -366,12 +408,80 @@ pub mod cpuid {
         target_arch = "s390x"
     ))
 ))]
-pub mod cpuid {
+mod cpuid {
+    use object::elf::{DataEncoding, FileClass, Machine};
+
+    // The other architectures have no glibc-hwcaps subdirectories, and the
+    // host can only run the objects of its own (or a compatible) one.
+    pub fn has_glibc_hwcaps(
+        _e_machine: Machine,
+        _ei_class: FileClass,
+        _ei_data: DataEncoding,
+    ) -> bool {
+        false
+    }
+
     pub fn supported() -> Result<Vec<&'static str>, std::io::Error> {
         Ok(vec![])
     }
 }
 
-pub fn hwcap_supported() -> Result<Vec<&'static str>, std::io::Error> {
-    cpuid::supported()
+// The glibc-hwcaps subdirectories the glibc loader for an object ABI (its
+// machine, class and data encoding) searches on this machine, best first:
+// the glibc _dl_hwcaps_subdirs of the ABI the CPU supports
+// (_dl_hwcaps_subdirs_active).  Only x86-64 (and x32), little-endian
+// powerpc64 and s390x have them, and only the objects the host CPU runs get
+// them, so the list is empty for any other ABI (i386 on a x86-64 host, for
+// instance), and when the CPU capabilities can not be read (the auxiliary
+// vector on a chroot without /proc).
+pub fn glibc_hwcaps_subdirs(
+    e_machine: Machine,
+    ei_class: FileClass,
+    ei_data: DataEncoding,
+) -> Vec<&'static str> {
+    if cpuid::has_glibc_hwcaps(e_machine, ei_class, ei_data) {
+        cpuid::supported().unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn glibc_hwcaps_subdirs_for_other_abis() {
+        // The ABIs without glibc-hwcaps subdirectories, or one the host CPU
+        // does not run.
+        for (e_machine, ei_class, ei_data) in [
+            (EM_386, ELFCLASS32, ELFDATA2LSB),
+            (EM_X86_64, ELFCLASS64, ELFDATA2MSB),
+            (EM_AARCH64, ELFCLASS64, ELFDATA2LSB),
+            (EM_S390, ELFCLASS32, ELFDATA2MSB),
+            (EM_PPC64, ELFCLASS64, ELFDATA2MSB),
+            (EM_PPC, ELFCLASS32, ELFDATA2MSB),
+            (EM_RISCV, ELFCLASS64, ELFDATA2LSB),
+        ] {
+            assert!(glibc_hwcaps_subdirs(e_machine, ei_class, ei_data).is_empty());
+        }
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[test]
+    fn glibc_hwcaps_subdirs_on_x86() {
+        // The x86-64 and x32 loaders use the CPU levels, and the other
+        // architectures objects are not run by it.
+        let levels = cpuid::supported().unwrap();
+        assert_eq!(
+            glibc_hwcaps_subdirs(EM_X86_64, ELFCLASS64, ELFDATA2LSB),
+            levels
+        );
+        assert_eq!(
+            glibc_hwcaps_subdirs(EM_X86_64, ELFCLASS32, ELFDATA2LSB),
+            levels
+        );
+        assert!(glibc_hwcaps_subdirs(EM_PPC64, ELFCLASS64, ELFDATA2LSB).is_empty());
+        assert!(glibc_hwcaps_subdirs(EM_S390, ELFCLASS64, ELFDATA2MSB).is_empty());
+    }
 }

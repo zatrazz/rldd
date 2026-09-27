@@ -10,7 +10,7 @@ use crate::pathutils;
 use object::elf::*;
 use object::Pod;
 
-mod hwcap;
+pub mod hwcap;
 
 const CACHEMAGIC: &str = "ld.so-1.7.0";
 const CACHEMAGIC_NEW: &str = "glibc-ld.so.cache";
@@ -634,11 +634,10 @@ impl LdCache {
         if self.abi == abi {
             return;
         }
-        // And obtain the current machine supported glibc-hwcap subfolder.  A
-        // machine whose capabilities can not be read (the auxiliary vector on a
-        // chroot without /proc) is taken as supporting none, which still leaves
-        // the regular entries.
-        let supported = hwcap::hwcap_supported().unwrap_or_default();
+        // And obtain the glibc-hwcaps subdirectories of the loader, on the
+        // current machine.  A machine whose capabilities can not be read has
+        // none, which still leaves the regular entries.
+        let supported = hwcap::glibc_hwcaps_subdirs(e_machine, ei_class, ei_data);
         self.entries = select_entries(&self.file, ei_class, e_machine, e_flags, &supported);
         self.abi = abi;
     }
