@@ -131,12 +131,26 @@ impl Loader for OpenBsd {
     fn rpath_search(elc: &ElfInfo) -> bool {
         !elc.has_runpath
     }
+
+    // The OpenBSD loader does not implement DF_1_NODEFLIB, so every step is
+    // searched.
+    fn nodeflib_rule(_step: SearchStep, _elc: &ElfInfo) -> NodeflibRule {
+        NodeflibRule::Search
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tempdir::TempDir;
+
+    #[test]
+    fn nodeflib_ignored() {
+        let elc = ElfInfo::for_test(EM_X86_64, FileFlags(0));
+        for step in OpenBsd::SEARCH_ORDER {
+            assert_eq!(OpenBsd::nodeflib_rule(*step, &elc), NodeflibRule::Search);
+        }
+    }
 
     // The file picked in a directory: the major must match, and the highest
     // minor wins.

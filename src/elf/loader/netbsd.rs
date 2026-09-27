@@ -38,6 +38,13 @@ impl Loader for NetBsd {
     fn check_elf_header(_elc: &ElfInfo) -> bool {
         true
     }
+
+    // The NetBSD loader does not implement DF_1_NODEFLIB (_rtld_digest_dynamic
+    // only reads DF_1_NOW, DF_1_NODELETE, DF_1_INITFIRST and DF_1_NOOPEN), so
+    // every step is searched.
+    fn nodeflib_rule(_step: SearchStep, _elc: &ElfInfo) -> NodeflibRule {
+        NodeflibRule::Search
+    }
 }
 
 #[cfg(test)]
@@ -67,6 +74,14 @@ mod tests {
             assert_eq!(elc.rpath, search_path::fixed_list([rpath]));
             assert!(elc.runpath.is_empty());
             assert!(!elc.has_runpath);
+        }
+    }
+
+    #[test]
+    fn nodeflib_ignored() {
+        let elc = ElfInfo::for_test(EM_X86_64, FileFlags(0));
+        for step in NetBsd::SEARCH_ORDER {
+            assert_eq!(NetBsd::nodeflib_rule(*step, &elc), NodeflibRule::Search);
         }
     }
 
