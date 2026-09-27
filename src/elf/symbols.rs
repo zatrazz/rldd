@@ -185,9 +185,11 @@ fn parse_elf<Elf: FileHeader<Endian = Endianness>>(
     // to the global GOT entries ( which the loader resolves directly).
     // The data entries are resolved eagerly, while the function ones with a
     // lazy stub (non zero st_value) are resolved lazily like the PLT relocations.
+    // The DT_MIPS_SYMTABNO count comes from the file, so it is bounded by the
+    // dynamic symbol table actually present.
     if elf.e_machine(endian) == EM_MIPS {
         if let (Some(gotsym), Some(symtabno)) = (dyninfo.mips_gotsym, dyninfo.mips_symtabno) {
-            for idx in gotsym..symtabno {
+            for idx in gotsym..symtabno.min(dynsyms.len() as u64) {
                 let symidx = SymbolIndex(idx as usize);
                 let Ok(sym) = dynsyms.symbol(symidx) else {
                     continue;
@@ -353,6 +355,14 @@ fn parse_verneed<'data, Elf: FileHeader>(
     let Ok(strings) = sections.strings(endian, data, link) else {
         return;
     };
+    // The entries are chained by their offsets and counts from the file, so
+    // a crafted chain may revisit the same entries: bound the walk by the
+    // entries the section can hold.
+    let mut budget = sections
+        .iter()
+        .find(|s| s.sh_type(endian) == SHT_GNU_VERNEED)
+        .map_or(0, |s| s.sh_size(endian).into())
+        / std::mem::size_of::<Vernaux<Elf::Endian>>() as u64;
     while let Ok(Some((verneed, mut vernauxs))) = verneeds.next() {
         let Some(file) = verneed
             .file(endian, strings)
@@ -362,6 +372,10 @@ fn parse_verneed<'data, Elf: FileHeader>(
             continue;
         };
         while let Ok(Some(vernaux)) = vernauxs.next() {
+            if budget == 0 {
+                return;
+            }
+            budget -= 1;
             if let Some(version) = vernaux
                 .name(endian, strings)
                 .ok()
@@ -372,6 +386,11 @@ fn parse_verneed<'data, Elf: FileHeader>(
                     version: version.to_string(),
                     weak: vernaux.vna_flags.get(endian).contains(VER_FLG_WEAK),
                 });
+            }
+            // The loader follows vna_next up to a zero one, whatever the
+            // vn_cnt count (_dl_check_map_versions).
+            if vernaux.vna_next.get(endian) == 0 {
+                break;
             }
         }
     }
