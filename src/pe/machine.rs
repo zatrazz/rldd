@@ -40,25 +40,27 @@ pub fn compatible(image: pe::Machine, machine: pe::Machine) -> bool {
     if image == machine {
         return true;
     }
-    // The ARM64, the ARM64EC and the ARM64X modules load on each other, and
-    // an ARM64X one also holds an x86_64 view, so it loads on an emulated
-    // x86_64 image (and an ARM64EC or an ARM64X image loads the x86_64
-    // modules back).  A plain ARM64 module does not load on an x86_64 image.
+    // A native ARM64 process loads the ARM64 and the ARM64X modules, and an
+    // emulated one (started from an x86_64 or an ARM64EC image) the x86_64,
+    // the ARM64EC and the ARM64X ones: an ARM64X module holds both views,
+    // while an ARM64EC one only loads on the emulated side and a plain ARM64
+    // one only on the native side.  An ARM64X image given on the command
+    // line stands for both processes.
     matches!(
         (image, machine),
         (
-            pe::IMAGE_FILE_MACHINE_ARM64
-                | pe::IMAGE_FILE_MACHINE_ARM64EC
-                | pe::IMAGE_FILE_MACHINE_ARM64X,
-            pe::IMAGE_FILE_MACHINE_ARM64
+            pe::IMAGE_FILE_MACHINE_ARM64,
+            pe::IMAGE_FILE_MACHINE_ARM64 | pe::IMAGE_FILE_MACHINE_ARM64X
+        ) | (
+            pe::IMAGE_FILE_MACHINE_AMD64 | pe::IMAGE_FILE_MACHINE_ARM64EC,
+            pe::IMAGE_FILE_MACHINE_AMD64
                 | pe::IMAGE_FILE_MACHINE_ARM64EC
                 | pe::IMAGE_FILE_MACHINE_ARM64X
         ) | (
-            pe::IMAGE_FILE_MACHINE_ARM64EC | pe::IMAGE_FILE_MACHINE_ARM64X,
-            pe::IMAGE_FILE_MACHINE_AMD64
-        ) | (
-            pe::IMAGE_FILE_MACHINE_AMD64,
-            pe::IMAGE_FILE_MACHINE_ARM64EC | pe::IMAGE_FILE_MACHINE_ARM64X
+            pe::IMAGE_FILE_MACHINE_ARM64X,
+            pe::IMAGE_FILE_MACHINE_ARM64
+                | pe::IMAGE_FILE_MACHINE_ARM64EC
+                | pe::IMAGE_FILE_MACHINE_AMD64
         )
     )
 }
@@ -143,6 +145,24 @@ mod tests {
         assert!(!compatible(
             pe::IMAGE_FILE_MACHINE_ARM64,
             pe::IMAGE_FILE_MACHINE_I386
+        ));
+        // A pure ARM64EC module only loads on the emulated side, and a plain
+        // ARM64 one only on the native side.
+        assert!(!compatible(
+            pe::IMAGE_FILE_MACHINE_ARM64,
+            pe::IMAGE_FILE_MACHINE_ARM64EC
+        ));
+        assert!(!compatible(
+            pe::IMAGE_FILE_MACHINE_ARM64EC,
+            pe::IMAGE_FILE_MACHINE_ARM64
+        ));
+        assert!(compatible(
+            pe::IMAGE_FILE_MACHINE_ARM64EC,
+            pe::IMAGE_FILE_MACHINE_ARM64X
+        ));
+        assert!(compatible(
+            pe::IMAGE_FILE_MACHINE_AMD64,
+            pe::IMAGE_FILE_MACHINE_ARM64EC
         ));
     }
 

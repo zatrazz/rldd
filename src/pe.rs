@@ -1089,56 +1089,130 @@ fn il_any_cpu<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> bool {
     flags & pe::COMIMAGE_FLAGS_ILONLY.0 != 0 && flags & wants_32bit == 0
 }
 
-// An ARM64X object holds an ARM64 and an x86_64 view at once, and the file
-// header only records the primary one. Most of System32 records ARM64, while
-// a handful of modules (the .NET shim and the x64 redistributables among
-// them) record AMD64.  On both cases the second view only shows on the CHPE
-// metadata, so reading it is what lets the machine check take the module from
-// both sides.
+// The dynamic value relocations that switch the view of an ARM64X object,
+// from winnt.h (the object crate does not define it).
+const IMAGE_DYNAMIC_RELOCATION_ARM64X: u64 = 6;
+
+// The hybrid objects hold ARM64EC code, which the CHPE metadata the load
+// configuration points at describes, and the file header records their
+// primary view:
+//
+// * An ARM64 header with it is an ARM64X object, whose x86_64 view the
+//   ARM64X dynamic value relocations create when an x86_64 or an ARM64EC
+//   process maps it (most of System32 on Windows on ARM, and the arm64
+//   redistributables).
+// * An AMD64 header with it is an ARM64EC object, which only loads on the
+//   emulated side (the vcruntime140_1.dll of the arm64 redistributable),
+//   unless the ARM64X relocations create an ARM64 view for a native process
+//   as well, which makes it an ARM64X object with the EC view as the primary
+//   one (the .NET shim among them).
+//
+// https://learn.microsoft.com/en-us/windows/arm/arm64x-pe
 fn image_machine<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> pe::Machine {
     let machine = file.nt_headers().file_header().machine.get(LE);
-    let hybrid = matches!(
+    if !matches!(
         machine,
         pe::IMAGE_FILE_MACHINE_ARM64 | pe::IMAGE_FILE_MACHINE_AMD64
-    );
-    if hybrid && has_chpe_metadata(file) {
-        return pe::IMAGE_FILE_MACHINE_ARM64X;
+    ) {
+        return machine;
     }
-    machine
+    let Some(config) = load_config(file) else {
+        return machine;
+    };
+    const CHPE: usize = std::mem::offset_of!(pe::ImageLoadConfigDirectory64, chpe_metadata_pointer);
+    if config_u64(config, CHPE).is_none_or(|pointer| pointer == 0) {
+        return machine;
+    }
+    match machine {
+        pe::IMAGE_FILE_MACHINE_ARM64 => pe::IMAGE_FILE_MACHINE_ARM64X,
+        _ if has_arm64x_relocations(file, config) => pe::IMAGE_FILE_MACHINE_ARM64X,
+        _ => pe::IMAGE_FILE_MACHINE_ARM64EC,
+    }
 }
 
-// Whether the load configuration directory points at the CHPE metadata.  The
-// directory grew over the Windows releases and its first field records how
-// much of it the object holds, so the pointer is only read when it covers it.
-// Only the 64 bit layout is read, which is the one both the ARM64 and the
-// x86_64 objects have; a 32 bit directory never reaches the offset below, so
-// it reports no metadata.
-fn has_chpe_metadata<Pe: ImageNtHeaders>(file: &PeFile<Pe>) -> bool {
-    const OFFSET: usize =
-        std::mem::offset_of!(pe::ImageLoadConfigDirectory64, chpe_metadata_pointer);
-    const END: usize = OFFSET + std::mem::size_of::<u64>();
-
-    let sections = file.section_table();
-    let Some(directory) = file
+// The load configuration directory.  It grew over the Windows releases and
+// its first field records how much of it the object holds, so a field is
+// only read when it covers it.  Only the 64 bit layout is read, which is the
+// one both the ARM64 and the x86_64 objects have.
+fn load_config<'data, Pe: ImageNtHeaders>(file: &PeFile<'data, Pe>) -> Option<&'data [u8]> {
+    let directory = file
         .data_directories()
-        .get(pe::IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG)
-    else {
+        .get(pe::IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG)?;
+    let data = rva_data(file, directory.virtual_address.get(LE))?;
+    let size = u32::from_le_bytes(data.get(..4)?.try_into().ok()?) as usize;
+    data.get(..size.min(data.len()))
+}
+
+fn config_bytes<const N: usize>(data: &[u8], offset: usize) -> Option<[u8; N]> {
+    data.get(offset..offset.checked_add(N)?)?.try_into().ok()
+}
+
+fn config_u16(data: &[u8], offset: usize) -> Option<u16> {
+    config_bytes(data, offset).map(u16::from_le_bytes)
+}
+
+fn config_u32(data: &[u8], offset: usize) -> Option<u32> {
+    config_bytes(data, offset).map(u32::from_le_bytes)
+}
+
+fn config_u64(data: &[u8], offset: usize) -> Option<u64> {
+    config_bytes(data, offset).map(u64::from_le_bytes)
+}
+
+// Whether the dynamic value relocation table holds ARM64X relocations.  The
+// table is found through its section and offset, or through its address on
+// the older layouts, and holds a version 1 or 2 header followed by the
+// entries of each relocation symbol.
+fn has_arm64x_relocations<Pe: ImageNtHeaders>(file: &PeFile<Pe>, config: &[u8]) -> bool {
+    type Config = pe::ImageLoadConfigDirectory64;
+    const OFFSET: usize = std::mem::offset_of!(Config, dynamic_value_reloc_table_offset);
+    const SECTION: usize = std::mem::offset_of!(Config, dynamic_value_reloc_table_section);
+    const ADDRESS: usize = std::mem::offset_of!(Config, dynamic_value_reloc_table);
+
+    let table = match (config_u32(config, OFFSET), config_u16(config, SECTION)) {
+        (Some(offset), Some(section)) if section != 0 => file
+            .section_table()
+            .section(object::SectionIndex(section.into()))
+            .ok()
+            .and_then(|section| section.pe_data(file.data()).ok())
+            .and_then(|data| data.get(offset as usize..)),
+        _ => config_u64(config, ADDRESS)
+            .filter(|address| *address != 0)
+            .and_then(|address| {
+                let image_base = file.nt_headers().optional_header().image_base();
+                rva_data(file, address.wrapping_sub(image_base) as u32)
+            }),
+    };
+    let Some(table) = table else {
         return false;
     };
-    let Ok(data) = directory.data(file.data(), &sections) else {
-        return false;
+
+    let symbols = || -> Option<bool> {
+        let version = config_u32(table, 0)?;
+        let size = config_u32(table, 4)? as usize;
+        let mut entries = table.get(8..8usize.checked_add(size)?)?;
+        while !entries.is_empty() {
+            let (symbol, next) = match version {
+                // The symbol and the size of the relocations that follow.
+                1 => (
+                    config_u64(entries, 0)?,
+                    12 + config_u32(entries, 8)? as usize,
+                ),
+                // The header and the fixup sizes, then the symbol.
+                2 => (
+                    config_u64(entries, 8)?,
+                    config_u32(entries, 0)? as usize + config_u32(entries, 4)? as usize,
+                ),
+                _ => return None,
+            };
+            if symbol == IMAGE_DYNAMIC_RELOCATION_ARM64X {
+                return Some(true);
+            }
+            entries = entries.get(next.max(1)..)?;
+        }
+        Some(false)
     };
-    let Some(size) = data.get(..4) else {
-        return false;
-    };
-    let size = u32::from_le_bytes(size.try_into().unwrap()) as usize;
-    if size < END {
-        return false;
-    }
-    let Some(pointer) = data.get(OFFSET..END) else {
-        return false;
-    };
-    u64::from_le_bytes(pointer.try_into().unwrap()) != 0
+    symbols().unwrap_or(false)
 }
 
 // The embedded RT_MANIFEST resource ID, which declares the side-by-side
@@ -1902,6 +1976,99 @@ mod tests {
         image.imports(&[[thunks, 0, module, thunks]]);
         let pei = parse_object(&image.build()).unwrap();
         assert!(pei.deps[0].imports.is_empty());
+    }
+
+    // A PE32+ image of MACHINE whose load configuration points at CHPE
+    // metadata when CHPE is set, and holds a dynamic value relocation table of
+    // VERSION with the SYMBOLS entries.
+    fn hybrid_image(machine: pe::Machine, chpe: bool, dvrt: Option<(u32, &[u64])>) -> Vec<u8> {
+        type Config = pe::ImageLoadConfigDirectory64;
+        let mut image = testimage::Image::dll(machine, true);
+        let mut table_offset = 0;
+        if let Some((version, symbols)) = dvrt {
+            let mut entries = Vec::new();
+            for symbol in symbols {
+                match version {
+                    1 => {
+                        entries.extend_from_slice(&symbol.to_le_bytes());
+                        entries.extend_from_slice(&8u32.to_le_bytes());
+                        entries.extend_from_slice(&[0; 8]);
+                    }
+                    _ => {
+                        entries.extend_from_slice(&24u32.to_le_bytes());
+                        entries.extend_from_slice(&4u32.to_le_bytes());
+                        entries.extend_from_slice(&symbol.to_le_bytes());
+                        entries.extend_from_slice(&[0; 12]);
+                    }
+                }
+            }
+            let mut table = version.to_le_bytes().to_vec();
+            table.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+            table.extend_from_slice(&entries);
+            table_offset = image.add(&table);
+        }
+        let size = std::mem::size_of::<Config>();
+        let mut config = vec![0u8; size];
+        let mut put = |offset: usize, bytes: &[u8]| {
+            config[offset..offset + bytes.len()].copy_from_slice(bytes);
+        };
+        put(0, &(size as u32).to_le_bytes());
+        if chpe {
+            let pointer = image.image_base + 0x1000;
+            put(
+                std::mem::offset_of!(Config, chpe_metadata_pointer),
+                &pointer.to_le_bytes(),
+            );
+        }
+        if dvrt.is_some() {
+            put(
+                std::mem::offset_of!(Config, dynamic_value_reloc_table_offset),
+                &table_offset.to_le_bytes(),
+            );
+            put(
+                std::mem::offset_of!(Config, dynamic_value_reloc_table_section),
+                &1u16.to_le_bytes(),
+            );
+        }
+        image.directory(pe::IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG, &config);
+        image.build()
+    }
+
+    // The CHPE metadata tells the hybrid objects, and the ARM64X relocations
+    // tell an ARM64X object with an AMD64 header from an ARM64EC one.
+    #[test]
+    fn hybrid_machines() {
+        let machine = |data: Vec<u8>| parse_object(&data).unwrap().machine;
+        let (arm64, amd64) = (pe::IMAGE_FILE_MACHINE_ARM64, pe::IMAGE_FILE_MACHINE_AMD64);
+        let arm64x = IMAGE_DYNAMIC_RELOCATION_ARM64X;
+
+        assert_eq!(machine(hybrid_image(arm64, false, None)), arm64);
+        assert_eq!(
+            machine(hybrid_image(arm64, true, None)),
+            pe::IMAGE_FILE_MACHINE_ARM64X
+        );
+        assert_eq!(machine(hybrid_image(amd64, false, None)), amd64);
+        assert_eq!(
+            machine(hybrid_image(amd64, true, None)),
+            pe::IMAGE_FILE_MACHINE_ARM64EC
+        );
+        for version in [1, 2] {
+            assert_eq!(
+                machine(hybrid_image(amd64, true, Some((version, &[1, arm64x])))),
+                pe::IMAGE_FILE_MACHINE_ARM64X,
+                "version {version}"
+            );
+            assert_eq!(
+                machine(hybrid_image(amd64, true, Some((version, &[1, 7])))),
+                pe::IMAGE_FILE_MACHINE_ARM64EC,
+                "version {version}"
+            );
+        }
+        // The relocations alone make no hybrid object.
+        assert_eq!(
+            machine(hybrid_image(amd64, false, Some((1, &[arm64x])))),
+            amd64
+        );
     }
 
     #[test]
