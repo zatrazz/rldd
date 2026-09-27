@@ -111,6 +111,11 @@ struct ElfInfo {
     // handed down to every object it loads.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     dst_lib: Option<String>,
+    // The platform the glibc loader resolving the input object sets over the
+    // kernel one (GLRO(dl_platform)), if any, handed down to every object it
+    // loads.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    loader_platform: Option<&'static str>,
     // The ELF header flags of the input object, which the ABI of its loader
     // follows, handed down to every object it loads.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -159,6 +164,7 @@ impl ElfInfo {
             nodeflibs: false,
             is_musl: false,
             dst_lib: Some("lib64".to_string()),
+            loader_platform: None,
             loader_flags: e_flags,
             pie: false,
             search_subdirs: Rc::default(),
@@ -315,6 +321,7 @@ fn parse_elf_segment_dynamic<Elf: FileHeader>(
             filters: DepsVec::new(),
             is_musl: false,
             dst_lib: None,
+            loader_platform: None,
             loader_flags: elf.e_flags(endian),
             pie: DynamicFlags1(tags.flags_1).contains(DF_1_PIE),
             search_subdirs: Rc::default(),
@@ -845,6 +852,7 @@ pub fn resolve_binary(ctx: &mut ElfContext, arg: &str) -> Result<DepTree, std::i
     #[cfg(target_os = "linux")]
     if !elc.is_musl {
         elc.dst_lib = system_dirs::get_dst_lib(loader.as_deref(), &elc);
+        elc.loader_platform = system_dirs::get_loader_platform(&elc);
         elc.search_subdirs = Rc::new(system_dirs::get_search_subdirs(
             loader.as_deref(),
             &elc,
@@ -1532,6 +1540,7 @@ fn open_root_elf(deptree: &DepTree) -> Option<ElfInfo> {
     let path = deptree_node_path(&root.val)?;
     let mut elc = open_elf_file(&path, None, None, false).ok()?;
     elc.dst_lib = system_dirs::get_dst_lib(elc.interp.as_deref(), &elc);
+    elc.loader_platform = system_dirs::get_loader_platform(&elc);
     expand_object(&mut elc, None);
     Some(elc)
 }

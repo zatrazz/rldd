@@ -328,6 +328,9 @@ case_platform() {
     prog platform/main main.c "-Lplatform/$PLATFORM" -lfoo -Wl,-rpath,'$ORIGIN/${PLATFORM}' \
         -Wl,--disable-new-dtags
     check_ldd "\${PLATFORM} on DT_RPATH ($PLATFORM)" platform/main -- --platform "$PLATFORM"
+    # Without the option, the value the loader selects on the machine (the
+    # x86 ones set haswell or xeon_phi on an Intel CPU with their features).
+    check_ldd "\${PLATFORM} of the loader ($PLATFORM)" platform/main
 }
 
 # An empty entry is the current directory.

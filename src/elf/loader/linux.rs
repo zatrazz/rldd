@@ -84,6 +84,7 @@ impl Loader for Linux {
         if let Some(melc) = melc {
             elc.is_musl = melc.is_musl;
             elc.dst_lib = melc.dst_lib.clone();
+            elc.loader_platform = melc.loader_platform;
             elc.loader_flags = melc.loader_flags;
             elc.search_subdirs = Rc::clone(&melc.search_subdirs);
             return;
@@ -175,6 +176,7 @@ impl Loader for Linux {
         }
         let platform = platform
             .map(String::as_str)
+            .or(elc.loader_platform)
             .or_else(|| platform::get(elc.e_machine, elc.ei_data));
         glibc_expand(
             input,

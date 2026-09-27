@@ -208,7 +208,7 @@ pub fn get_search_subdirs(
     if release.is_some_and(|release| release < GlibcRelease::Release(2, 37)) {
         let legacy = hwcap::loader_hwcaps(elc.e_machine, elc.ei_class, elc.ei_data).legacy;
         let platform = platform
-            .or(legacy.platform_name())
+            .or(elc.loader_platform)
             .or_else(|| super::platform::get(elc.e_machine, elc.ei_data));
         // The platform may be one of the hwcap names (x86_64), which the
         // loader tries twice.
@@ -219,6 +219,17 @@ pub fn get_search_subdirs(
         }
     }
     r
+}
+
+// The platform the glibc loader for the ELC object sets over the kernel one
+// (GLRO(dl_platform), which $PLATFORM expands to), on this machine: haswell
+// or xeon_phi on an Intel CPU with their features for x86-64, and i686 or
+// i586 for i386 (init_cpu_features, since glibc 2.26).
+#[cfg(target_os = "linux")]
+pub fn get_loader_platform(elc: &ElfInfo) -> Option<&'static str> {
+    super::ld_so_cache::hwcap::loader_hwcaps(elc.e_machine, elc.ei_class, elc.ei_data)
+        .legacy
+        .platform_name()
 }
 
 // The legacy hwcaps subdirectories of a loader with the HWCAP_NAMES bits and
