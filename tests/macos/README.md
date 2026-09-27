@@ -53,6 +53,13 @@ such a file does not count as providing it: one without a slice of the
 process architecture (derived from the input slice), one that is not a dylib,
 or, for a macOS executable, one built for another platform.
 
+**Locations beyond the load path.**  A dependency of an image built with a
+pre-2022 SDK may resolve on a default fallback directory (`[system default
+paths]`), a Mac Catalyst image may resolve to the `/System/iOSSupport` variant
+of a load path, and a setuid or setgid program neither expands
+`@executable_path` nor its relative run-path entries, as dyld does.  The check
+accepts those.
+
 **The cache listing gaps.**  `dyld_info -all_dyld_cache` lists fewer images
 than dyld resolves, so an image rldd resolves through the cache that the
 listing lacks is confirmed with `dyld_info` on the image itself and reported

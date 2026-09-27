@@ -19,6 +19,7 @@ import sys
 from multiprocessing import Pool
 
 CRYPTEX = "/System/Volumes/Preboot/Cryptexes/OS"
+IOS_SUPPORT = "/System/iOSSupport"
 ATTRS = ("weak-link", "re-export", "upward", "delay-init")
 # Past this many walkers they only contend on the filesystem locks.
 WALKERS = 8
@@ -280,9 +281,12 @@ class Process:
     which rldd checks each dependency candidate against (Arch::process in
     src/macho/arch.rs, and loads_platform in src/macho.rs)."""
 
-    def __init__(self, arch, filetype, platforms):
+    def __init__(self, arch, filetype, platforms, restricted=False):
         cputype, subtype = arch
         self.cputype = cputype
+        # A setuid or setgid program does not expand @executable_path
+        # (Security in src/macho.rs).
+        self.restricted = restricted
         if cputype == CPU_ARM64:
             keys_on = filetype == MH_EXECUTE and subtype & 0xFFFFFF == 2
             self.graded = [ARM64E] if keys_on else [ARM64E, ARM64E_V1, ARM64, ARM64_V8]
@@ -340,7 +344,11 @@ def input_slice(path, host, names):
             chosen = found
             break
     cputype, subtype, filetype, platforms = chosen[1]
-    process = Process((cputype, subtype), filetype, platforms)
+    try:
+        setugid = os.stat(path).st_mode & (stat.S_ISUID | stat.S_ISGID) != 0
+    except OSError:
+        setugid = False
+    process = Process((cputype, subtype), filetype, platforms, setugid)
     # A thin file has a single slice listed, whatever its name.
     if len(slices) == 1:
         return next(iter(names), None), process
@@ -438,8 +446,10 @@ def where(candidate, recorded, process):
 
 def same_path(printed, expected):
     """rldd prints the cache path verbatim, a filesystem path canonicalized,
-    and the realpath of a load path resolved through it."""
-    for candidate in (expected, CRYPTEX + expected, realpath_leaf(expected)):
+    and the realpath of a load path resolved through it.  A Mac Catalyst
+    image looks for its absolute dependencies below /System/iOSSupport
+    first."""
+    for candidate in (expected, CRYPTEX + expected, realpath_leaf(expected), IOS_SUPPORT + expected):
         if printed == candidate or os.path.realpath(printed) == os.path.realpath(candidate):
             return True
     return False
@@ -482,9 +492,14 @@ def check_dependency(loadpath, dep, rpaths, directory, dyld_info, process):
     path, _, mode, found = dep
     if loadpath.startswith("@rpath/"):
         rest = loadpath[len("@rpath/"):]
+        # A restricted program only takes its absolute run-path entries.
+        if process is not None and process.restricted:
+            rpaths = [r for r in rpaths if r.startswith("/")]
         # dyld does not add a second slash to an entry ending with one.
         candidates = [expand(r, directory) + ("" if r.endswith("/") else "/") + rest for r in rpaths]
         recorded = False
+    elif loadpath.startswith("@executable_path") and process is not None and process.restricted:
+        candidates, recorded = [], False
     elif loadpath.startswith("@"):
         candidates, recorded = [expand(loadpath, directory)], False
     elif loadpath.startswith("/"):
