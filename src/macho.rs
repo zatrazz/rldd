@@ -474,7 +474,7 @@ fn find_dependency(
     preload: bool,
 ) -> Option<(MachOInfo, usize, String)> {
     for (candidate, mode) in candidate_paths(config, rpaths, dependency, preload) {
-        for candidate in suffix_variants(config, &candidate) {
+        for candidate in suffix_variants(config.env.image_suffix.as_deref(), &candidate) {
             match resolve_path(config, &candidate, dep, mode, tree, depp) {
                 ResolveResult::Found(r) => return Some(r),
                 ResolveResult::Skip => return None,
@@ -603,16 +603,23 @@ fn framework_partial_path<'a>(path: &'a str, suffix: Option<&str>) -> Option<&'a
     matches.then(|| &path[start..])
 }
 
-// The DYLD_IMAGE_SUFFIX variants of a candidate path: the suffixed name
-// first (inserted before the .dylib extension, appended otherwise) and then
-// the plain one.
-fn suffix_variants(config: &Config, path: &str) -> Vec<String> {
+// The DYLD_IMAGE_SUFFIX variants of a candidate path, the way dyld tries
+// them (PathOverrides::forEachImageSuffix): the path with each suffix of the
+// colon separated list first, inserted before the last dot of the leaf name
+// or appended when it has none (addSuffix), and then the plain one.
+fn suffix_variants(suffixes: Option<&str>, path: &str) -> Vec<String> {
     let mut variants = Vec::new();
-    if let Some(suffix) = &config.env.image_suffix {
-        variants.push(match path.strip_suffix(".dylib") {
-            Some(stem) => format!("{stem}{suffix}.dylib"),
-            None => format!("{path}{suffix}"),
-        });
+    if let Some(suffixes) = suffixes {
+        let leaf = path.rfind('/').map_or(0, |idx| idx + 1);
+        for suffix in suffixes.split(':') {
+            variants.push(match path[leaf..].rfind('.') {
+                Some(dot) => {
+                    let (stem, extension) = path.split_at(leaf + dot);
+                    format!("{stem}{suffix}{extension}")
+                }
+                None => format!("{path}{suffix}"),
+            });
+        }
     }
     variants.push(path.to_string());
     variants
@@ -630,7 +637,7 @@ fn searched_locations(
         searched.push(format!("{dependency} (empty run-path list)"));
     }
     for (candidate, _) in candidate_paths(config, rpaths, dependency, preload) {
-        for variant in suffix_variants(config, &candidate) {
+        for variant in suffix_variants(config.env.image_suffix.as_deref(), &candidate) {
             let cryptex = cryptex_path(Path::new(&variant));
             searched.push(variant);
             if let Some(cryptex) = cryptex {
@@ -1840,6 +1847,33 @@ mod tests {
         assert_eq!(
             framework_partial_path("/F/Foo.framework/Foo", Some("_debug")),
             Some("Foo.framework/Foo")
+        );
+    }
+
+    #[test]
+    fn image_suffix_variants() {
+        assert_eq!(
+            suffix_variants(None, "/p/libfoo.dylib"),
+            ["/p/libfoo.dylib"]
+        );
+        for (path, suffixed) in [
+            ("/p/libfoo.dylib", "/p/libfoo_debug.dylib"),
+            ("/p/libbar.A.dylib", "/p/libbar.A_debug.dylib"),
+            ("/p/libz.so", "/p/libz_debug.so"),
+            ("/p/Foo", "/p/Foo_debug"),
+            ("/p.d/Foo", "/p.d/Foo_debug"),
+            ("foo.dylib", "foo_debug.dylib"),
+        ] {
+            assert_eq!(suffix_variants(Some("_debug"), path), [suffixed, path]);
+        }
+        // Each suffix of the list, in order.
+        assert_eq!(
+            suffix_variants(Some("_debug:_profile"), "/p/libfoo.dylib"),
+            [
+                "/p/libfoo_debug.dylib",
+                "/p/libfoo_profile.dylib",
+                "/p/libfoo.dylib"
+            ]
         );
     }
 
