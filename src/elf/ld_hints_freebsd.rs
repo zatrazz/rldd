@@ -56,7 +56,6 @@ mod tests {
     use crate::tempdir::TempDir;
     use std::fs;
     use std::fs::File;
-    use std::io::ErrorKind;
     use std::io::Write;
 
     fn write_elf_hints(file: &mut File, dirlist: Option<&Vec<&str>>) -> Result<()> {
@@ -73,7 +72,7 @@ mod tests {
             strtab: 0,
             strsize: 0,
             dirlist: std::mem::size_of::<elfhints_hdr>() as u32,
-            dirlistlen: dirlistlen,
+            dirlistlen,
             spare: [0; 26usize],
         };
 
@@ -96,7 +95,7 @@ mod tests {
         File::create(&filepath)?;
 
         match parse_ld_so_hints(&filepath) {
-            Ok(_entries) => Err(Error::new(ErrorKind::Other, "Unexpected entries")),
+            Ok(_entries) => Err(Error::other("Unexpected entries")),
             Err(_e) => Ok(()),
         }
     }
@@ -114,7 +113,7 @@ mod tests {
                 assert_eq!(entries.len(), 0);
                 Ok(())
             }
-            Err(e) => Err(Error::new(ErrorKind::Other, e)),
+            Err(e) => Err(Error::other(e)),
         }
     }
 
@@ -136,7 +135,7 @@ mod tests {
                 assert_eq!(entries[0], dirlist[0]);
                 Ok(())
             }
-            Err(e) => Err(Error::new(ErrorKind::Other, e)),
+            Err(e) => Err(Error::other(e)),
         }
     }
 
@@ -168,7 +167,7 @@ mod tests {
                 assert_eq!(entries[2], dirlist[2]);
                 Ok(())
             }
-            Err(e) => Err(Error::new(ErrorKind::Other, e)),
+            Err(e) => Err(Error::other(e)),
         }
     }
 }
