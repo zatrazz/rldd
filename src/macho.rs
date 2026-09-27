@@ -42,9 +42,9 @@ struct MachOInfo {
     // The LC_ID_DYLIB install name.
     id: Option<String>,
     // The LC_BUILD_VERSION/LC_VERSION_MIN_* information, and the platforms
-    // in the load command order.
+    // along with their SDK versions in the load command order.
     platform: Option<String>,
-    platforms: Vec<Platform>,
+    platforms: Vec<(Platform, Version)>,
     // The LC_UUID value.
     uuid: Option<String>,
     // The Mach-O header architecture and file type.
@@ -184,6 +184,10 @@ impl Security {
     fn allow_at_paths(&self) -> bool {
         self.restricted.is_none()
     }
+
+    fn allow_classic_fallback_paths(&self) -> bool {
+        self.restricted.is_none()
+    }
 }
 
 // The resolution context: the architecture selecting the input slice (the
@@ -305,11 +309,12 @@ pub fn resolve_binary(ctx: &mut MachOContext, arg: &str) -> Result<DepTree, std:
         print_object_information(&arch, cache, &env, security, &filename, &omf, &main_rpath);
     }
 
+    let platform = ImagePlatform::new(&omf);
     let config = Config {
         arch: &arch,
         macos: omf.filetype == MH_EXECUTE
-            && built_for_macos(&omf)
-            && !omf.platforms.contains(&PLATFORM_MACCATALYST),
+            && matches!(platform, ImagePlatform::Single(PLATFORM_MACOS, _)),
+        platform: platform.platform(),
         security,
         cache,
         executable_path: &executable_path,
@@ -340,7 +345,13 @@ pub fn resolve_binary(ctx: &mut MachOContext, arg: &str) -> Result<DepTree, std:
     // then the main executable dependencies along with theirs, and at last
     // the dependencies of each inserted library, whose run-path stack is the
     // main executable one.
-    let root_place = tree.images[root].place;
+    // dyld does not search the default fallback directories for them.
+    let requester = Requester {
+        place: tree.images[root].place,
+        loader_path: &executable_path,
+        rpaths: &[],
+        default_fallbacks: false,
+    };
     let mut inserted = Vec::new();
     for pload in &env.insert_libraries {
         let dep = MachODep {
@@ -348,15 +359,7 @@ pub fn resolve_binary(ctx: &mut MachOContext, arg: &str) -> Result<DepTree, std:
             attrs: Vec::new(),
             version: None,
         };
-        if let Some(image) = resolve_dependency(
-            &config,
-            &executable_path,
-            &[],
-            &dep,
-            &mut tree,
-            root_place,
-            true,
-        ) {
+        if let Some(image) = resolve_dependency(&config, &requester, &dep, &mut tree, true) {
             if image != root && !inserted.contains(&image) {
                 inserted.push(image);
             }
@@ -399,20 +402,16 @@ fn load_dependents(config: &Config, tree: &mut Tree, image: usize, rpaths: &[Str
             stack.push(rpath.clone());
         }
     }
+    let requester = Requester {
+        place,
+        loader_path: &pending.loader_path,
+        rpaths: &stack,
+        default_fallbacks: pending.pre_2022,
+    };
     let loaded: Vec<usize> = pending
         .deps
         .iter()
-        .filter_map(|dep| {
-            resolve_dependency(
-                config,
-                &pending.loader_path,
-                &stack,
-                dep,
-                tree,
-                place,
-                false,
-            )
-        })
+        .filter_map(|dep| resolve_dependency(config, &requester, dep, tree, false))
         .collect();
     for dep in loaded {
         load_dependents(config, tree, dep, &stack);
@@ -426,12 +425,25 @@ struct Place {
     level: usize,
 }
 
+// The image looking a dependency up: its place on the tree, its directory
+// (the @loader_path), its run-path stack, and whether dyld searches the
+// default fallback directories for it (requestorNeedsFallbacks, set for a
+// pre-2022 image).
+struct Requester<'a> {
+    place: Place,
+    loader_path: &'a str,
+    rpaths: &'a [String],
+    default_fallbacks: bool,
+}
+
 // The dependencies of an image, until they are loaded, with the image
-// run-path entries and directory (their @loader_path).
+// run-path entries and directory (their @loader_path), and whether it was
+// built with a pre-2022 SDK.
 struct Pending {
     deps: DepsVec,
     rpath: Vec<String>,
     loader_path: String,
+    pre_2022: bool,
 }
 
 // An image loaded on the dependency tree.  Like dyld (Loader::matchesPath),
@@ -477,6 +489,7 @@ impl Tree {
         cache_image: Option<(usize, u64)>,
         loader_path: String,
     ) -> usize {
+        let pre_2022 = pre_2022(&elc);
         // Only a dylib is also matched by its install name.
         let install_name = elc.id.filter(|_| elc.filetype == MH_DYLIB);
         let place = match requester {
@@ -496,6 +509,7 @@ impl Tree {
             node,
             place,
             pending: Some(Pending {
+                pre_2022,
                 deps: elc.deps,
                 rpath: elc.rpath,
                 loader_path,
@@ -597,6 +611,8 @@ struct Config<'a> {
     // images, for instance), and an input that is not a main executable may
     // be loaded by processes of several platforms, so they are not checked.
     macos: bool,
+    // The process platform, the one of the input.
+    platform: Option<Platform>,
     security: Security,
     cache: &'a DyldCache,
     executable_path: &'a str,
@@ -613,15 +629,12 @@ struct Config<'a> {
 
 // Look the dependency DEP of the REQUESTER image up, adding its node to the
 // tree, and return the image it leads to, either a new one or one already
-// loaded, or None when it is not found (or skipped).  LOADER_PATH and
-// RPATHS are the requester directory and run-path stack.
+// loaded, or None when it is not found (or skipped).
 fn resolve_dependency(
     config: &Config,
-    loader_path: &str,
-    rpaths: &[String],
+    requester: &Requester,
     dep: &MachODep,
     tree: &mut Tree,
-    requester: Place,
     preload: bool,
 ) -> Option<usize> {
     // dyld does not expand @loader_path in DYLD_INSERT_LIBRARIES, nor
@@ -632,7 +645,7 @@ fn resolve_dependency(
             .security
             .allow_at_paths()
             .then_some(config.executable_path),
-        (!preload).then_some(loader_path),
+        (!preload).then_some(requester.loader_path),
     );
 
     if pathutils::has_prefix(&dependency, config.ignore_prefix) {
@@ -643,13 +656,12 @@ fn resolve_dependency(
     // already loaded.  An @rpath load path only names an image with that
     // install name (dyld checks it first, before expanding the run-path
     // list), and its expansions are checked like any other candidate.
-    if let Some(image) =
-        check_already_resolved(config, tree.image(&dependency), dep, tree, requester)
-    {
+    let found = tree.image(&dependency);
+    if let Some(image) = check_already_resolved(config, found, dep, tree, requester.place) {
         return Some(image);
     }
 
-    find_dependency(config, rpaths, &dependency, dep, tree, requester, preload)
+    find_dependency(config, requester, &dependency, dep, tree, preload)
 }
 
 // Check if the dependency names the image FOUND already loaded, adding an
@@ -678,16 +690,15 @@ fn check_already_resolved(
 // leads to (a new one or one already loaded) is returned.
 fn find_dependency(
     config: &Config,
-    rpaths: &[String],
+    requester: &Requester,
     dependency: &str,
     dep: &MachODep,
     tree: &mut Tree,
-    requester: Place,
     preload: bool,
 ) -> Option<usize> {
-    for (candidate, mode) in candidate_paths(config, rpaths, dependency, preload) {
+    for (candidate, mode) in candidate_paths(config, requester, dependency, preload) {
         for candidate in suffix_variants(config.env.image_suffix.as_deref(), &candidate) {
-            match resolve_path(config, &candidate, dep, mode, tree, requester) {
+            match resolve_path(config, &candidate, dep, mode, tree, requester.place) {
                 ResolveResult::Loaded(image) => return Some(image),
                 ResolveResult::Miss => {}
             }
@@ -700,11 +711,11 @@ fn find_dependency(
     tree.deptree.addnode(
         DepNode::not_found(
             dep.name.clone(),
-            searched_locations(config, rpaths, dependency, preload),
+            searched_locations(config, requester, dependency, preload),
         )
         .with_attrs(dep.attrs.clone())
         .with_version(dep.version.clone()),
-        requester.node,
+        requester.place.node,
     );
     None
 }
@@ -715,13 +726,14 @@ fn find_dependency(
 //    DYLD_LIBRARY_PATH directories (by leaf name) for any other one,
 // 2. The load path itself (with @rpath expanded against the run-path list),
 // 3. And at last the DYLD_FALLBACK_FRAMEWORK_PATH or DYLD_FALLBACK_LIBRARY_PATH
-//    directories.
+//    directories, or the default ones (see fallback_directories).
 fn candidate_paths(
     config: &Config,
-    rpaths: &[String],
+    requester: &Requester,
     dependency: &str,
     preload: bool,
 ) -> Vec<(String, DepMode)> {
+    let rpaths = requester.rpaths;
     let mut candidates = Vec::new();
 
     // Like the fallback lists, the framework and library lists are mutually
@@ -759,24 +771,81 @@ fn candidate_paths(
     }
 
     // Like dyld, the fallback framework and library lists are mutually
-    // exclusive.  Frameworks use the former, plain dylibs the latter.
-    if let Some(partial) = partial {
-        for dir in &config.env.fallback_framework_path {
-            candidates.push((
-                format!("{}/{partial}", dir.path),
-                DepMode::LdFallbackFrameworkPath,
-            ));
-        }
-    } else {
-        for dir in &config.env.fallback_library_path {
-            candidates.push((
-                format!("{}/{leaf}", dir.path),
-                DepMode::LdFallbackLibraryPath,
-            ));
+    // exclusive.  Frameworks use the former, plain dylibs the latter, and a
+    // fallback candidate that is the load path itself is not tried again.
+    let name = partial.unwrap_or(&leaf);
+    for (dir, mode) in fallback_directories(config, partial.is_some(), requester.default_fallbacks)
+    {
+        let candidate = format!("{dir}/{name}");
+        if candidate != dependency {
+            candidates.push((candidate, mode));
         }
     }
 
     candidates
+}
+
+// The fallback directories: the DYLD_FALLBACK_FRAMEWORK_PATH ones for a
+// FRAMEWORK, or the DYLD_FALLBACK_LIBRARY_PATH ones.  When the list is unset,
+// dyld still searches default directories for the dependencies of an image
+// built with a pre-2022 SDK (DEFAULTS), which depend on the process platform
+// (PathOverrides::forEachDylibFallback and forEachFrameworkFallback): on
+// macOS /usr/local/lib and /usr/lib, or /Library/Frameworks and
+// /System/Library/Frameworks, only the last one for a restricted process
+// (FallbackPathMode::restricted).
+fn fallback_directories(
+    config: &Config,
+    framework: bool,
+    defaults: bool,
+) -> Vec<(String, DepMode)> {
+    let (list, mode) = if framework {
+        (
+            &config.env.fallback_framework_path,
+            DepMode::LdFallbackFrameworkPath,
+        )
+    } else {
+        (
+            &config.env.fallback_library_path,
+            DepMode::LdFallbackLibraryPath,
+        )
+    };
+    if !list.is_empty() {
+        return list.iter().map(|dir| (dir.path.clone(), mode)).collect();
+    }
+    if !defaults {
+        return Vec::new();
+    }
+    let classic = config.security.allow_classic_fallback_paths();
+    let dirs: &[&str] = match (config.platform, framework) {
+        (None | Some(PLATFORM_DRIVERKIT), _) => &[],
+        (Some(PLATFORM_MACOS), false) if classic => &["/usr/local/lib", "/usr/lib"],
+        (Some(PLATFORM_MACOS), false) => &["/usr/lib"],
+        (Some(PLATFORM_MACOS), true) if classic => {
+            &["/Library/Frameworks", "/System/Library/Frameworks"]
+        }
+        (Some(_), true) => &["/System/Library/Frameworks"],
+        (
+            Some(
+                PLATFORM_IOS | PLATFORM_WATCHOS | PLATFORM_TVOS | PLATFORM_BRIDGEOS
+                | PLATFORM_VISIONOS,
+            ),
+            false,
+        ) => &["/usr/local/lib", "/usr/lib"],
+        (
+            Some(
+                PLATFORM_IOSSIMULATOR
+                | PLATFORM_TVOSSIMULATOR
+                | PLATFORM_WATCHOSSIMULATOR
+                | PLATFORM_VISIONOSSIMULATOR
+                | PLATFORM_MACCATALYST,
+            ),
+            false,
+        ) => &["/usr/local/lib"],
+        (Some(_), false) => &[],
+    };
+    dirs.iter()
+        .map(|dir| (dir.to_string(), DepMode::SystemDirs))
+        .collect()
 }
 
 // The @rpath load path DEPENDENCY with the run-path entry RPATH in place of
@@ -917,15 +986,15 @@ fn suffix_variants(suffixes: Option<&str>, path: &str) -> Vec<String> {
 // The locations searched for a not found dependency, printed in verbose mode.
 fn searched_locations(
     config: &Config,
-    rpaths: &[String],
+    requester: &Requester,
     dependency: &str,
     preload: bool,
 ) -> Vec<String> {
     let mut searched = Vec::new();
-    if dependency.starts_with("@rpath/") && !preload && rpaths.is_empty() {
+    if dependency.starts_with("@rpath/") && !preload && requester.rpaths.is_empty() {
         searched.push(format!("{dependency} (empty run-path list)"));
     }
-    for (candidate, _) in candidate_paths(config, rpaths, dependency, preload) {
+    for (candidate, _) in candidate_paths(config, requester, dependency, preload) {
         for variant in suffix_variants(config.env.image_suffix.as_deref(), &candidate) {
             let cryptex = cryptex_path(Path::new(&variant));
             searched.push(variant);
@@ -1253,26 +1322,91 @@ fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
         }
     }
 
-    info.platforms = platforms.iter().map(|platform| platform.id).collect();
+    info.platforms = platforms
+        .iter()
+        .map(|platform| (platform.id, platform.sdk_version))
+        .collect();
     info.platform = format_platforms(platforms);
     Ok(info)
 }
 
-// Whether an image is built for macOS, the way dyld combines its platform
-// load commands (PlatformAndVersions::zip): the first one sets the
-// platform, which a macOS and a Mac Catalyst pair turns into a zippered
-// image loadable in both, and any other platform after it is ignored.  An
-// image without any is taken as a macOS one on the Intel and arm64
-// architectures (UnsafeHeader::forEachPlatformLoadCommand).
+// The platform of an image, along with its SDK version, the way dyld
+// combines its platform load commands (PlatformAndVersions::zip): the first
+// one sets the platform, which a macOS and a Mac Catalyst pair turns into a
+// zippered image loadable in both, and any other platform after it is
+// ignored.  An image without any is taken as a macOS one on the Intel and
+// arm64 architectures (UnsafeHeader::forEachPlatformLoadCommand).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ImagePlatform {
+    None,
+    Single(Platform, Version),
+    // The macOS and the Mac Catalyst SDK versions.
+    Zippered(Version, Version),
+}
+
+impl ImagePlatform {
+    fn new(info: &MachOInfo) -> ImagePlatform {
+        use ImagePlatform::*;
+        if info.platforms.is_empty() {
+            return match info.cputype {
+                CPU_TYPE_X86_64 | CPU_TYPE_X86 => Single(PLATFORM_MACOS, Version::new(10, 5, 0)),
+                CPU_TYPE_ARM64 => Single(PLATFORM_MACOS, Version::new(11, 0, 0)),
+                _ => None,
+            };
+        }
+        info.platforms
+            .iter()
+            .fold(None, |current, &(platform, sdk)| {
+                match (current, platform) {
+                    (None, _) => Single(platform, sdk),
+                    (Single(id, _), _) if id == platform => Single(platform, sdk),
+                    (Single(PLATFORM_MACOS, macos), PLATFORM_MACCATALYST) => Zippered(macos, sdk),
+                    (Single(PLATFORM_MACCATALYST, catalyst), PLATFORM_MACOS) => {
+                        Zippered(sdk, catalyst)
+                    }
+                    (Zippered(_, catalyst), PLATFORM_MACOS) => Zippered(sdk, catalyst),
+                    (Zippered(macos, _), PLATFORM_MACCATALYST) => Zippered(macos, sdk),
+                    (current, _) => current,
+                }
+            })
+    }
+
+    // The process platform, a zippered image running as a macOS one.
+    fn platform(self) -> Option<Platform> {
+        match self {
+            ImagePlatform::None => None,
+            ImagePlatform::Single(platform, _) => Some(platform),
+            ImagePlatform::Zippered(_, _) => Some(PLATFORM_MACOS),
+        }
+    }
+}
+
+// Whether an image is built for macOS, zippered images included.
 fn built_for_macos(info: &MachOInfo) -> bool {
-    match info.platforms.first() {
-        None => matches!(
-            info.cputype,
-            CPU_TYPE_X86_64 | CPU_TYPE_X86 | CPU_TYPE_ARM64
-        ),
-        Some(&PLATFORM_MACOS) => true,
-        Some(&PLATFORM_MACCATALYST) => info.platforms.contains(&PLATFORM_MACOS),
-        Some(_) => false,
+    matches!(
+        ImagePlatform::new(info),
+        ImagePlatform::Single(PLATFORM_MACOS, _) | ImagePlatform::Zippered(_, _)
+    )
+}
+
+// Whether an image was built with an SDK older than the 2022 releases
+// (macOS 14, iOS 17, and so on), which dyld records as the pre2022Binary
+// Loader flag (MachOFile::enforceFormat with Malformed::sdkOnOrAfter2022),
+// and for which it still searches the default fallback directories.
+fn pre_2022(info: &MachOInfo) -> bool {
+    let enforced = |platform: Platform, sdk: Version| match platform {
+        PLATFORM_MACOS => sdk.0 >= 0x000E_0000,
+        PLATFORM_IOS | PLATFORM_TVOS | PLATFORM_MACCATALYST => sdk.0 >= 0x0011_0000,
+        PLATFORM_WATCHOS => sdk.0 >= 0x000A_0000,
+        PLATFORM_VISIONOS | PLATFORM_VISIONOSSIMULATOR => sdk.0 >= 0x0002_0000,
+        _ => true,
+    };
+    !match ImagePlatform::new(info) {
+        ImagePlatform::None => false,
+        ImagePlatform::Single(platform, sdk) => enforced(platform, sdk),
+        ImagePlatform::Zippered(macos, catalyst) => {
+            enforced(PLATFORM_MACOS, macos) || enforced(PLATFORM_MACCATALYST, catalyst)
+        }
     }
 }
 
@@ -1301,6 +1435,7 @@ fn format_platforms(platforms: Vec<PlatformInfo>) -> Option<String> {
 // load command.
 struct PlatformInfo {
     id: Platform,
+    sdk_version: Version,
     name: String,
     min: String,
     sdk: String,
@@ -1466,6 +1601,7 @@ fn parse_load_command<Mach: MachHeader>(
         )?)),
         LoadCommandVariant::BuildVersion(x, _) => Some(LoadCommand::Platform(PlatformInfo {
             id: x.platform.get(endian),
+            sdk_version: x.sdk.get(endian),
             name: platform_name(x.platform.get(endian)),
             min: format_os_version(x.minos.get(endian)),
             sdk: format_os_version(x.sdk.get(endian)),
@@ -1481,8 +1617,15 @@ fn parse_load_command<Mach: MachHeader>(
                 LC_VERSION_MIN_WATCHOS => (PLATFORM_WATCHOS, "watchOS"),
                 _ => (Platform(0), "unknown"),
             };
+            // The original LC_VERSION_MIN_MACOSX had no SDK version, which
+            // dyld takes as the minimum one.
+            let sdk_version = match (id, x.sdk.get(endian)) {
+                (PLATFORM_MACOS, Version(0)) => x.version.get(endian),
+                (_, sdk) => sdk,
+            };
             Some(LoadCommand::Platform(PlatformInfo {
                 id,
+                sdk_version,
                 name: platform.to_string(),
                 min: format_os_version(x.version.get(endian)),
                 sdk: format_os_version(x.sdk.get(endian)),
@@ -1856,13 +1999,269 @@ mod tests {
         )
     }
 
-    #[test]
-    fn macos_platform() {
-        let info = |cputype, platforms: &[Platform]| MachOInfo {
+    // An image of CPUTYPE with the platform load commands PLATFORMS, and the
+    // SDK version 14.0.
+    fn platform_info(cputype: CpuType, platforms: &[Platform]) -> MachOInfo {
+        platform_sdk_info(
+            cputype,
+            &platforms
+                .iter()
+                .map(|platform| (*platform, Version::new(14, 0, 0)))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn platform_sdk_info(cputype: CpuType, platforms: &[(Platform, Version)]) -> MachOInfo {
+        MachOInfo {
             cputype,
             platforms: platforms.to_vec(),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn image_platform() {
+        let (v13, v14, v17) = (
+            Version::new(13, 0, 0),
+            Version::new(14, 0, 0),
+            Version::new(17, 0, 0),
+        );
+        let platform = |platforms: &[(Platform, Version)]| {
+            ImagePlatform::new(&platform_sdk_info(CPU_TYPE_ARM64, platforms))
         };
+        assert_eq!(
+            ImagePlatform::new(&platform_info(CPU_TYPE_X86_64, &[])),
+            ImagePlatform::Single(PLATFORM_MACOS, Version::new(10, 5, 0))
+        );
+        assert_eq!(
+            ImagePlatform::new(&platform_info(CPU_TYPE_POWERPC, &[])),
+            ImagePlatform::None
+        );
+        assert_eq!(
+            platform(&[(PLATFORM_MACOS, v13), (PLATFORM_MACCATALYST, v17)]),
+            ImagePlatform::Zippered(v13, v17)
+        );
+        assert_eq!(
+            platform(&[
+                (PLATFORM_MACCATALYST, v17),
+                (PLATFORM_IOS, v14),
+                (PLATFORM_MACOS, v13)
+            ]),
+            ImagePlatform::Zippered(v13, v17)
+        );
+        assert_eq!(
+            platform(&[(PLATFORM_IOS, v14), (PLATFORM_IOS, v17)]),
+            ImagePlatform::Single(PLATFORM_IOS, v17)
+        );
+        assert_eq!(
+            platform(&[(PLATFORM_IOS, v14), (PLATFORM_MACOS, v17)]),
+            ImagePlatform::Single(PLATFORM_IOS, v14)
+        );
+        assert_eq!(
+            platform(&[(PLATFORM_MACOS, v13), (PLATFORM_MACCATALYST, v17)]).platform(),
+            Some(PLATFORM_MACOS)
+        );
+    }
+
+    #[test]
+    fn pre_2022_images() {
+        let version = |major, minor| Version::new(major, minor, 0);
+        for (cputype, platforms, expected) in [
+            // Without any platform load command, an old macOS binary.
+            (CPU_TYPE_X86_64, vec![], true),
+            (CPU_TYPE_ARM64, vec![], true),
+            (CPU_TYPE_POWERPC, vec![], true),
+            (CPU_TYPE_ARM64, vec![(PLATFORM_MACOS, version(13, 3))], true),
+            (
+                CPU_TYPE_ARM64,
+                vec![(PLATFORM_MACOS, version(14, 0))],
+                false,
+            ),
+            (CPU_TYPE_ARM64, vec![(PLATFORM_IOS, version(16, 4))], true),
+            (CPU_TYPE_ARM64, vec![(PLATFORM_IOS, version(17, 0))], false),
+            (
+                CPU_TYPE_ARM64,
+                vec![(PLATFORM_MACCATALYST, version(16, 0))],
+                true,
+            ),
+            (
+                CPU_TYPE_ARM64,
+                vec![(PLATFORM_WATCHOS, version(9, 0))],
+                true,
+            ),
+            (
+                CPU_TYPE_ARM64,
+                vec![(PLATFORM_WATCHOS, version(10, 0))],
+                false,
+            ),
+            (
+                CPU_TYPE_ARM64,
+                vec![(PLATFORM_VISIONOS, version(1, 0))],
+                true,
+            ),
+            (
+                CPU_TYPE_ARM64,
+                vec![(PLATFORM_DRIVERKIT, version(19, 0))],
+                false,
+            ),
+            (
+                CPU_TYPE_ARM64,
+                vec![(PLATFORM_IOSSIMULATOR, version(13, 0))],
+                false,
+            ),
+            // Zippered, the new Mac Catalyst SDK is enough.
+            (
+                CPU_TYPE_ARM64,
+                vec![
+                    (PLATFORM_MACOS, version(13, 0)),
+                    (PLATFORM_MACCATALYST, version(17, 0)),
+                ],
+                false,
+            ),
+            (
+                CPU_TYPE_ARM64,
+                vec![
+                    (PLATFORM_MACOS, version(13, 0)),
+                    (PLATFORM_MACCATALYST, version(16, 0)),
+                ],
+                true,
+            ),
+        ] {
+            let info = platform_sdk_info(cputype, &platforms);
+            assert_eq!(pre_2022(&info), expected, "{platforms:?}");
+        }
+    }
+
+    // The candidate paths of DEPENDENCY for a requester that takes the
+    // default fallback directories (DEFAULTS), in a process of PLATFORM.
+    fn candidates(
+        platform: Option<Platform>,
+        security: Security,
+        vars: &DyldVars,
+        dependency: &str,
+        defaults: bool,
+    ) -> Vec<(String, DepMode)> {
+        let arch = Arch::process(CPU_TYPE_X86_64, CpuSubtype(3), MH_EXECUTE);
+        let cache = DyldCache::default();
+        let env = DyldEnv::new(vars);
+        let config = Config {
+            arch: &arch,
+            macos: platform == Some(PLATFORM_MACOS),
+            platform,
+            security,
+            cache: &cache,
+            executable_path: "/exe",
+            env: &env,
+            all: true,
+            depth: 0,
+            ignore_prefix: &[],
+        };
+        let requester = Requester {
+            place: Place { node: 0, level: 0 },
+            loader_path: "/exe",
+            rpaths: &[],
+            default_fallbacks: defaults,
+        };
+        candidate_paths(&config, &requester, dependency, false)
+    }
+
+    #[test]
+    fn default_fallbacks() {
+        let vars = DyldVars::default();
+        let dylib = "/opt/lib/libfoo.dylib";
+        let framework = "/opt/F/Foo.framework/Versions/A/Foo";
+        let restricted = Security {
+            restricted: Some("test"),
+        };
+        let paths = |platform, security, dependency, defaults| {
+            candidates(platform, security, &vars, dependency, defaults)
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect::<Vec<String>>()
+        };
+        let macos = Some(PLATFORM_MACOS);
+        let open = Security::default();
+        // Only for a pre-2022 requester.
+        assert_eq!(paths(macos, open, dylib, false), [dylib]);
+        assert_eq!(
+            paths(macos, open, dylib, true),
+            [
+                dylib,
+                "/usr/local/lib/libfoo.dylib",
+                "/usr/lib/libfoo.dylib"
+            ]
+        );
+        assert_eq!(
+            candidates(macos, open, &vars, dylib, true)[1].1,
+            DepMode::SystemDirs
+        );
+        assert_eq!(
+            paths(macos, restricted, dylib, true),
+            [dylib, "/usr/lib/libfoo.dylib"]
+        );
+        assert_eq!(
+            paths(macos, open, framework, true),
+            [
+                framework,
+                "/Library/Frameworks/Foo.framework/Versions/A/Foo",
+                "/System/Library/Frameworks/Foo.framework/Versions/A/Foo"
+            ]
+        );
+        assert_eq!(
+            paths(macos, restricted, framework, true),
+            [
+                framework,
+                "/System/Library/Frameworks/Foo.framework/Versions/A/Foo"
+            ]
+        );
+        // The load path itself is not tried again.
+        assert_eq!(
+            paths(macos, open, "/usr/lib/libz.dylib", true),
+            ["/usr/lib/libz.dylib", "/usr/local/lib/libz.dylib"]
+        );
+        // The other platforms.
+        assert_eq!(
+            paths(Some(PLATFORM_IOS), open, dylib, true),
+            [
+                dylib,
+                "/usr/local/lib/libfoo.dylib",
+                "/usr/lib/libfoo.dylib"
+            ]
+        );
+        assert_eq!(
+            paths(Some(PLATFORM_MACCATALYST), open, dylib, true),
+            [dylib, "/usr/local/lib/libfoo.dylib"]
+        );
+        assert_eq!(
+            paths(Some(PLATFORM_MACCATALYST), open, framework, true),
+            [
+                framework,
+                "/System/Library/Frameworks/Foo.framework/Versions/A/Foo"
+            ]
+        );
+        assert_eq!(paths(Some(PLATFORM_DRIVERKIT), open, dylib, true), [dylib]);
+        assert_eq!(paths(None, open, dylib, true), [dylib]);
+
+        // A DYLD_FALLBACK_LIBRARY_PATH replaces them, for any requester.
+        let dir = Scratch::new("fallbacks");
+        let custom = DyldVars {
+            fallback_library_path: dir.path(""),
+            ..Default::default()
+        };
+        for defaults in [false, true] {
+            assert_eq!(
+                candidates(macos, open, &custom, dylib, defaults),
+                [
+                    (dylib.to_string(), DepMode::Direct),
+                    (dir.path("libfoo.dylib"), DepMode::LdFallbackLibraryPath)
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn macos_platform() {
+        let info = platform_info;
         let (macos, catalyst, ios) = (PLATFORM_MACOS, PLATFORM_MACCATALYST, PLATFORM_IOS);
         for (image, expected) in [
             (info(CPU_TYPE_X86_64, &[]), true),

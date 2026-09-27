@@ -462,6 +462,20 @@ def expand(path, directory):
     return path
 
 
+def default_fallbacks(loadpath):
+    """The default fallback candidates dyld searches for a dependency of a
+    pre-2022 image when no other candidate provides it (fallback_directories
+    in src/macho.rs): the framework partial path below /Library/Frameworks and
+    /System/Library/Frameworks, or the leaf name below /usr/local/lib and
+    /usr/lib."""
+    leaf = loadpath.rsplit("/", 1)[-1]
+    idx = loadpath.rfind(".framework/")
+    start = loadpath.rfind("/", 0, idx) + 1 if idx >= 0 else 0
+    if idx >= 0 and loadpath[start:idx] == leaf:
+        return ["%s/%s" % (d, loadpath[start:]) for d in ("/Library/Frameworks", "/System/Library/Frameworks")]
+    return ["%s/%s" % (d, leaf) for d in ("/usr/local/lib", "/usr/lib")]
+
+
 def check_dependency(loadpath, dep, rpaths, directory, dyld_info, process):
     """(kind, detail) when the rldd entry is not what the recorded load path
     leads to, ('gap', path) for a cache image the listing lacks, or None."""
@@ -488,6 +502,8 @@ def check_dependency(loadpath, dep, rpaths, directory, dyld_info, process):
     if expected is None:
         if mode == "dyld cache" and dyld_info_knows(dyld_info, path):
             return ("gap", path)
+        if mode == "system default paths" and any(same_path(path, c) for c in default_fallbacks(loadpath)):
+            return None
         return ("path", "%s resolved to %s, which no location provides" % (loadpath, path))
     candidate, location = expected
     if not same_path(path, candidate):
