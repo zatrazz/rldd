@@ -1,6 +1,5 @@
 use std::io::Error;
 use std::path::{Path, PathBuf};
-use std::str;
 
 use object::macho::*;
 use object::read::macho::*;
@@ -724,32 +723,41 @@ fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
     let mut info = MachOInfo::default();
     let mut platforms = Vec::new();
 
-    if let Ok(endian) = header.endian() {
-        // Thin objects are only checked when the architecture was explicitly
-        // requested, so foreign binaries (e.g. x86_64 ones under Rosetta)
-        // can still be inspected without the --arch option.
-        if arch.explicit() && !arch.matches_cputype(header.cputype(endian)) {
-            return Err(format!(
-                "file does not contain architecture {}",
-                arch.name()
-            ));
-        }
-        if let Ok(mut commands) = header.load_commands(endian, data, offset) {
-            while let Ok(Some(command)) = commands.next() {
-                match parse_load_command::<Mach>(endian, command) {
-                    Some(LoadCommand::Dylib(dep)) => info.deps.push(dep),
-                    Some(LoadCommand::Rpath(path)) => {
-                        let path = path
-                            .replace("@executable_path", executable_path)
-                            .replace("@loader_path", loader_path);
-                        info.rpath.add_path(path.as_str());
-                    }
-                    Some(LoadCommand::Id(name)) => info.id = Some(name),
-                    Some(LoadCommand::Platform(platform)) => platforms.push(platform),
-                    Some(LoadCommand::Uuid(uuid)) => info.uuid = Some(uuid),
-                    None => {}
-                }
+    let endian = header
+        .endian()
+        .map_err(|_| "Invalid Mach-O object".to_string())?;
+    // Thin objects are only checked when the architecture was explicitly
+    // requested, so foreign binaries (e.g. x86_64 ones under Rosetta) can
+    // still be inspected without the --arch option.
+    if arch.explicit() && !arch.matches_cputype(header.cputype(endian)) {
+        return Err(format!(
+            "file does not contain architecture {}",
+            arch.name()
+        ));
+    }
+    // Like dyld (UnsafeHeader::validStructureLoadCommands), a load command
+    // table past the end of the image, a command smaller than its header or
+    // extending past the table, and a string outside its command make the
+    // image invalid, instead of silently shortening the dependency list.
+    let mut commands = header
+        .load_commands(endian, data, offset)
+        .map_err(|_| "load commands exceed the length of the file".to_string())?;
+    while let Some(command) = commands
+        .next()
+        .map_err(|_| "malformed load command".to_string())?
+    {
+        match parse_load_command::<Mach>(endian, command)? {
+            Some(LoadCommand::Dylib(dep)) => info.deps.push(dep),
+            Some(LoadCommand::Rpath(path)) => {
+                let path = path
+                    .replace("@executable_path", executable_path)
+                    .replace("@loader_path", loader_path);
+                info.rpath.add_path(path.as_str());
             }
+            Some(LoadCommand::Id(name)) => info.id = Some(name),
+            Some(LoadCommand::Platform(platform)) => platforms.push(platform),
+            Some(LoadCommand::Uuid(uuid)) => info.uuid = Some(uuid),
+            None => {}
         }
     }
 
@@ -794,8 +802,20 @@ enum LoadCommand {
     Uuid(String),
 }
 
-fn parse_string(data: Option<&[u8]>) -> Option<String> {
-    data.and_then(|s| str::from_utf8(s).ok().map(|s| s.to_string()))
+// A load command string (a dependency, the install name, or a run-path
+// entry).  An offset outside the command, or a string without its
+// terminator, makes the image invalid (stringOverflow in dyld).  dyld takes
+// any byte sequence as a path, so one that is not valid UTF-8 is kept with
+// the invalid sequences replaced, rather than dropping the dependency.
+fn parse_string<Mach: MachHeader>(
+    endian: Mach::Endian,
+    command: &LoadCommandData<Mach::Endian>,
+    string: LcStr<Mach::Endian>,
+) -> Result<String, String> {
+    command
+        .string(endian, string)
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .map_err(|_| "load command string extends beyond the end of the command".to_string())
 }
 
 // Format a Mach-O version number the way otool -L does (X.Y.Z).
@@ -883,16 +903,21 @@ fn dylib_attributes<Mach: MachHeader>(
     attrs
 }
 
+// Parse the load commands rldd reports.  A command too small for its
+// structure makes the image invalid, like dyld does for the sizes it checks.
 fn parse_load_command<Mach: MachHeader>(
     endian: Mach::Endian,
     command: LoadCommandData<Mach::Endian>,
-) -> Option<LoadCommand> {
-    match command.variant().ok()? {
+) -> Result<Option<LoadCommand>, String> {
+    let variant = command
+        .variant()
+        .map_err(|_| "malformed load command".to_string())?;
+    Ok(match variant {
         LoadCommandVariant::Dylib(x) => {
             if command.cmd() == LC_LAZY_LOAD_DYLIB {
-                return None;
+                return Ok(None);
             }
-            let name = parse_string(command.string(endian, x.dylib.name).ok())?;
+            let name = parse_string::<Mach>(endian, &command, x.dylib.name)?;
             Some(LoadCommand::Dylib(MachODep {
                 name,
                 attrs: dylib_attributes::<Mach>(endian, &command, x),
@@ -903,14 +928,14 @@ fn parse_load_command<Mach: MachHeader>(
                 )),
             }))
         }
-        LoadCommandVariant::IdDylib(x) => {
-            let name = parse_string(command.string(endian, x.dylib.name).ok())?;
-            Some(LoadCommand::Id(name))
-        }
-        LoadCommandVariant::Rpath(x) => {
-            let path = parse_string(command.string(endian, x.path).ok())?;
-            Some(LoadCommand::Rpath(path))
-        }
+        LoadCommandVariant::IdDylib(x) => Some(LoadCommand::Id(parse_string::<Mach>(
+            endian,
+            &command,
+            x.dylib.name,
+        )?)),
+        LoadCommandVariant::Rpath(x) => Some(LoadCommand::Rpath(parse_string::<Mach>(
+            endian, &command, x.path,
+        )?)),
         LoadCommandVariant::BuildVersion(x, _) => Some(LoadCommand::Platform(PlatformInfo {
             name: platform_name(x.platform.get(endian)),
             min: format_os_version(x.minos.get(endian)),
@@ -932,7 +957,7 @@ fn parse_load_command<Mach: MachHeader>(
         }
         LoadCommandVariant::Uuid(x) => Some(LoadCommand::Uuid(format_uuid(&x.uuid))),
         _ => None,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1024,6 +1049,71 @@ mod tests {
 
     fn parse(data: &[u8], arch: &Arch) -> Result<MachOInfo, String> {
         parse_object(data, arch, "/exe", "/loader")
+    }
+
+    fn dep_names(info: &MachOInfo) -> Vec<&str> {
+        info.deps.iter().map(|dep| dep.name.as_str()).collect()
+    }
+
+    fn x86_64_dylib(cmds: &[Vec<u8>]) -> Vec<u8> {
+        macho(CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_ALL.0, MH_DYLIB, cmds)
+    }
+
+    #[test]
+    fn malformed_load_commands() {
+        let arch = Arch::new(None).unwrap();
+        let lib_a = dylib_command(LC_LOAD_DYLIB, "/usr/lib/libA.dylib");
+        let lib_b = dylib_command(LC_LOAD_WEAK_DYLIB, "/usr/lib/libB.dylib");
+
+        let good = x86_64_dylib(&[lib_a.clone(), lib_b.clone()]);
+        let info = parse(&good, &arch).unwrap();
+        assert_eq!(
+            dep_names(&info),
+            ["/usr/lib/libA.dylib", "/usr/lib/libB.dylib"]
+        );
+
+        // A command smaller than the load command header.
+        let short = x86_64_dylib(&[words(&[LC_LOAD_DYLIB.0, 4], false), lib_b.clone()]);
+        assert!(parse(&short, &arch).is_err());
+
+        // The load command table past the end of the file.
+        let mut past_eof = good.clone();
+        past_eof[20..24].copy_from_slice(&0x7fff_ffffu32.to_le_bytes());
+        assert!(parse(&past_eof, &arch).is_err());
+
+        // More commands than the table holds.
+        let mut too_many = good.clone();
+        too_many[16..20].copy_from_slice(&3u32.to_le_bytes());
+        assert!(parse(&too_many, &arch).is_err());
+
+        // A command extending past the table.
+        let mut too_large = lib_a.clone();
+        too_large[4..8].copy_from_slice(&(lib_a.len() as u32 + 8).to_le_bytes());
+        assert!(parse(&x86_64_dylib(&[too_large]), &arch).is_err());
+
+        // A name offset past the command size.
+        let mut bad_offset = lib_a.clone();
+        bad_offset[8..12].copy_from_slice(&4000u32.to_le_bytes());
+        assert!(parse(&x86_64_dylib(&[bad_offset, lib_b.clone()]), &arch).is_err());
+
+        // A name without its terminator.
+        let mut unterminated = lib_a.clone();
+        let len = unterminated.len();
+        unterminated[24..len].fill(b'a');
+        assert!(parse(&x86_64_dylib(&[unterminated, lib_b.clone()]), &arch).is_err());
+
+        // A dylib command too small for its structure.
+        let small = words(&[LC_LOAD_DYLIB.0, 16, 24, 0], false);
+        assert!(parse(&x86_64_dylib(&[small, lib_b.clone()]), &arch).is_err());
+
+        // A name that is not valid UTF-8 is still a dependency.
+        let mut latin1 = dylib_command(LC_LOAD_DYLIB, "/usr/lib/libX.dylib");
+        latin1[36] = 0xe9;
+        let info = parse(&x86_64_dylib(&[latin1, lib_b]), &arch).unwrap();
+        assert_eq!(
+            dep_names(&info),
+            ["/usr/lib/lib\u{fffd}.dylib", "/usr/lib/libB.dylib"]
+        );
     }
 
     #[test]
