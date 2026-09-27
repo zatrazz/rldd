@@ -62,14 +62,14 @@ loadable() {
     if [ -z "$ldso" ] || [ -e "$ldso" ]; then echo yes; else echo no; fi
 }
 
-# The 'name => path' lines of rldd -l, with each path replaced by the real
-# path the device linker reports.
+# The 'name => path' lines of rldd -l, which reports the real path of each
+# object the way the device linker does.
 rldd_list() {
     printf '%s\n' "$1" | while read -r name arrow path; do
         [ "$arrow" = "=>" ] || continue
         case $path in
         "not found"*) echo "$name => not found" ;;
-        *) echo "$name => $(readlink -f "$path" 2>/dev/null || echo "$path")" ;;
+        *) echo "$name => $path" ;;
         esac
     done | sort -u
 }
@@ -87,8 +87,9 @@ files=0
 errors=0
 same=0
 
-# Unquoted on purpose, the roots are globs for the device shell to expand.
-for f in $roots; do
+# Unquoted on purpose, the roots are globs for the device shell to expand,
+# and more than one may match a file.
+for f in $(printf '%s\n' $roots | sort -u); do
     [ -f "$f" ] || continue
     files=$((files + 1))
 

@@ -65,7 +65,11 @@ and whatever is current.
 Every object below `/system/bin`, `/system/lib*`, `/vendor/lib*`, the
 translation trees and the ART and runtime APEX binaries is resolved on the
 device with `rldd -l`, which prints the unique dependency list as one
-`name => path` per line, in a single adb round trip:
+`name => path` per line, in a single adb round trip.  The vendor, product
+and system_ext executables and the binaries of every APEX are resolved too
+when the shell can read them, which on a userdebug image takes an `adb root`
+before the run (the vendor section of the configuration is the one with the
+isolated namespaces).
 
 | Check | What it covers |
 | --- | --- |
@@ -84,9 +88,13 @@ what catches those.
 From Android 11 the linker lists what it loads for an executable
 (`linker64 --list`, which `/system/bin/ldd` runs) as `soname => real path`.
 With `-c` every executable the device can run is also listed that way, and the
-`name => path` pairs of rldd, with each path resolved with `readlink -f`, must
-be the same set.  An executable the linker fails to link because a library is
-missing compares as that library not found.
+`name => path` pairs of rldd must be the same set: rldd reports the real path
+of each object the way the linker does (the runtime APEX libc.so rather than
+the `/system/lib64` symlink to it), and a library loaded on two namespaces is
+listed once per namespace.  An executable the linker fails to link because a
+library is missing compares as that library not found.  A library without
+`DT_SONAME`, which the linker lists with an empty name, is taken by its file
+name.
 
 The differences are grouped by entry, `+` for one only rldd reports and `-` for
 one only the linker does, along with the number of executables it shows up on

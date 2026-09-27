@@ -259,6 +259,11 @@ check_sweep() {
     roots="$roots /vendor/lib/*.so /vendor/lib64/*.so"
     roots="$roots /system/bin/arm/* /system/bin/arm64/*"
     roots="$roots /apex/com.android.art/bin/* /apex/com.android.runtime/bin/*"
+    # The vendor executables and the /apex directory listing are only
+    # readable as root (adb root on a userdebug image), and the '@version'
+    # APEX mounts are left out.
+    roots="$roots /vendor/bin/* /vendor/bin/hw/* /system_ext/bin/* /product/bin/*"
+    roots="$roots /apex/*[!0-9]/bin/*"
 
     # The device linker lists the dependencies (--list) from Android 11 on.
     compare=
