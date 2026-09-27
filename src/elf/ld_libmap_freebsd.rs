@@ -174,6 +174,7 @@ pub fn parse_libmap<P: AsRef<Path>>(filename: &P) -> Option<LibMap> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tempdir::TempDir;
 
     fn parse_str(content: &str) -> LibMap {
         let mut libmap = LibMap::default();
@@ -240,5 +241,29 @@ mod tests {
             libmap.lookup("/usr/bin/prog", "libbar.so.1"),
             Some("libdefault.so.1")
         );
+    }
+
+    #[test]
+    fn parse_include() -> std::io::Result<()> {
+        let tmpdir = TempDir::new()?;
+        let included = tmpdir.path().join("included.conf");
+        fs::write(&included, "libbar.so.1 libincluded.so.1\n")?;
+        let conf = tmpdir.path().join("libmap.conf");
+        fs::write(
+            &conf,
+            format!("libfoo.so.1 libmain.so.1\ninclude {}\n", included.display()),
+        )?;
+
+        let libmap = parse_libmap(&conf).unwrap();
+        assert_eq!(
+            libmap.lookup("/bin/prog", "libfoo.so.1"),
+            Some("libmain.so.1")
+        );
+        assert_eq!(
+            libmap.lookup("/bin/prog", "libbar.so.1"),
+            Some("libincluded.so.1")
+        );
+        assert!(parse_libmap(&tmpdir.path().join("missing.conf")).is_none());
+        Ok(())
     }
 }

@@ -49,3 +49,48 @@ fn parse_line(line: &str) -> Option<String> {
     }
     Some(line.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tempdir::TempDir;
+    use std::fs;
+
+    #[test]
+    fn parse_directories() -> std::io::Result<()> {
+        let tmpdir = TempDir::new()?;
+        let lib1 = tmpdir.path().join("lib1");
+        fs::create_dir(&lib1)?;
+        let lib2 = tmpdir.path().join("lib2");
+        fs::create_dir(&lib2)?;
+        let (lib1, lib2) = (lib1.to_str().unwrap(), lib2.to_str().unwrap());
+        let missing = tmpdir.path().join("missing");
+
+        // The missing directory and the repeated one are not added.
+        let conf = tmpdir.path().join("ld.so.conf");
+        fs::write(
+            &conf,
+            format!(
+                "# comment\n\
+                 \n\
+                 \t {lib1}  # trailing comment\n\
+                 {}\n\
+                 {lib2}\n\
+                 {lib1}\n",
+                missing.display()
+            ),
+        )?;
+        let dirs = parse_ld_so_conf(&conf).unwrap();
+        assert_eq!(dirs.len(), 2);
+        assert_eq!(dirs[0], lib1);
+        assert_eq!(dirs[1], lib2);
+        Ok(())
+    }
+
+    #[test]
+    fn missing_file() -> std::io::Result<()> {
+        let tmpdir = TempDir::new()?;
+        assert!(parse_ld_so_conf(&tmpdir.path().join("ld.so.conf")).is_err());
+        Ok(())
+    }
+}

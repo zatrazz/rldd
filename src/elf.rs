@@ -20,19 +20,25 @@ mod android;
 mod interp;
 #[cfg(target_os = "android")]
 mod ld_config_txt;
-#[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
+// The BSD configuration file parsers are also built for the Linux tests, so
+// their unit tests run where CI does.
+#[cfg(any(
+    target_os = "freebsd",
+    target_os = "openbsd",
+    all(test, target_os = "linux")
+))]
 mod ld_hints;
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "freebsd", all(test, target_os = "linux")))]
 mod ld_hints_freebsd;
-#[cfg(target_os = "openbsd")]
+#[cfg(any(target_os = "openbsd", all(test, target_os = "linux")))]
 mod ld_hints_openbsd;
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "freebsd", all(test, target_os = "linux")))]
 mod ld_libmap_freebsd;
 #[cfg(target_os = "linux")]
 mod ld_preload;
 #[cfg(target_os = "linux")]
 mod ld_so_cache;
-#[cfg(target_os = "netbsd")]
+#[cfg(any(target_os = "netbsd", all(test, target_os = "linux")))]
 mod ld_so_conf_netbsd;
 mod loader;
 #[cfg(target_os = "linux")]

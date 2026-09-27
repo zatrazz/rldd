@@ -50,3 +50,57 @@ pub fn parse_ld_so_hints<P: AsRef<Path>>(filename: &P) -> Result<search_path::Se
 
     ld_hints::parse_dirlist(&dirlist, &[':', ';'])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tempdir::TempDir;
+    use std::fs;
+
+    // Write a hints file without any hash table entry, with DIRLIST as the
+    // directory list at the start of the string table.
+    fn write_hints(path: &Path, dirlist: &str) -> Result<()> {
+        let hdr_size = std::mem::size_of::<hints_header>() as i64;
+        let strtab = format!("{dirlist}\0");
+        let hdr = hints_header {
+            hh_magic: HH_MAGIC,
+            hh_version: LD_HINTS_VERSION_2,
+            hh_hashtab: hdr_size,
+            hh_nbucket: 0,
+            hh_strtab: hdr_size,
+            hh_strtab_sz: strtab.len() as i64,
+            hh_ehints: hdr_size + strtab.len() as i64,
+            hh_dirlist: 0,
+        };
+        let mut data = object::pod::bytes_of(&hdr).to_vec();
+        data.extend_from_slice(strtab.as_bytes());
+        fs::write(path, data)
+    }
+
+    #[test]
+    fn parse_dirlist() -> Result<()> {
+        let tmpdir = TempDir::new()?;
+        let lib1 = tmpdir.path().join("lib1");
+        fs::create_dir(&lib1)?;
+        let lib2 = tmpdir.path().join("lib2");
+        fs::create_dir(&lib2)?;
+        let (lib1, lib2) = (lib1.to_str().unwrap(), lib2.to_str().unwrap());
+
+        let hints = tmpdir.path().join("ld.so.hints");
+        write_hints(&hints, &format!("{lib1}:{lib2}"))?;
+        let dirs = parse_ld_so_hints(&hints)?;
+        assert_eq!(dirs.len(), 2);
+        assert_eq!(dirs[0], lib1);
+        assert_eq!(dirs[1], lib2);
+        Ok(())
+    }
+
+    #[test]
+    fn reject_empty_file() -> Result<()> {
+        let tmpdir = TempDir::new()?;
+        let hints = tmpdir.path().join("ld.so.hints");
+        fs::write(&hints, [])?;
+        assert!(parse_ld_so_hints(&hints).is_err());
+        Ok(())
+    }
+}
