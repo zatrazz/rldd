@@ -70,7 +70,7 @@ impl MachOContext {
         match self.cache.image(name)? {
             Some((data, offset)) => {
                 let loader_path = pathutils::get_path(&Path::new(name)).unwrap_or_default();
-                parse_object(data, offset, &self.arch, executable_path, &loader_path).ok()
+                parse_thin(data, offset, &self.arch, executable_path, &loader_path).ok()
             }
             None => Some(MachOInfo::default()),
         }
@@ -618,10 +618,38 @@ fn open_macho_file<P: AsRef<Path>>(
     let mmap = pathutils::map_file(filename)?;
 
     let loader_path = pathutils::get_path(filename).unwrap_or_default();
-    parse_object(&mmap, 0, arch, executable_path, &loader_path).map_err(Error::other)
+    parse_object(&mmap, arch, executable_path, &loader_path).map_err(Error::other)
 }
 
+// Parse a Mach-O file, either a thin image or a universal (FAT) file whose
+// slice for the architecture is then parsed.
 fn parse_object(
+    data: &[u8],
+    arch: &Arch,
+    executable_path: &str,
+    loader_path: &str,
+) -> Result<MachOInfo, String> {
+    match object::FileKind::parse(data).map_err(|_| "Failed to parse file".to_string())? {
+        object::FileKind::MachOFat32 => {
+            let fat = MachOFatFile32::parse(data)
+                .map_err(|_| "Invalid FAT Mach-O 32 object".to_string())?;
+            parse_macho_fat(data, fat.arches(), arch, executable_path, loader_path)
+        }
+        object::FileKind::MachOFat64 => {
+            let fat = MachOFatFile64::parse(data)
+                .map_err(|_| "Invalid FAT Mach-O 64 object".to_string())?;
+            parse_macho_fat(data, fat.arches(), arch, executable_path, loader_path)
+        }
+        _ => parse_thin(data, 0, arch, executable_path, loader_path),
+    }
+}
+
+// Parse the thin Mach-O image at OFFSET: a file, the slice of a universal
+// file, or an image of the dyld cache.  Like dyld (MachOFile::compatibleSlice
+// only accepts a slice with the MH_MAGIC header) and lipo, a universal file
+// is not accepted as a slice of another one, which would otherwise recurse
+// without end on a slice covering the whole file.
+fn parse_thin(
     data: &[u8],
     offset: u64,
     arch: &Arch,
@@ -641,15 +669,8 @@ fn parse_object(
                 .map_err(|_| "Invalid Mach-O 64 object".to_string())?;
             parse_macho(header, data, offset, arch, executable_path, loader_path)
         }
-        object::FileKind::MachOFat32 => {
-            let fat = MachOFatFile32::parse(data)
-                .map_err(|_| "Invalid FAT Mach-O 32 object".to_string())?;
-            parse_macho_fat(data, fat.arches(), arch, executable_path, loader_path)
-        }
-        object::FileKind::MachOFat64 => {
-            let fat = MachOFatFile64::parse(data)
-                .map_err(|_| "Invalid FAT Mach-O 64 object".to_string())?;
-            parse_macho_fat(data, fat.arches(), arch, executable_path, loader_path)
+        object::FileKind::MachOFat32 | object::FileKind::MachOFat64 => {
+            Err("slice is not a valid Mach-O image".to_string())
         }
         _ => Err("Invalid object".to_string()),
     }
@@ -668,7 +689,7 @@ fn parse_macho_fat<FatArch: object::read::macho::FatArch>(
         for slice in arches {
             if arch.matches_slice(slice.cputype(), slice.cpusubtype(), exact) {
                 if let Ok(fatdata) = slice.data(data) {
-                    return parse_object(fatdata, 0, arch, executable_path, loader_path);
+                    return parse_thin(fatdata, 0, arch, executable_path, loader_path);
                 }
             }
         }
@@ -682,7 +703,7 @@ fn parse_macho_fat<FatArch: object::read::macho::FatArch>(
             .or_else(|| arches.first());
         if let Some(slice) = fallback {
             if let Ok(fatdata) = slice.data(data) {
-                return parse_object(fatdata, 0, arch, executable_path, loader_path);
+                return parse_thin(fatdata, 0, arch, executable_path, loader_path);
             }
         }
     }
@@ -917,6 +938,129 @@ fn parse_load_command<Mach: MachHeader>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn words(fields: &[u32], big_endian: bool) -> Vec<u8> {
+        fields
+            .iter()
+            .flat_map(|field| {
+                if big_endian {
+                    field.to_be_bytes()
+                } else {
+                    field.to_le_bytes()
+                }
+            })
+            .collect()
+    }
+
+    // A thin 64-bit little endian Mach-O image with the CMDS load commands.
+    fn macho(cputype: CpuType, cpusubtype: u32, filetype: FileType, cmds: &[Vec<u8>]) -> Vec<u8> {
+        let sizeofcmds: usize = cmds.iter().map(Vec::len).sum();
+        let mut image = words(
+            &[
+                MH_MAGIC_64,
+                cputype.0,
+                cpusubtype,
+                filetype.0,
+                cmds.len() as u32,
+                sizeofcmds as u32,
+                0,
+                0,
+            ],
+            false,
+        );
+        cmds.iter().for_each(|cmd| image.extend_from_slice(cmd));
+        image
+    }
+
+    // A load command with a string (a dylib name or a run-path entry) at the
+    // end, padded to the 8 byte alignment.
+    fn string_command(cmd: LoadCommandType, fields: &[u32], string: &str) -> Vec<u8> {
+        let offset = 8 + 4 * (fields.len() as u32 + 1);
+        let mut bytes = string.as_bytes().to_vec();
+        bytes.push(0);
+        bytes.resize(
+            (offset as usize + bytes.len()).next_multiple_of(8) - offset as usize,
+            0,
+        );
+        let mut command = words(&[cmd.0, offset + bytes.len() as u32, offset], false);
+        command.extend(words(fields, false));
+        command.extend(bytes);
+        command
+    }
+
+    fn dylib_command(cmd: LoadCommandType, name: &str) -> Vec<u8> {
+        string_command(cmd, &[2, 0x10000, 0x10000], name)
+    }
+
+    const PAGE: usize = 0x4000;
+
+    // A universal file with the SLICES at page aligned offsets, recorded with
+    // the 32 or 64-bit FAT header.
+    fn fat(slices: &[(CpuType, u32, &[u8])], fat64: bool) -> Vec<u8> {
+        let mut file = words(
+            &[
+                if fat64 { FAT_MAGIC_64 } else { FAT_MAGIC },
+                slices.len() as u32,
+            ],
+            true,
+        );
+        for (i, (cputype, cpusubtype, image)) in slices.iter().enumerate() {
+            let offset = PAGE * (i + 1);
+            file.extend(words(&[cputype.0, *cpusubtype], true));
+            if fat64 {
+                file.extend((offset as u64).to_be_bytes());
+                file.extend((image.len() as u64).to_be_bytes());
+                file.extend(words(&[14, 0], true));
+            } else {
+                file.extend(words(&[offset as u32, image.len() as u32, 14], true));
+            }
+        }
+        for (i, (_, _, image)) in slices.iter().enumerate() {
+            file.resize(PAGE * (i + 1), 0);
+            file.extend_from_slice(image);
+        }
+        file
+    }
+
+    fn parse(data: &[u8], arch: &Arch) -> Result<MachOInfo, String> {
+        parse_object(data, arch, "/exe", "/loader")
+    }
+
+    #[test]
+    fn nested_fat_rejected() {
+        let arch = Arch::new(None).unwrap();
+        for fat64 in [false, true] {
+            // A single slice covering the whole file, which is then the FAT
+            // header again.
+            let (magic, header_size) = if fat64 {
+                (FAT_MAGIC_64, 8 + 32)
+            } else {
+                (FAT_MAGIC, 8 + 20)
+            };
+            let mut file = words(&[magic, 1, CPU_TYPE_X86_64.0, 3], true);
+            if fat64 {
+                file.extend(0u64.to_be_bytes());
+                file.extend((header_size as u64).to_be_bytes());
+                file.extend(words(&[0, 0], true));
+            } else {
+                file.extend(words(&[0, header_size, 0], true));
+            }
+            assert_eq!(file.len(), header_size as usize);
+            assert!(parse(&file, &arch).is_err());
+
+            // A universal file wrapped as the slice of another one.
+            let image = macho(
+                CPU_TYPE_X86_64,
+                CPU_SUBTYPE_X86_64_ALL.0,
+                MH_DYLIB,
+                &[dylib_command(LC_LOAD_DYLIB, "/usr/lib/libA.dylib")],
+            );
+            let inner = fat(&[(CPU_TYPE_X86_64, 3, &image)], fat64);
+            let outer = fat(&[(CPU_TYPE_X86_64, 3, &inner)], fat64);
+            assert!(parse(&inner, &arch).is_ok());
+            assert!(parse(&outer, &arch).is_err());
+        }
+    }
 
     #[test]
     fn rpath_expansion_trailing_slash() {
