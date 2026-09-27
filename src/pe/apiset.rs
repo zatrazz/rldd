@@ -63,9 +63,12 @@ impl ApiSetMap {
 //   if (len <= 4) return STATUS_INVALID_PARAMETER;
 //   if (wcsnicmp( name, L"api-", 4 ) && wcsnicmp( name, L"ext-", 4 ))
 //       return STATUS_INVALID_PARAMETER;
+// The prefix is compared as bytes, since the name may hold a character that
+// spans the fourth byte.
 pub fn is_apiset(name: &str) -> bool {
+    let name = name.as_bytes();
     name.len() > 4
-        && (name[..4].eq_ignore_ascii_case("api-") || name[..4].eq_ignore_ascii_case("ext-"))
+        && (name[..4].eq_ignore_ascii_case(b"api-") || name[..4].eq_ignore_ascii_case(b"ext-"))
 }
 
 // The namespace is indexed without the '.dll' suffix and without the trailing
@@ -277,6 +280,9 @@ mod tests {
         assert!(is_apiset("EXT-MS-Win-x-l1-1-0.dll"));
         assert!(!is_apiset("kernel32.dll"));
         assert!(!is_apiset("api-"));
+        // A multi-byte character over the prefix boundary.
+        assert!(!is_apiset("ñoñTIME140.dll"));
+        assert!(!is_apiset("apiñ-x.dll"));
     }
 
     #[test]

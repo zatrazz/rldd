@@ -894,10 +894,12 @@ fn parse_exports(table: &ExportTable) -> PeExports {
     exports
 }
 
-// The module of a forwarder string is recorded without the '.dll' suffix.
+// The module of a forwarder string is recorded without the '.dll' suffix.  The
+// suffix is checked on the bytes, which may not be valid UTF-8.
 fn forward_module(module: &[u8]) -> String {
+    let suffixed = module.len() > 4 && module[module.len() - 4..].eq_ignore_ascii_case(b".dll");
     let module = String::from_utf8_lossy(module).into_owned();
-    match module.len() > 4 && module[module.len() - 4..].eq_ignore_ascii_case(".dll") {
+    match suffixed {
         true => module,
         false => format!("{module}.dll"),
     }
@@ -1067,6 +1069,11 @@ mod tests {
         assert_eq!(forward_module(b"NTDLL"), "NTDLL.dll");
         assert_eq!(forward_module(b"ntdll.dll"), "ntdll.dll");
         assert_eq!(forward_module(b"NTDLL.DLL"), "NTDLL.DLL");
+        // A multi-byte character right before the suffix, and a name that is
+        // not UTF-8 at all.
+        assert_eq!(forward_module("ñoñ".as_bytes()), "ñoñ.dll");
+        assert_eq!(forward_module("abñ.dll".as_bytes()), "abñ.dll");
+        assert_eq!(forward_module(b"\xf1o\xf1"), "\u{fffd}o\u{fffd}.dll");
     }
 
     #[test]
