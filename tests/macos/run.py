@@ -20,11 +20,18 @@ from multiprocessing import Pool
 
 CRYPTEX = "/System/Volumes/Preboot/Cryptexes/OS"
 ATTRS = ("weak-link", "re-export", "upward", "delay-init")
-# The first of its cpu type in the fat header order, and the only one of a
-# thin object of another type.
-HOST_SLICES = {"arm64": ("arm64", "arm64e", "arm64e.v1"), "x86_64": ("x86_64", "x86_64h")}
 # Past this many walkers they only contend on the filesystem locks.
 WALKERS = 8
+
+CPU_ARM64, CPU_X86_64 = 0x0100000C, 0x01000007
+MH_EXECUTE, MH_DYLIB = 2, 6
+PLATFORM_MACOS, PLATFORM_MACCATALYST = 1, 6
+# The slice architectures, by cpu type and subtype, and the names dyld_info
+# prints for them.
+ARM64E, ARM64E_V1, ARM64, ARM64_V8 = (CPU_ARM64, 0x80000002), (CPU_ARM64, 0x81000002), (CPU_ARM64, 0), (CPU_ARM64, 1)
+X86_64, X86_64H = (CPU_X86_64, 3), (CPU_X86_64, 8)
+NAMES = {ARM64E: "arm64e", ARM64E_V1: "arm64e.v1", ARM64: "arm64", ARM64_V8: "arm64",
+         (CPU_ARM64, 2): "arm64e.old", X86_64: "x86_64", X86_64H: "x86_64h"}
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -186,6 +193,163 @@ def is_macho(path):
         return False
 
 
+# The platform of the LC_VERSION_MIN_* load commands.
+VERSION_MIN = {0x24: 1, 0x25: 2, 0x2F: 3, 0x30: 4}
+
+
+def image(f, offset):
+    """(cputype, cpusubtype, filetype, platforms) of the little endian
+    Mach-O image at OFFSET, the platforms in the load command order, or
+    None."""
+    f.seek(offset)
+    head = f.read(32)
+    if head[:4] not in (b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe"):
+        return None
+    cputype, subtype, filetype, ncmds, sizeofcmds = struct.unpack("<5I", head[4:24])
+    f.seek(offset + (32 if head[0] == 0xCF else 28))
+    cmds = f.read(sizeofcmds)
+    platforms = []
+    pos = 0
+    for _ in range(ncmds):
+        if pos + 8 > len(cmds):
+            break
+        cmd, size = struct.unpack("<2I", cmds[pos:pos + 8])
+        if cmd == 0x32 and pos + 12 <= len(cmds):
+            platforms.append(struct.unpack("<I", cmds[pos + 8:pos + 12])[0])
+        elif cmd in VERSION_MIN:
+            platforms.append(VERSION_MIN[cmd])
+        if size < 8:
+            break
+        pos += size
+    return cputype, subtype, filetype, platforms
+
+
+def file_slices(path):
+    """[((cputype, cpusubtype), image)] of a Mach-O file: its only image, or
+    each slice of a fat one with the architecture its header records."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(8)
+            if head[:4] not in FAT_MAGICS:
+                img = image(f, 0)
+                return [(tuple(img[:2]), img)] if img else []
+            count = struct.unpack(">I", head[4:8])[0]
+            if count == 0 or count >= 0x30:
+                return []
+            fat64 = head[:4] == b"\xca\xfe\xba\xbf"
+            entries = []
+            for _ in range(count):
+                if fat64:
+                    cputype, subtype, offset = struct.unpack(">IIQ", f.read(32)[:16])
+                else:
+                    cputype, subtype, offset = struct.unpack(">3I", f.read(20)[:12])
+                    # libtool leaves out the arm64e ABI version bits.
+                    if (cputype, subtype) == (CPU_ARM64, 2):
+                        subtype = ARM64E[1]
+                entries.append(((cputype, subtype), offset))
+            return [(arch, image(f, offset)) for arch, offset in entries]
+    except (OSError, struct.error):
+        return []
+
+
+def same_arch(a, b):
+    """The dyld Architecture equality, where the subtype capability bits
+    are ignored, but for the arm64e ABI version."""
+    if a[0] != b[0]:
+        return False
+    if a[0] == CPU_ARM64:
+        return a[1] == b[1]
+    return (a[1] & 0xFFFFFF) == (b[1] & 0xFFFFFF)
+
+
+def built_for_macos(cputype, platforms):
+    """Whether dyld takes an image as built for macOS: its first platform
+    is macOS, or it is a zippered one, and an image without any platform is
+    a macOS one on Intel and arm64."""
+    if not platforms:
+        return cputype in (CPU_X86_64, 7, CPU_ARM64)
+    return platforms[0] == PLATFORM_MACOS or (
+        platforms[0] == PLATFORM_MACCATALYST and PLATFORM_MACOS in platforms)
+
+
+HASWELL = False
+
+
+class Process:
+    """The architectures and platform of the process running an input,
+    which rldd checks each dependency candidate against (Arch::process in
+    src/macho/arch.rs, and loads_platform in src/macho.rs)."""
+
+    def __init__(self, arch, filetype, platforms):
+        cputype, subtype = arch
+        self.cputype = cputype
+        if cputype == CPU_ARM64:
+            keys_on = filetype == MH_EXECUTE and subtype & 0xFFFFFF == 2
+            self.graded = [ARM64E] if keys_on else [ARM64E, ARM64E_V1, ARM64, ARM64_V8]
+        elif cputype == CPU_X86_64:
+            self.graded = [X86_64H, X86_64] if subtype & 0xFFFFFF == 8 or HASWELL else [X86_64]
+        else:
+            self.graded = None
+        self.macos = (filetype == MH_EXECUTE and built_for_macos(cputype, platforms)
+                      and PLATFORM_MACCATALYST not in platforms)
+
+    def loads(self, path):
+        """Whether the process loads the file as a dependency: a dylib with
+        a slice of its architecture, built for macOS in a macOS process."""
+        slices = file_slices(path)
+        if self.graded is None:
+            best = next((s for s in slices if s[0][0] == self.cputype), None)
+        else:
+            best = next((s for g in self.graded for s in slices if same_arch(s[0], g)), None)
+        if best is None or best[1] is None:
+            return False
+        cputype, subtype, filetype, platforms = best[1]
+        if self.graded is not None and not any(same_arch((cputype, subtype), g) for g in self.graded):
+            return False
+        return filetype == MH_DYLIB and (not self.macos or built_for_macos(cputype, platforms))
+
+
+def launch_archs(host):
+    """The slices the host launches, best first (dyld
+    GradedArchitectures::currentLaunch)."""
+    if host == "arm64":
+        return [ARM64E, ARM64, X86_64]
+    if host == "x86_64":
+        return [X86_64H, X86_64] if HASWELL else [X86_64]
+    return []
+
+
+def input_slice(path, host, names):
+    """The dyld_info name of the slice rldd inspects and the process it
+    runs, the way Arch::input_slice selects it: the one the host launches,
+    then one of those architectures with other subtype bits, then another
+    subtype of their cpu type, and at last the first one.  An input that is
+    only in the dyld cache is a dylib of the host flavor."""
+    slices = [s for s in file_slices(path) if s[1]]
+    if not slices:
+        for arch in launch_archs(host):
+            if NAMES.get(arch) in names:
+                return NAMES[arch], Process(arch, MH_DYLIB, [])
+        return next(iter(names), None), None
+    chosen = slices[0]
+    for match in (same_arch,
+                  lambda a, b: a[0] == b[0] and a[1] & 0xFFFFFF == b[1] & 0xFFFFFF,
+                  lambda a, b: a[0] == b[0]):
+        found = next((s for arch in launch_archs(host) for s in slices if match(s[0], arch)), None)
+        if found:
+            chosen = found
+            break
+    cputype, subtype, filetype, platforms = chosen[1]
+    process = Process((cputype, subtype), filetype, platforms)
+    # A thin file has a single slice listed, whatever its name.
+    if len(slices) == 1:
+        return next(iter(names), None), process
+    arch = chosen[0]
+    if arch[0] != CPU_ARM64:
+        arch = (arch[0], arch[1] & 0xFFFFFF)
+    return NAMES.get(arch), process
+
+
 def walk(task):
     """The Mach-O files of a directory, or below it, without following
     symlinks."""
@@ -234,7 +398,8 @@ def find_objects(roots, jobs):
 
 # Where a load path leads to, in the dyld order: the cache with the literal
 # path, the filesystem, the OS cryptex, and for a recorded absolute path the
-# realpath looked up in the cache again.
+# realpath looked up in the cache again.  A file the process does not load
+# (another architecture, not a dylib, or another platform) is passed over.
 
 CACHE = set()
 
@@ -258,12 +423,13 @@ def realpath_leaf(path):
     return os.path.join(os.path.realpath(head), leaf)
 
 
-def where(candidate, recorded):
+def where(candidate, recorded, process):
+    loads = lambda path: os.path.exists(path) and (process is None or process.loads(path))
     if in_cache(candidate):
         return "cache"
-    if os.path.exists(candidate):
+    if loads(candidate):
         return "disk"
-    if os.path.exists(CRYPTEX + candidate):
+    if loads(CRYPTEX + candidate):
         return "cryptex"
     if recorded and in_cache(realpath_leaf(candidate)):
         return "realpath"
@@ -286,7 +452,7 @@ def expand(path, directory):
     return path
 
 
-def check_dependency(loadpath, dep, rpaths, directory, dyld_info):
+def check_dependency(loadpath, dep, rpaths, directory, dyld_info, process):
     """(kind, detail) when the rldd entry is not what the recorded load path
     leads to, ('gap', path) for a cache image the listing lacks, or None."""
     path, _, mode, found = dep
@@ -302,7 +468,7 @@ def check_dependency(loadpath, dep, rpaths, directory, dyld_info):
     else:
         return None  # A relative load path, too rare to model.
 
-    expected = next(((c, where(c, recorded)) for c in candidates if where(c, recorded)), None)
+    expected = next(((c, w) for c in candidates for w in [where(c, recorded, process)] if w), None)
     if not found:
         if path != loadpath:
             return ("path", "%s printed as %s" % (loadpath, path))
@@ -366,6 +532,11 @@ def main():
     if subprocess.run(["cargo", "build", "--release"], cwd=REPO_ROOT).returncode != 0:
         die("cargo build failed")
 
+    # dyld prefers the x86_64h slices on a Haswell or newer Intel host.
+    global HASWELL
+    host = platform.machine()
+    HASWELL = host == "x86_64" and run(["sysctl", "-n", "hw.cpusubtype"])[1].strip() == "8"
+
     CACHE.update(cache_images(dyld_info))
     roots = args.root or ["/bin", "/sbin", "/usr"]
     objects = find_objects(roots, args.jobs) + sorted(CACHE)
@@ -374,7 +545,6 @@ def main():
     if not objects:
         die("no object below %s" % ", ".join(roots))
 
-    host = HOST_SLICES.get(platform.machine(), ())
     lists = []
     paths = []
     panics = []
@@ -394,8 +564,8 @@ def main():
                 continue
             slices = collections.OrderedDict(
                 (name, s) for name, s in parse_dyld_info(dout).items() if s["linked"])
-            name = next((n for n in slices if n in host), next(iter(slices), None))
-            if name is None:
+            name, process = input_slice(path, host, slices)
+            if name not in slices:
                 unreadable += 1  # A relocatable object, a kernel, a Metal library.
                 continue
             ref = slices[name]
@@ -418,7 +588,7 @@ def main():
                         path, loadpath, " ".join(sorted(dep[1])), " ".join(sorted(attrs))))
                 if not dep[3]:
                     not_found[dep[0]] += 1
-                result = check_dependency(loadpath, dep, ref["rpaths"], directory, dyld_info)
+                result = check_dependency(loadpath, dep, ref["rpaths"], directory, dyld_info, process)
                 if result and result[0] == "gap":
                     gaps[result[1]] += 1
                 elif result:
