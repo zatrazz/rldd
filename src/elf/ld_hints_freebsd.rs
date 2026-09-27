@@ -32,8 +32,21 @@ const ELFHINTS_VERSION: u32 = 0x1;
 
 pub fn parse_ld_so_hints<P: AsRef<Path>>(filename: &P) -> Result<search_path::SearchPathVec> {
     // The loader does not limit the file size.
-    let (mut file, size, hdr) = ld_hints::open::<_, elfhints_hdr>(filename, u64::MAX)?;
+    let (mut file, size, mut hdr) = ld_hints::open::<_, elfhints_hdr>(filename, u64::MAX)?;
 
+    // gethints takes a file of either byte order (COND_SWAP), which ldconfig
+    // writes for another system.
+    if hdr.magic == ELFHINTS_MAGIC.swap_bytes() {
+        for field in [
+            &mut hdr.magic,
+            &mut hdr.version,
+            &mut hdr.strtab,
+            &mut hdr.dirlist,
+            &mut hdr.dirlistlen,
+        ] {
+            *field = field.swap_bytes();
+        }
+    }
     if hdr.magic != ELFHINTS_MAGIC {
         return Err(Error::other("Invalid ELFHINTS_MAGIC"));
     }
@@ -185,6 +198,33 @@ mod tests {
             }
             Err(e) => Err(Error::other(e)),
         }
+    }
+
+    // A hints file of the other byte order.
+    #[test]
+    fn parse_ld_so_hints_swapped() -> Result<()> {
+        let tmpdir = TempDir::new()?;
+        let filepath = tmpdir.path().join("ld-elf.so.hints");
+        let mut file = File::create(&filepath)?;
+        let libdir = tmpdir.path().join("lib1");
+        fs::create_dir(&libdir)?;
+        let libdir = libdir.to_str().unwrap();
+
+        write_hints(&mut file, libdir, |hdr| {
+            for field in [
+                &mut hdr.magic,
+                &mut hdr.version,
+                &mut hdr.strtab,
+                &mut hdr.dirlist,
+                &mut hdr.dirlistlen,
+            ] {
+                *field = field.swap_bytes();
+            }
+        })?;
+        let entries = parse_ld_so_hints(&filepath)?;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], libdir);
+        Ok(())
     }
 
     #[test]
