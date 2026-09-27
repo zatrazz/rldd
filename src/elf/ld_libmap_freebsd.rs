@@ -115,42 +115,76 @@ impl LibMap {
     }
 }
 
-fn parse_content(libmap: &mut LibMap, content: &str) {
+// The lmc_parse line buffer size (MAXPATHLEN + 13), the rest of a longer line
+// being skipped, and the section name one (MAXPATHLEN).
+const LINE_SIZE: usize = 1024 + 13;
+const SECTION_SIZE: usize = 1024;
+
+// The only blanks lmc_parse takes.
+fn is_blank(c: &u8) -> bool {
+    *c == b' ' || *c == b'\t'
+}
+
+fn trim_blanks(s: &[u8]) -> &[u8] {
+    let start = s.iter().position(|c| !is_blank(c)).unwrap_or(s.len());
+    let end = s
+        .iter()
+        .rposition(|c| !is_blank(c))
+        .map_or(start, |end| end + 1);
+    &s[start..end]
+}
+
+// The section name of a '[NAME]' selector line, given after the bracket,
+// where only blanks might surround NAME.
+fn parse_selector(selector: &[u8]) -> Option<String> {
+    let selector = trim_blanks(selector);
+    let end = selector
+        .iter()
+        .position(|c| is_blank(c) || *c == b']')
+        .unwrap_or(selector.len());
+    let (name, rest) = selector.split_at(end);
+    if name.is_empty() || name.len() >= SECTION_SIZE || trim_blanks(rest) != b"]" {
+        return None;
+    }
+    Some(String::from_utf8_lossy(name).into_owned())
+}
+
+// Parse the CONTENT lines the way lmc_parse does, on bytes: a mapping line has
+// exactly two words, and an invalid or empty selector does not change the
+// section.
+fn parse_content(libmap: &mut LibMap, content: &[u8]) {
     // The constraint state is local to each parsed file.
     let mut constraint: Option<String> = None;
 
-    for line in content.lines() {
-        let line = match line.find('#') {
-            Some(comment) => &line[..comment],
-            None => line,
-        };
-        let line = line.trim();
+    for line in content.split(|c| *c == b'\n') {
+        let line = &line[..line.len().min(LINE_SIZE - 1)];
+        // A comment, a NUL, or a carriage return ends the line.
+        let end = line
+            .iter()
+            .position(|c| matches!(c, b'#' | b'\0' | b'\r'))
+            .unwrap_or(line.len());
+        let line = trim_blanks(&line[..end]);
         if line.is_empty() {
             continue;
         }
 
-        if let Some(spec) = line.strip_prefix('[') {
-            if let Some(spec) = spec.strip_suffix(']') {
-                let spec = spec.trim();
-                constraint = if spec.is_empty() {
-                    None
-                } else {
-                    Some(spec.to_string())
-                };
+        if let Some(selector) = line.strip_prefix(b"[") {
+            if let Some(spec) = parse_selector(selector) {
+                constraint = Some(spec);
             }
             continue;
         }
 
-        let mut tokens = line.split_whitespace();
-        let (from, to) = match (tokens.next(), tokens.next()) {
-            (Some(from), Some(to)) => (from, to),
-            _ => continue,
+        let mut words = line.split(is_blank).filter(|word| !word.is_empty());
+        let (Some(from), Some(to), None) = (words.next(), words.next(), words.next()) else {
+            continue;
         };
+        let (from, to) = (String::from_utf8_lossy(from), String::from_utf8_lossy(to));
 
-        match from {
-            "includedir" => parse_dir(libmap, to),
-            "include" => parse_file(libmap, to),
-            _ => libmap.add_mapping(&constraint, from, to),
+        match from.as_ref() {
+            "includedir" => parse_dir(libmap, &to),
+            "include" => parse_file(libmap, &to),
+            _ => libmap.add_mapping(&constraint, &from, &to),
         }
     }
 }
@@ -172,8 +206,8 @@ fn parse_file(libmap: &mut LibMap, filename: &str) {
     if libmap.parsed.iter().any(|(_, parsed)| *parsed == id) {
         return;
     }
-    let mut content = String::new();
-    if file.read_to_string(&mut content).is_err() {
+    let mut content = Vec::new();
+    if file.read_to_end(&mut content).is_err() {
         return;
     }
     libmap.parsed.push((filename.to_string(), id));
@@ -221,7 +255,7 @@ mod tests {
 
     fn parse_str(content: &str) -> LibMap {
         let mut libmap = LibMap::default();
-        parse_content(&mut libmap, content);
+        parse_content(&mut libmap, content.as_bytes());
         libmap
     }
 
@@ -284,6 +318,60 @@ mod tests {
             libmap.lookup("/usr/bin/prog", "libbar.so.1"),
             Some("libdefault.so.1")
         );
+    }
+
+    // An empty or invalid selector keeps the current section.
+    #[test]
+    fn parse_invalid_selector() {
+        let libmap = parse_str(
+            "[prog]\n\
+             []\n\
+             [ ]\n\
+             [a b]\n\
+             [other]x\n\
+             [other\n\
+             libfoo.so.1 libprog.so.1\n\
+             [ prog2 ]  # comment\n\
+             libbar.so.1 libprog2.so.1\n",
+        );
+        assert_eq!(
+            libmap.lookup("/bin/prog", "libfoo.so.1"),
+            Some("libprog.so.1")
+        );
+        assert_eq!(libmap.lookup("/bin/other", "libfoo.so.1"), None);
+        assert_eq!(
+            libmap.lookup("/bin/prog2", "libbar.so.1"),
+            Some("libprog2.so.1")
+        );
+    }
+
+    // A mapping line has exactly two words, separated by blanks only, and a
+    // carriage return ends it like a comment.
+    #[test]
+    fn parse_mapping_words() {
+        let libmap = parse_str(
+            "libfoo.so.1 libbar.so.1 extra\n\
+             libbaz.so.1\n\
+             libqux.so.1\x0blibquux.so.1\n\
+             libcr.so.1 libcrlf.so.1\r\n\
+             libhash.so.1\tlibhash2.so.1#comment\n",
+        );
+        for name in ["libfoo.so.1", "libbaz.so.1", "libqux.so.1"] {
+            assert_eq!(libmap.lookup("/bin/x", name), None);
+        }
+        assert_eq!(libmap.lookup("/bin/x", "libcr.so.1"), Some("libcrlf.so.1"));
+        assert_eq!(
+            libmap.lookup("/bin/x", "libhash.so.1"),
+            Some("libhash2.so.1")
+        );
+    }
+
+    // The file is not required to be valid UTF-8.
+    #[test]
+    fn parse_invalid_utf8() {
+        let mut libmap = LibMap::default();
+        parse_content(&mut libmap, b"# caf\xe9\nlibfoo.so.1 libbar.so.1\n");
+        assert_eq!(libmap.lookup("/bin/x", "libfoo.so.1"), Some("libbar.so.1"));
     }
 
     #[test]
