@@ -9,8 +9,6 @@ use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-use crate::pathutils;
-
 #[derive(Debug, PartialEq)]
 enum ConstraintType {
     Exact,
@@ -183,7 +181,8 @@ fn parse_file(libmap: &mut LibMap, filename: &str) {
 }
 
 // Like lmc_parse_dir, a directory already parsed (with the same path) is
-// skipped.
+// skipped, and only its regular files (not the symbolic links) named *.conf
+// are parsed, the hidden ones included, in the directory order.
 fn parse_dir(libmap: &mut LibMap, dirname: &str) {
     if libmap.parsed.iter().any(|(path, _)| path == dirname) {
         return;
@@ -193,14 +192,15 @@ fn parse_dir(libmap: &mut LibMap, dirname: &str) {
         Err(_) => return,
     };
     libmap.parsed.push((dirname.to_string(), None));
-    let mut paths: Vec<_> = entries
-        .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|path| !pathutils::get_name(path).starts_with('.') && path.is_file())
-        .collect();
-    paths.sort();
-    for path in paths {
-        if let Some(path) = path.to_str() {
-            parse_file(libmap, path);
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|filetype| filetype.is_file()) {
+            continue;
+        }
+        match entry.file_name().to_str() {
+            Some(name) if name.ends_with(".conf") => {
+                parse_file(libmap, &format!("{dirname}/{name}"));
+            }
+            _ => {}
         }
     }
 }
@@ -384,6 +384,37 @@ mod tests {
             Some("libincluded.so.1")
         );
         assert!(parse_libmap(&tmpdir.path().join("missing.conf")).is_none());
+        Ok(())
+    }
+
+    // Only the regular files named *.conf of an included directory are parsed,
+    // the hidden ones included.
+    #[test]
+    fn parse_includedir() -> std::io::Result<()> {
+        let tmpdir = TempDir::new()?;
+        let dir = tmpdir.path().join("libmap.d");
+        fs::create_dir(&dir)?;
+        fs::write(dir.join("a.conf"), "liba.so.1 libconf.so.1\n")?;
+        fs::write(dir.join(".hidden.conf"), "libh.so.1 libhidden.so.1\n")?;
+        fs::write(
+            dir.join("0.conf.sample"),
+            "liba.so.1 libsample.so.1\nlibs.so.1 libsample.so.1\n",
+        )?;
+        fs::write(dir.join("noext"), "libn.so.1 libnoext.so.1\n")?;
+        let other = tmpdir.path().join("other");
+        fs::write(&other, "libl.so.1 liblink.so.1\n")?;
+        std::os::unix::fs::symlink(&other, dir.join("link.conf"))?;
+        fs::create_dir(dir.join("sub.conf"))?;
+        fs::write(dir.join("sub.conf/x.conf"), "libx.so.1 libsub.so.1\n")?;
+
+        let conf = tmpdir.path().join("libmap.conf");
+        fs::write(&conf, format!("includedir {}\n", dir.display()))?;
+        let libmap = parse_libmap(&conf).unwrap();
+        assert_eq!(libmap.lookup("/bin/x", "liba.so.1"), Some("libconf.so.1"));
+        assert_eq!(libmap.lookup("/bin/x", "libh.so.1"), Some("libhidden.so.1"));
+        for name in ["libs.so.1", "libn.so.1", "libl.so.1", "libx.so.1"] {
+            assert_eq!(libmap.lookup("/bin/x", name), None);
+        }
         Ok(())
     }
 
