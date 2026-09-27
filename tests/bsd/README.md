@@ -26,10 +26,12 @@ Options:
 | `-k`, `--keep` | leave the files copied to the hosts, below `~/rldd-tests` on a remote one and a temporary directory on the local one |
 
 Prerequisites on the machine under test: `ldd`, `python3`, and for a remote
-host a Rust toolchain with `cargo`.  The machine is accessed through ssh,
-so a passwordless ssh login and access to the crates the build needs.
+host a Rust toolchain with `cargo`.  A remote host is reached through ssh,
+which needs a passwordless login, and its build needs access to the crates
+rldd depends on.
 
-The sweep runs a copy of the local binary, so a build replacing it meanwhile
+On the local machine rldd is built first (a no-op when it is up to date),
+and the sweep runs a copy of the binary, so a build replacing it meanwhile
 does not pull it away.
 
 ## What is checked
