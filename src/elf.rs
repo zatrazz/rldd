@@ -510,13 +510,18 @@ fn push_searched(r: &mut Vec<String>, name: &str, searchpaths: &search_path::Sea
 
 // Describe the locations searched while failing to resolve a dependency, shown
 // on the not found diagnostics in verbose mode.
-fn searched_locations(config: &Config, elc: &ElfInfo, dependency: &str) -> Vec<String> {
+fn searched_locations(
+    config: &Config,
+    elc: &ElfInfo,
+    dependency: &str,
+    preload: bool,
+) -> Vec<String> {
     let mut r = Vec::new();
     if Path::new(dependency).is_absolute() {
         r.push(dependency.to_string());
         return r;
     }
-    for step in Rtld::SEARCH_ORDER {
+    for step in Rtld::search_order(elc, preload) {
         let rule = nodeflib_rule(*step, elc);
         // The locations outside the default paths.
         let outside = if rule == NodeflibRule::OutsideSystemDirs {
@@ -1114,7 +1119,7 @@ fn resolve_dependencies(
             }
             parents.push((dep.elc, depref, dep.namespace));
         } else {
-            let searched = searched_locations(config, elc, dependency);
+            let searched = searched_locations(config, elc, dependency, item.preload);
             deptree.addnode(DepNode::not_found(dependency.clone(), searched), item.depp);
         }
     }
@@ -1219,7 +1224,7 @@ fn resolve_dependency_1<'a>(
         search_dirs(searchpaths, dtneeded, elc, config.platform, mode, namespace)
     };
 
-    for step in Rtld::SEARCH_ORDER {
+    for step in Rtld::search_order(elc, preload) {
         let rule = nodeflib_rule(*step, elc);
         let dep = match step {
             _ if rule == NodeflibRule::Skip => None,

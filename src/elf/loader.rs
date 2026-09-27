@@ -49,6 +49,13 @@ pub(super) trait Loader {
         SearchStep::SystemDirs,
     ];
 
+    // The search order for a dependency of ELC, or for a preload entry when
+    // PRELOAD is set (ELC is the input object then), where the loader flavor
+    // of the object may change it.  Most loaders follow SEARCH_ORDER.
+    fn search_order(_elc: &ElfInfo, _preload: bool) -> &'static [SearchStep] {
+        Self::SEARCH_ORDER
+    }
+
     // Load the loader search cache for BINARY.  The cache/hints/config file is
     // usually an optional file and failing to open it does not incur on a
     // resolution failure.

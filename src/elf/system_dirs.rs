@@ -76,43 +76,40 @@ pub fn get_slibdir(
     }
 }
 
-// The musl loader search path comes from the /etc/ld-musl-$(ARCH).path file
-// (colon or newline separated), with a compiled-in default.  The ARCH is
-// taken from the loader name, or from the installed loader config when the
-// object does not have a PT_INTERP segment (shared libraries).
+// The musl loader search path comes from the $(PREFIX)/etc/ld-musl-$(ARCH).path
+// file, where the ARCH is the one of the LOADER name and the PREFIX is the
+// LOADER path without its last two components (so /etc for /lib), see
+// load_library.
 #[cfg(target_os = "linux")]
-fn get_musl_path_file(interp: &Option<String>) -> Option<String> {
-    use std::path::Path;
-    if let Some(interp) = interp {
-        let name = crate::pathutils::get_name(&Path::new(interp));
-        let arch = name.strip_prefix("ld-musl-")?.strip_suffix(".so.1")?;
-        return Some(format!("/etc/ld-musl-{arch}.path"));
-    }
-    for entry in std::fs::read_dir("/etc").ok()?.flatten() {
-        if let Some(name) = entry.file_name().to_str() {
-            if name.starts_with("ld-musl-") && name.ends_with(".path") {
-                return Some(format!("/etc/{name}"));
-            }
-        }
-    }
-    None
+fn get_musl_path_file(loader: &str) -> Option<String> {
+    let name = crate::pathutils::get_name(&std::path::Path::new(loader));
+    let arch = name.strip_prefix("ld-musl-")?.strip_suffix(".so.1")?;
+    let prefix = match loader.rmatch_indices('/').nth(1) {
+        Some((z, _)) if loader.starts_with('/') => &loader[..z],
+        _ => "",
+    };
+    Some(format!("{prefix}/etc/ld-musl-{arch}.path"))
 }
 
+// The file entries are split on colons and newlines, skipping the empty ones,
+// and a file without any entry means no default directory at all.  Only a
+// missing file falls back to the compiled-in default, while a file that can
+// not be read for any other reason also means no default directory.
 #[cfg(target_os = "linux")]
-fn get_musl_system_dirs(interp: &Option<String>) -> search_path::SearchPathVec {
-    if let Some(path_file) = get_musl_path_file(interp) {
-        if let Ok(contents) = std::fs::read_to_string(&path_file) {
-            let dirs: search_path::SearchPathVec = contents
-                .split([':', '\n'])
-                .filter(|p| !p.is_empty())
-                .map(search_path::SearchPath::fixed)
-                .collect();
-            if !dirs.is_empty() {
-                return dirs;
-            }
-        }
+fn get_musl_system_dirs(loader: Option<&str>) -> search_path::SearchPathVec {
+    let default = || search_path::fixed_list(["/lib", "/usr/local/lib", "/usr/lib"]);
+    let Some(path_file) = loader.and_then(get_musl_path_file) else {
+        return default();
+    };
+    match std::fs::read(&path_file) {
+        Ok(contents) => String::from_utf8_lossy(&contents)
+            .split([':', '\n'])
+            .filter(|p| !p.is_empty())
+            .map(search_path::SearchPath::fixed)
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => default(),
+        Err(_) => search_path::SearchPathVec::new(),
     }
-    search_path::fixed_list(["/lib", "/usr/local/lib", "/usr/lib"])
 }
 
 // The configuration built into a glibc loader, read from its file.
@@ -235,7 +232,9 @@ pub fn get_system_dirs(
     elc: &ElfInfo,
 ) -> Result<search_path::SearchPathVec, std::io::Error> {
     if elc.is_musl {
-        return Ok(get_musl_system_dirs(&elc.interp));
+        return Ok(get_musl_system_dirs(
+            super::musl_loader_path(elc).as_deref(),
+        ));
     }
     if let Some(dirs) = loader.and_then(|loader| loader_strings(loader).system_dirs) {
         use crate::search_path::SearchPathVecExt;
@@ -453,7 +452,24 @@ mod solaris_tests {
 
 #[cfg(all(test, target_os = "linux"))]
 mod system_dirs_tests {
-    use super::{dst_lib_in, system_dirs_in};
+    use super::{dst_lib_in, get_musl_path_file, system_dirs_in};
+
+    #[test]
+    fn musl_path_file() {
+        assert_eq!(
+            get_musl_path_file("/lib/ld-musl-x86_64.so.1").as_deref(),
+            Some("/etc/ld-musl-x86_64.path")
+        );
+        assert_eq!(
+            get_musl_path_file("/usr/local/musl/lib/ld-musl-mips-sf.so.1").as_deref(),
+            Some("/usr/local/musl/etc/ld-musl-mips-sf.path")
+        );
+        assert_eq!(
+            get_musl_path_file("ld-musl-aarch64.so.1").as_deref(),
+            Some("/etc/ld-musl-aarch64.path")
+        );
+        assert_eq!(get_musl_path_file("/lib/ld-linux.so.2"), None);
+    }
 
     #[test]
     fn dst_lib_of_the_loader() {

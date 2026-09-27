@@ -7,6 +7,22 @@ pub(in crate::elf) struct Linux;
 impl Loader for Linux {
     type Cache = ld_so_cache::LdCache;
 
+    // The musl loader searches LD_LIBRARY_PATH before the rpath chain of the
+    // objects that needed the library, has no cache, and does not search
+    // any rpath for a preloaded object, which no object needs
+    // (load_library).
+    fn search_order(elc: &ElfInfo, preload: bool) -> &'static [SearchStep] {
+        match (elc.is_musl, preload) {
+            (false, _) => Self::SEARCH_ORDER,
+            (true, false) => &[
+                SearchStep::LibraryPath,
+                SearchStep::Rpath,
+                SearchStep::SystemDirs,
+            ],
+            (true, true) => &[SearchStep::LibraryPath, SearchStep::SystemDirs],
+        }
+    }
+
     fn load_so_cache<P: AsRef<Path>>(
         ld_cache: &mut Option<Self::Cache>,
         _binary: &P,
@@ -62,9 +78,13 @@ impl Loader for Linux {
             .collect()
     }
 
+    // The objects are loaded by the loader of the input object, whatever
+    // their own PT_INTERP or dependencies say, so they follow its rules.
     fn handle_loader(elc: &mut ElfInfo, melc: Option<&ElfInfo>) {
         if let Some(melc) = melc {
+            elc.is_musl = melc.is_musl;
             elc.dst_lib = melc.dst_lib.clone();
+            return;
         }
         elc.is_musl = interp::is_musl(&elc.interp)
             || elc
