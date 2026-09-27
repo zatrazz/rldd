@@ -62,7 +62,8 @@ pub fn parse_ld_so_hints<P: AsRef<Path>>(filename: &P) -> Result<search_path::Se
         return Err(Error::other("Directory list not terminated"));
     }
 
-    ld_hints::parse_dirlist(&dirlist, &[':'])
+    // Like every rtld search list, split by path_enumerate on both separators.
+    ld_hints::parse_dirlist(&dirlist, &[':', ';'])
 }
 
 #[cfg(test)]
@@ -184,6 +185,38 @@ mod tests {
             }
             Err(e) => Err(Error::other(e)),
         }
+    }
+
+    #[test]
+    fn parse_ld_so_hints_separators() -> Result<()> {
+        let tmpdir = TempDir::new()?;
+        let filepath = tmpdir.path().join("ld-elf.so.hints");
+        let mut file = File::create(&filepath)?;
+
+        let libdir1 = tmpdir.path().join("lib1");
+        fs::create_dir(&libdir1)?;
+        let libdir2 = tmpdir.path().join("lib2");
+        fs::create_dir(&libdir2)?;
+        let libdir3 = tmpdir.path().join("lib3");
+        fs::create_dir(&libdir3)?;
+
+        let dirlist = [
+            libdir1.to_str().unwrap(),
+            libdir2.to_str().unwrap(),
+            libdir3.to_str().unwrap(),
+        ];
+        write_hints(
+            &mut file,
+            &format!("{};{}:{}", dirlist[0], dirlist[1], dirlist[2]),
+            |_| {},
+        )?;
+
+        let entries = parse_ld_so_hints(&filepath)?;
+        assert_eq!(entries.len(), dirlist.len());
+        assert_eq!(entries[0], dirlist[0]);
+        assert_eq!(entries[1], dirlist[1]);
+        assert_eq!(entries[2], dirlist[2]);
+        Ok(())
     }
 
     // A list whose offsets overflow, which ends past the end of the file, or
