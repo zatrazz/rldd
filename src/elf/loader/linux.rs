@@ -63,9 +63,11 @@ impl Loader for Linux {
         }
     }
 
-    // The musl loader expands the tokens of the whole list at once
-    // (fixup_rpath), and splits it on colons and newlines skipping the empty
-    // entries (path_open).
+    // The glibc loader takes an empty entry as the current directory
+    // (fillin_rpath), although a list without any entry is ignored
+    // (decompose_rpath).  The musl loader expands the tokens of the whole list
+    // at once (fixup_rpath), and splits it on colons and newlines skipping the
+    // empty entries (path_open).
     fn search_list(
         list: &str,
         site: TokenSite,
@@ -82,10 +84,15 @@ impl Loader for Linux {
                 .map(|entry| Ok(entry.to_string()))
                 .collect();
         }
+        if list.is_empty() {
+            return Vec::new();
+        }
         list.split(':')
-            .filter(|entry| !entry.is_empty())
-            .map(|entry| {
-                Self::expand_tokens(entry, site, elc, platform).ok_or_else(|| entry.to_string())
+            .map(|entry| match entry {
+                "" => Ok(".".to_string()),
+                _ => {
+                    Self::expand_tokens(entry, site, elc, platform).ok_or_else(|| entry.to_string())
+                }
             })
             .collect()
     }
