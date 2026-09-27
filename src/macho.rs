@@ -394,10 +394,12 @@ fn resolve_dependency(
     preload: bool,
     level: usize,
 ) {
-    let dependency = dep
-        .name
-        .replace("@executable_path", config.executable_path)
-        .replace("@loader_path", loader_path);
+    // dyld does not expand @loader_path in DYLD_INSERT_LIBRARIES.
+    let dependency = expand_at_path(
+        &dep.name,
+        config.executable_path,
+        (!preload).then_some(loader_path),
+    );
 
     if pathutils::has_prefix(&dependency, config.ignore_prefix) {
         return;
@@ -528,16 +530,22 @@ fn candidate_paths(
         }
     }
 
-    if dependency.contains("@rpath") {
+    let mode = if preload {
+        DepMode::Preload
+    } else {
+        DepMode::Direct
+    };
+    let rpath = dependency.starts_with("@rpath/");
+    if rpath && !preload {
         for rpath in rpaths {
             candidates.push((expand_rpath(dependency, rpath), DepMode::DtRpath));
         }
-    } else {
-        let mode = if preload {
-            DepMode::Preload
-        } else {
-            DepMode::Direct
-        };
+    } else if rpath || !dependency.starts_with('@') {
+        // dyld does not expand @rpath in DYLD_INSERT_LIBRARIES, and takes the
+        // load path as is, which only an image with that install name
+        // matches.  Otherwise it never tries a load path still starting with
+        // @, such as an @loader_path one of an inserted library
+        // (Loader::forEachResolvedAtPathVar).
         candidates.push((dependency.to_string(), mode));
     }
 
@@ -562,8 +570,49 @@ fn candidate_paths(
     candidates
 }
 
+// The @rpath load path DEPENDENCY with the run-path entry RPATH in place of
+// its leading @rpath, without a second slash after an entry ending with one
+// (Utils::concatenatePaths).
 fn expand_rpath(dependency: &str, rpath: &str) -> String {
-    dependency.replace("@rpath", rpath.strip_suffix('/').unwrap_or(rpath))
+    let tail = dependency.strip_prefix("@rpath").unwrap_or(dependency);
+    format!("{}{tail}", rpath.strip_suffix('/').unwrap_or(rpath))
+}
+
+// The rest of PATH when it starts with the TOKEN component (@rpath,
+// @executable_path, or @loader_path), which dyld only expands at the start.
+fn at_path<'a>(path: &'a str, token: &str) -> Option<&'a str> {
+    path.strip_prefix(token)
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+// A load path or run-path entry with its leading @executable_path or
+// @loader_path expanded the way dyld does (Loader::forEachResolvedAtPathVar).
+// The main executable directory being a real path, dyld drops the leading
+// ../ components of an @executable_path one against it
+// (expandAndNormalizeAtExecutablePath), while @loader_path is replaced as is.
+// LOADER_PATH is None for an inserted library, where dyld does not expand
+// @loader_path (Loader::expandAtLoaderPath), so the path is left as is.
+fn expand_at_path(path: &str, executable_path: &str, loader_path: Option<&str>) -> String {
+    if let Some(mut tail) = at_path(path, "@executable_path") {
+        if tail.is_empty() {
+            return format!("{executable_path}/");
+        }
+        let mut dir = executable_path;
+        while let Some(rest) = tail.strip_prefix("/..") {
+            match dir.rfind('/') {
+                Some(slash) if slash > 0 => {
+                    dir = &dir[..slash];
+                    tail = rest;
+                }
+                _ => break,
+            }
+        }
+        return format!("{dir}{tail}");
+    }
+    match (at_path(path, "@loader_path"), loader_path) {
+        (Some(tail), Some(loader_path)) => format!("{loader_path}{tail}"),
+        _ => path.to_string(),
+    }
 }
 
 const CRYPTEX_OS_PATH: &str = "/System/Volumes/Preboot/Cryptexes/OS";
@@ -633,7 +682,7 @@ fn searched_locations(
     preload: bool,
 ) -> Vec<String> {
     let mut searched = Vec::new();
-    if dependency.contains("@rpath") && rpaths.is_empty() {
+    if dependency.starts_with("@rpath/") && !preload && rpaths.is_empty() {
         searched.push(format!("{dependency} (empty run-path list)"));
     }
     for (candidate, _) in candidate_paths(config, rpaths, dependency, preload) {
@@ -699,7 +748,9 @@ fn resolve_path(
         }
     }
 
-    if matches!(mode, DepMode::Direct | DepMode::Preload) {
+    // dyld only retries a recorded load path through its realpath when it
+    // does not start with @ (Loader::getLoader).
+    if matches!(mode, DepMode::Direct | DepMode::Preload) && !dep.name.starts_with('@') {
         if let Some(real) = realpath_leaf(path).filter(|real| real != dependency) {
             return resolve_cache(config, &real, dep, tree, depp);
         }
@@ -975,9 +1026,7 @@ fn parse_macho<Mach: MachHeader<Endian = Endianness>>(
         match parse_load_command::<Mach>(endian, command)? {
             Some(LoadCommand::Dylib(dep)) => info.deps.push(dep),
             Some(LoadCommand::Rpath(path)) => {
-                let path = path
-                    .replace("@executable_path", executable_path)
-                    .replace("@loader_path", loader_path);
+                let path = expand_at_path(&path, executable_path, Some(loader_path));
                 if !path.is_empty() && !info.rpath.contains(&path) {
                     info.rpath.push(path);
                 }
@@ -1631,6 +1680,74 @@ mod tests {
             [
                 node(&found, DepMode::LdFrameworkPath),
                 node(&lib, DepMode::LdLibraryPath),
+            ]
+        );
+    }
+
+    #[test]
+    fn at_path_expansion() {
+        let expand = |path| expand_at_path(path, "/a/b/MacOS", Some("/l/lib"));
+        for (path, expanded) in [
+            ("@executable_path/libx.dylib", "/a/b/MacOS/libx.dylib"),
+            ("@executable_path/../Frameworks/X", "/a/b/Frameworks/X"),
+            ("@executable_path/../../../../x", "/a/../../x"),
+            ("@executable_path", "/a/b/MacOS/"),
+            ("@loader_path/../libx.dylib", "/l/lib/../libx.dylib"),
+            ("@loader_path", "/l/lib"),
+            // Only a leading component is expanded.
+            (
+                "@executable_pathx/libx.dylib",
+                "@executable_pathx/libx.dylib",
+            ),
+            ("/x/@loader_path/libx.dylib", "/x/@loader_path/libx.dylib"),
+            ("@rpath/libx.dylib", "@rpath/libx.dylib"),
+            ("/usr/lib/libz.dylib", "/usr/lib/libz.dylib"),
+        ] {
+            assert_eq!(expand(path), expanded, "{path}");
+        }
+        // Not for an inserted library.
+        assert_eq!(
+            expand_at_path("@loader_path/libx.dylib", "/a", None),
+            "@loader_path/libx.dylib"
+        );
+        assert_eq!(expand_rpath("@rpath/x/@rpath/y", "/r"), "/r/x/@rpath/y");
+    }
+
+    #[test]
+    fn inserted_library_at_paths() {
+        // The inserted @rpath and @loader_path entries are not expanded, so
+        // only the DYLD_LIBRARY_PATH and fallback directories provide them,
+        // while an @executable_path one is.
+        let dir = Scratch::new("insertat");
+        dir.write("rp/librp.dylib", &x86_64_dylib(&[]));
+        dir.write("bin/libld.dylib", &x86_64_dylib(&[]));
+        let exec = dir.write("bin/libex.dylib", &x86_64_dylib(&[]));
+        let lp = dir.write("lp/librp.dylib", &x86_64_dylib(&[]));
+        let fb = dir.write("fb/libld.dylib", &x86_64_dylib(&[]));
+        let exe = dir.write(
+            "bin/exe",
+            &x86_64_exe(&[string_command(LC_RPATH, &[], &dir.path("rp"))]),
+        );
+        let mut ctx = context(None);
+        ctx.preload = insert_libraries(
+            "@rpath/librp.dylib:@loader_path/libld.dylib:@executable_path/libex.dylib",
+        );
+        assert_eq!(
+            resolve(&mut ctx, &exe),
+            [
+                node("@rpath/librp.dylib", DepMode::NotFound),
+                node("@loader_path/libld.dylib", DepMode::NotFound),
+                node(&exec, DepMode::Preload),
+            ]
+        );
+        ctx.env.library_path = search_path::from_string(dir.path("lp"), &[':']);
+        ctx.env.fallback_library_path = search_path::from_string(dir.path("fb"), &[':']);
+        assert_eq!(
+            resolve(&mut ctx, &exe),
+            [
+                node(&lp, DepMode::LdLibraryPath),
+                node(&fb, DepMode::LdFallbackLibraryPath),
+                node(&exec, DepMode::Preload),
             ]
         );
     }

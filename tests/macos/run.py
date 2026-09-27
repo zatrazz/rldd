@@ -446,9 +446,19 @@ def same_path(printed, expected):
 
 
 def expand(path, directory):
+    """The leading @executable_path or @loader_path expanded against the
+    input directory, dropping the leading ../ components of an
+    @executable_path one against it like dyld does (expand_at_path in
+    src/macho.rs)."""
     for token in ("@executable_path", "@loader_path"):
         if path == token or path.startswith(token + "/"):
-            return directory + path[len(token):]
+            tail = path[len(token):]
+            if token == "@executable_path":
+                if not tail:
+                    return directory + "/"
+                while tail.startswith("/..") and directory.rfind("/") > 0:
+                    directory, tail = directory[:directory.rfind("/")], tail[3:]
+            return directory + tail
     return path
 
 
