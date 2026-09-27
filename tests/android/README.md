@@ -16,6 +16,7 @@ from the device.  They do not run on the other hosts.
 ```sh
 tests/android/run.sh                     # every attached device
 tests/android/run.sh -d emulator-5554    # just one
+tests/android/run.sh -c                  # also compare with the device linker
 ```
 
 On Windows the suite needs the Git Bash shell.  From PowerShell use the wrapper,
@@ -39,7 +40,12 @@ The exit status is non-zero when any check fails.  Options:
 | Option | Meaning |
 | --- | --- |
 | `-d`, `--device SERIAL` | only test this device, may be repeated |
+| `-c`, `--compare` | also compare the executables with the device linker (Android 11 and later) |
 | `-k`, `--keep` | leave the pushed files in `/data/local/tmp/rldd-tests` |
+
+rldd is always built for the device before it is pushed, and the binary pushed
+is the one cargo reports, so a `CARGO_TARGET_DIR` elsewhere does not leave a
+stale one behind.
 
 Prerequisites:
 
@@ -56,28 +62,47 @@ and whatever is current.
 
 ## What is checked
 
-rldd is invoked one way only, `-l`, which prints the unique dependency list as
-one `name => path` per line.  The remaining options (`--library-path`,
-`--preload`, `--platform`, `-p`, `-a`, `-v`) change the search or the
-presentation rather than what the device image makes it resolve, and belong to
-the unit tests.
-
 Every object below `/system/bin`, `/system/lib*`, `/vendor/lib*`, the
 translation trees and the ART and runtime APEX binaries is resolved on the
-device, in a single adb round trip:
+device with `rldd -l`, which prints the unique dependency list as one
+`name => path` per line, in a single adb round trip:
 
 | Check | What it covers |
 | --- | --- |
 | crashes | no object makes rldd panic or die from a signal |
 | resolution | every dependency of every object resolves |
+| compare (`-c`) | every executable resolves to the libraries the device linker loads |
+| options | `-v -a -p` does not crash, and with `-c`, `--library-path` and `--preload` resolve like the device linker does with the same `LD_LIBRARY_PATH` and `LD_PRELOAD` |
 
-Between them these cover the search rules the image drives, since an object
-that reached the wrong section, the wrong APEX or the wrong translation
-directory does not resolve at all: the ART APEX binaries only resolve when the
-generated per-APEX configuration was picked, the `/system/bin/arm*` objects
-only when the architecture specific `ld.config.<abi>.txt` was, and a shared
-library only when it took the section of the executable directory of its
-partition.
+The resolution check only catches a dependency that does not resolve at all.
+An object that took the wrong section, APEX configuration or search path, but
+still found a library of that name somewhere, passes it; the comparison is
+what catches those.
+
+### Comparing with the device linker
+
+From Android 11 the linker lists what it loads for an executable
+(`linker64 --list`, which `/system/bin/ldd` runs) as `soname => real path`.
+With `-c` every executable the device can run is also listed that way, and the
+`name => path` pairs of rldd, with each path resolved with `readlink -f`, must
+be the same set.  An executable the linker fails to link because a library is
+missing compares as that library not found.
+
+The differences are grouped by entry, `+` for one only rldd reports and `-` for
+one only the linker does, along with the number of executables it shows up on
+and one of them, since a single search rule usually accounts for many.
+
+What is not compared:
+
+* A shared library: the linker lists it with the configuration section of its
+  own directory (usually none, so the default directories), while rldd takes
+  the one of the executables of its partition.
+* An executable the linker can not list, the ones of the translation trees for
+  another architecture: they are shown for information.
+* `--platform`, which only sets the `$PLATFORM` of a search path, a variable
+  the bionic loader does not expand.
+
+Before Android 11 the comparison is skipped with a note.
 
 ### Unresolved dependencies that are correct
 

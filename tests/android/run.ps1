@@ -11,7 +11,7 @@ Every argument is passed through to run.sh.
 tests\android\run.ps1
 
 .EXAMPLE
-tests\android\run.ps1 -d emulator-5554 -s
+tests\android\run.ps1 -d emulator-5554 --compare
 #>
 
 $ErrorActionPreference = 'Stop'

@@ -60,6 +60,8 @@ usage() {
 usage: tests/android/run.sh [options]
 
   -d, --device SERIAL   only test this device (may be repeated)
+  -c, --compare         also compare every executable with the device linker
+                        (Android 11 and later)
   -k, --keep            leave the pushed files on the device
   -h, --help            this message
 
@@ -70,6 +72,7 @@ EOF
 
 SERIALS=
 KEEP=false
+COMPARE=false
 
 while [ $# -gt 0 ]; do
     case $1 in
@@ -78,6 +81,7 @@ while [ $# -gt 0 ]; do
         SERIALS="$SERIALS $2"
         shift 2
         ;;
+    -c | --compare) COMPARE=true; shift ;;
     -k | --keep) KEEP=true; shift ;;
     -h | --help) usage; exit 0 ;;
     *) die "unknown argument '$1' (try --help)" ;;
@@ -201,16 +205,72 @@ adb_push() {
     }
 }
 
+# The number of distinct differences check_compare lists.
+DIFF_LIMIT=25
+
+# Report the comparison of a device-sweep.sh run with the device linker.  The
+# differences are grouped by entry, with the number of executables each one
+# shows up on, since a single search rule usually accounts for many of them.
+check_compare() {
+    report=$1
+    what=$2
+
+    same=$(printf '%s\n' "$report" | sed -n 's/^SAME //p')
+    nocmp=$(printf '%s\n' "$report" | grep -c '^NOCMP ' || true)
+    diffs=$(printf '%s\n' "$report" | grep -c '^DIFF ' || true)
+    counts="${same:-0} the same, $nocmp the device linker could not list"
+
+    # An object for another architecture, the translated ones, say.
+    if [ "$nocmp" -gt 0 ]; then
+        info "$nocmp executable(s) the device linker could not list, not compared:"
+        printf '%s\n' "$report" | sed -n 's/^NOCMP /          /p' | head -"$DIFF_LIMIT"
+    fi
+
+    if [ "$diffs" -eq 0 ]; then
+        pass "$what: resolved like the device linker ($counts)"
+        return
+    fi
+    fail "$what: $diffs executable(s) resolved unlike the device linker ($counts)"
+
+    tab=$(printf '\t')
+    groups=$(printf '%s\n' "$report" | awk '
+        /^DIFF[+-] / {
+            key = substr($1, 5, 1) " " substr($0, length($1) + length($2) + 3)
+            count[key]++
+            if (!(key in example)) example[key] = $2
+        }
+        END { for (key in count) printf "%d\t%s\t%s\n", count[key], key, example[key] }' |
+        sort -t "$tab" -k1,1nr -k2,2)
+    info "'+' only rldd reports it, '-' only the device linker does:"
+    printf '%s\n' "$groups" | head -"$DIFF_LIMIT" |
+        awk -F "$tab" '{ printf "        %5d x %s  (%s)\n", $1, $2, $3 }'
+    more=$(($(printf '%s\n' "$groups" | wc -l) - DIFF_LIMIT))
+    [ "$more" -le 0 ] || info "... and $more more"
+}
+
 # Resolve every object of the system image.  The roots stay unquoted through to
 # the device shell, which expands them; a tree the image does not have simply
 # matches nothing.
 check_sweep() {
+    dev=$1
+    api=$2
+
     roots="/system/bin/* /system/lib/*.so /system/lib64/*.so"
     roots="$roots /vendor/lib/*.so /vendor/lib64/*.so"
     roots="$roots /system/bin/arm/* /system/bin/arm64/*"
     roots="$roots /apex/com.android.art/bin/* /apex/com.android.runtime/bin/*"
 
-    report=$(adb_sh "$1" "sh $DEVICE_DIR/device-sweep.sh $DEVICE_DIR/rldd '$roots'")
+    # The device linker lists the dependencies (--list) from Android 11 on.
+    compare=
+    if $COMPARE; then
+        if [ "$api" -ge 30 ]; then
+            compare=compare
+        else
+            info "compare: the device linker has no --list before Android 11 (API 30)"
+        fi
+    fi
+
+    report=$(adb_sh "$dev" "sh $DEVICE_DIR/device-sweep.sh $DEVICE_DIR/rldd '$roots' $compare")
 
     files=$(printf '%s\n' "$report" | sed -n 's/^FILES //p')
     errors=$(printf '%s\n' "$report" | sed -n 's/^ERRORS //p')
@@ -250,6 +310,42 @@ check_sweep() {
         info "$unloadable object(s) the device itself cannot load, not counted:"
         printf '%s\n' "$report" | grep '^UNRESOLVED .* no$' |
             awk '{ printf "          %s (%s unresolved)\n", $2, $3 }'
+    fi
+
+    [ -z "$compare" ] || check_compare "$report" "compare"
+}
+
+# The options that change the resolution, --library-path and --preload, on a
+# few executables of the primary ABI, compared with the device linker given
+# the same LD_LIBRARY_PATH and LD_PRELOAD: the ART APEX library directory
+# holds its own libc++ and libbase, and libcutils brings in dependencies of
+# its own.  The options that only change the output (-v, -a and -p) are only
+# checked for crashes.
+check_options() {
+    dev=$1
+    api=$2
+
+    roots="/system/bin/toybox /system/bin/logcat /system/bin/sh"
+    lib=$(adb_sh "$dev" "[ -e /system/bin/linker64 ] && echo lib64 || echo lib")
+
+    status=$(adb_sh "$dev" "$DEVICE_DIR/rldd -v -a -p $roots >/dev/null 2>&1; echo \$?")
+    case $status in
+    '' | *[!0-9]*) fail "options: rldd -v -a -p did not run" ;;
+    *)
+        if [ "$status" -gt 128 ]; then
+            fail "options: rldd -v -a -p was killed by signal $((status - 128))"
+        else
+            pass "options: -v -a -p run (status $status)"
+        fi
+        ;;
+    esac
+
+    if $COMPARE && [ "$api" -ge 30 ]; then
+        report=$(adb_sh "$dev" "sh $DEVICE_DIR/device-sweep.sh $DEVICE_DIR/rldd '$roots' compare /apex/com.android.art/$lib libcutils.so")
+        if printf '%s\n' "$report" | grep -q '^PANIC \|^CRASH '; then
+            fail "options: --library-path and --preload crashed"
+        fi
+        check_compare "$report" "options"
     fi
 }
 
@@ -291,7 +387,8 @@ run_device() {
         return 1
     fi
 
-    check_sweep "$dev"
+    check_sweep "$dev" "$api"
+    check_options "$dev" "$api"
 
     $KEEP || adb_sh "$dev" "rm -rf $DEVICE_DIR"
 }
