@@ -1,8 +1,8 @@
 // The NetBSD ld.so.conf format is quite simple:
 // - Lines beginning with `#' are treated as comments and ignored.
 // - Non-blank lines beginning with '/' is treated as directories to be scanned.
-// - Lines that ddo not begin with a `/' are parsed as hardware dependent per library
-//   directives (not supported).
+// - Lines that do not begin with a `/' are parsed as hardware dependent per library
+//   directives (not supported, so they are skipped).
 
 use std::path::Path;
 
@@ -32,22 +32,24 @@ pub fn parse_ld_so_conf<P: AsRef<Path>>(filename: &P) -> Result<SearchPathVec, &
     Ok(r)
 }
 
+// The directory of LINE, following _rtld_process_hints: only the spaces and
+// tabs are blanks, and a line not starting with '/' is a directive and not a
+// directory.
 fn parse_line(line: &str) -> Option<String> {
-    // Remove leading whitespace.
-    let line = line.trim_start();
+    // Remove leading blanks.
+    let line = line.trim_start_matches([' ', '\t']);
     // Remove trailing comments.
     let comment = match line.find('#') {
         Some(comment) => comment,
         None => line.len(),
     };
     let line = &line[0..comment];
-    // Remove trailing whitespaces.
-    let line = line.trim_end();
-    // Skip empty lines.
-    if line.is_empty() {
+    // Skip empty lines and the directives.
+    if !line.starts_with('/') {
         return None;
     }
-    Some(line.to_string())
+    // Remove trailing blanks.
+    Some(line.trim_end_matches([' ', '\t']).to_string())
 }
 
 #[cfg(test)]
@@ -84,6 +86,31 @@ mod tests {
         assert_eq!(dirs.len(), 2);
         assert_eq!(dirs[0], lib1);
         assert_eq!(dirs[1], lib2);
+        Ok(())
+    }
+
+    // A line not starting with '/' is a hardware dependent directive, which is
+    // not a directory even when it names one relative to the current one
+    // (cargo runs the tests from the package directory).
+    #[test]
+    fn skip_directives() -> std::io::Result<()> {
+        let tmpdir = TempDir::new()?;
+        let lib1 = tmpdir.path().join("lib1");
+        fs::create_dir(&lib1)?;
+        let lib1 = lib1.to_str().unwrap();
+        assert!(Path::new("src").is_dir());
+
+        let conf = tmpdir.path().join("ld.so.conf");
+        fs::write(
+            &conf,
+            format!(
+                "libc.so machdep.cpu_brand Intel:{lib1}\n\
+                 src\n\
+                 ./src\n\
+                 \r{lib1}\n"
+            ),
+        )?;
+        assert!(parse_ld_so_conf(&conf).unwrap().is_empty());
         Ok(())
     }
 
