@@ -644,17 +644,20 @@ fn module_exports<'a>(
 }
 
 // The modules the imported symbols are forwarded to, along with the symbols
-// each must provide, skipping the ones the import directory already records.
+// each must provide, skipping the ones the static import directory already
+// records.
 fn forwarded_modules(imports: &[ImportName], info: &PeInfo) -> Vec<(String, Vec<ImportName>)> {
     let mut modules = Vec::<(String, Vec<ImportName>)>::new();
     for import in imports {
         let ExportLookup::Forwarded(forward) = info.exports.lookup(import) else {
             continue;
         };
+        // A delay load import does not load the module at startup, while
+        // the forwarder does when the symbol is bound.
         if info
             .deps
             .iter()
-            .any(|dep| dep.name.eq_ignore_ascii_case(&forward.module))
+            .any(|dep| !dep.is_delay_load() && dep.name.eq_ignore_ascii_case(&forward.module))
         {
             continue;
         }
@@ -2403,5 +2406,23 @@ mod tests {
             vec![("target.dll".to_string(), vec![one, two])]
         );
         assert!(forwarded_modules(&[], &info).is_empty());
+
+        // A module only the delay load import directory records is still
+        // loaded by the forwarder.
+        let info = PeInfo {
+            deps: vec![PeDep {
+                name: "recorded.dll".to_string(),
+                attrs: vec!["delay-load"],
+                imports: Vec::new(),
+            }],
+            exports: exports(),
+            ..Default::default()
+        };
+        let recorded = [ImportName::Name("Recorded".to_string())];
+        let three = ImportName::Name("Three".to_string());
+        assert_eq!(
+            forwarded_modules(&recorded, &info),
+            vec![("RECORDED.DLL".to_string(), vec![three])]
+        );
     }
 }
