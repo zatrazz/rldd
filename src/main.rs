@@ -241,8 +241,45 @@ fn print_error(arg: &String, err: std::io::Error) -> String {
     }
 }
 
+// Report a command line error the way argh does, and exit.
+fn usage_error(cmd: &str, message: &str) -> ! {
+    errln!("{message}\nRun {cmd} --help for more information.");
+    std::process::exit(1);
+}
+
+// Parse the command line.  Unlike argh::from_env, which prints with println!
+// and eprintln!, the usage and the errors go through the output helpers,
+// which do not panic when the output is closed.
+fn parse_args() -> Options {
+    let mut args = std::env::args_os();
+    let program = args.next().unwrap_or_default();
+    let cmd = std::path::Path::new(&program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(env!("CARGO_PKG_NAME"));
+
+    let args = args
+        .map(|arg| arg.into_string())
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|arg| {
+            usage_error(cmd, &format!("Invalid utf8: {}", arg.to_string_lossy()))
+        });
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    match Options::from_args(&[cmd], &args) {
+        Ok(opts) => opts,
+        Err(early_exit) => match early_exit.status {
+            Ok(()) => {
+                outln!("{}", early_exit.output);
+                std::process::exit(0);
+            }
+            Err(()) => usage_error(cmd, &early_exit.output),
+        },
+    }
+}
+
 fn main() {
-    let opts: Options = argh::from_env();
+    let opts = parse_args();
 
     // On macOS the dependencies are always shown with their full resolved path.
     let printer = printer::create(
