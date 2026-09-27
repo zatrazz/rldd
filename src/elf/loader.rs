@@ -214,6 +214,17 @@ pub(super) trait Loader {
         Path::new(dir).join(dtneeded)
     }
 
+    // The tree node of the object found for DEPENDENCY with the NAME file
+    // name on the PATH directory.  Most loaders record it where it was found.
+    fn loaded_node(
+        path: Option<String>,
+        name: String,
+        mode: DepMode,
+        _dependency: &str,
+    ) -> DepNode {
+        DepNode::new(path, name, mode)
+    }
+
     // Whether the object DT_RPATH is searched.
     fn rpath_search(_elc: &ElfInfo) -> bool {
         true

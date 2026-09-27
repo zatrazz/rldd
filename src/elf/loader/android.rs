@@ -115,6 +115,28 @@ impl Loader for Android {
         }
     }
 
+    // The linker records an object at its real path (the soinfo realpath,
+    // from the file descriptor it opened), which is what linker --list
+    // shows: libc.so found at /system/lib64 is the runtime APEX one from
+    // Android 10, say.  The name requested is kept when the file name
+    // differs.
+    fn loaded_node(path: Option<String>, name: String, mode: DepMode, dependency: &str) -> DepNode {
+        let found = match &path {
+            Some(dir) => pathutils::join(dir, &name),
+            None => name.clone(),
+        };
+        let Ok(real) = fs::canonicalize(&found) else {
+            return DepNode::new(path, name, mode);
+        };
+        let node = DepNode::from_path(&real, mode);
+        let requested = pathutils::get_name(&Path::new(dependency));
+        if node.name == requested {
+            node
+        } else {
+            node.with_alias(Some(requested))
+        }
+    }
+
     // No token is expanded on DT_NEEDED nor on LD_PRELOAD.
     fn expand_tokens(
         input: &str,

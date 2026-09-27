@@ -1256,7 +1256,7 @@ fn resolve_dependencies(
             );
             continue;
         }
-        let c = deptree.addnode(DepNode::new(r.0, r.1, dep.mode), item.depp);
+        let c = deptree.addnode(Rtld::loaded_node(r.0, r.1, dep.mode, dependency), item.depp);
         if let Some(id) = file_id {
             file_ids.entry(id).or_insert(c);
         }
