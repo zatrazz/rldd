@@ -78,10 +78,26 @@ impl Loader for FreeBsd {
         canonical_origin_directory(filename)
     }
 
-    // The rtld check_elf_headers only checks the class, data encoding, version,
-    // type and machine, and not the EI_OSABI field.
-    fn check_elf_header(_elc: &ElfInfo) -> bool {
-        true
+    // rtld takes the first file of the search that exists (try_library_path),
+    // and fails the load when it is not an object it can load (map_object)
+    // instead of going on with the search.  check_elf_headers checks the
+    // class, data encoding, version, type and machine, and not the EI_OSABI
+    // field.
+    fn check_candidate(
+        _data: &[u8],
+        parsed: &Result<ElfInfo, &'static str>,
+        melc: &ElfInfo,
+    ) -> Result<(), Rejection> {
+        match parsed {
+            Ok(elc) if elc.ei_class != melc.ei_class || elc.ei_data != melc.ei_data => {
+                Err(Rejection::Fatal("unsupported file layout".to_string()))
+            }
+            Ok(elc) if elc.e_machine != melc.e_machine => {
+                Err(Rejection::Fatal("unsupported machine".to_string()))
+            }
+            Ok(_) => Ok(()),
+            Err(e) => Err(Rejection::Fatal(e.to_string())),
+        }
     }
 
     // Remap the dependency name using the libmap.conf mappings for the referencing
@@ -160,6 +176,27 @@ mod tests {
             origin_subst("$ORIGIN/$LIB", &[("ORIGIN", None), ("LIB", Some("lib"))]),
             "$ORIGIN/lib"
         );
+    }
+
+    // A candidate of another class, data encoding or machine, or which is not
+    // an object, fails the load, whatever its OS ABI.
+    #[test]
+    fn candidate_mismatch_is_fatal() {
+        let melc = ElfInfo::for_test(EM_X86_64, FileFlags(0));
+        let check =
+            |parsed: Result<ElfInfo, &'static str>| FreeBsd::check_candidate(&[], &parsed, &melc);
+        let mut gnu = ElfInfo::for_test(EM_X86_64, FileFlags(0));
+        gnu.ei_osabi = ELFOSABI_GNU;
+        assert_eq!(check(Ok(gnu)), Ok(()));
+        let mut elf32 = ElfInfo::for_test(EM_386, FileFlags(0));
+        elf32.ei_class = ELFCLASS32;
+        let fatal = |e: &str| Err(Rejection::Fatal(e.to_string()));
+        assert_eq!(check(Ok(elf32)), fatal("unsupported file layout"));
+        assert_eq!(
+            check(Ok(ElfInfo::for_test(EM_AARCH64, FileFlags(0)))),
+            fatal("unsupported machine")
+        );
+        assert_eq!(check(Err("Invalid object")), fatal("Invalid object"));
     }
 
     // The lists are split on both separators, the DT_RPATH and DT_RUNPATH
