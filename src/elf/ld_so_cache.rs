@@ -234,16 +234,11 @@ fn read_at<T: Pod + Default>(data: &[u8], offset: usize) -> Option<T> {
 }
 
 // The NUL terminated string at OFFSET of the string table starting at TABLE,
-// which must end within the file.
-fn read_string(data: &[u8], table: usize, offset: u32) -> Result<String> {
-    let value = table
-        .checked_add(offset as usize)
-        .and_then(|start| data.get(start..))
-        .and_then(|s| s.split(|&c| c == 0).next().filter(|v| v.len() < s.len()))
-        .ok_or(Error::other("Invalid cache string"))?;
-    str::from_utf8(value)
-        .map(str::to_string)
-        .map_err(|_| Error::other("Invalid UTF8 value"))
+// None if it does not end within the file.
+fn read_bytes(data: &[u8], table: usize, offset: u32) -> Option<&[u8]> {
+    let s = data.get(table.checked_add(offset as usize)?..)?;
+    let end = s.iter().position(|&c| c == 0)?;
+    Some(&s[..end])
 }
 
 fn align_cache(value: usize) -> usize {
@@ -259,18 +254,44 @@ pub type LdCache = HashMap<String, String>;
 struct CacheEntry {
     flags: i32,
     name: String,
-    path: String,
+    // The library path, None if it is not valid UTF-8 (the loader would try
+    // it, but it can not be represented).
+    path: Option<String>,
     // The file_entry_new hwcap field, zero on the old format.
     hwcap: u64,
 }
 
+impl CacheEntry {
+    // The entry with the KEY and VALUE strings of the string table at TABLE.
+    // An entry with a string out of the file is not usable (the loader
+    // _dl_cache_verify_ptr), nor is one whose name is not valid UTF-8, since
+    // no dependency names it.
+    fn new(
+        data: &[u8],
+        table: usize,
+        flags: i32,
+        key: u32,
+        value: u32,
+        hwcap: u64,
+    ) -> Option<Self> {
+        let name = str::from_utf8(read_bytes(data, table, key)?).ok()?;
+        let path = read_bytes(data, table, value)?;
+        Some(CacheEntry {
+            flags,
+            name: name.to_string(),
+            path: str::from_utf8(path).ok().map(str::to_string),
+            hwcap,
+        })
+    }
+}
+
 // The cache file contents: the entries in the file order (sorted by name, the
 // glibc-hwcaps ones first) and the glibc-hwcaps subdirectory names the
-// extension entries index.
+// extension entries index (None for one out of the file).
 #[derive(Debug, Default)]
 struct CacheFile {
     entries: Vec<CacheEntry>,
-    hwcaps: Vec<String>,
+    hwcaps: Vec<Option<Vec<u8>>>,
 }
 
 fn parse_ld_so_cache_old(data: &[u8]) -> Result<CacheFile> {
@@ -298,12 +319,14 @@ fn parse_ld_so_cache_old(data: &[u8]) -> Result<CacheFile> {
     for i in 0..nlibs {
         let entry: file_entry = read_at(data, CACHE_FILE_LEN + i * FILE_ENTRY_LEN)
             .ok_or(Error::other("Invalid cache entry"))?;
-        entries.push(CacheEntry {
-            flags: entry.flags,
-            name: read_string(data, strings, entry.key)?,
-            path: read_string(data, strings, entry.value)?,
-            hwcap: 0,
-        });
+        entries.extend(CacheEntry::new(
+            data,
+            strings,
+            entry.flags,
+            entry.key,
+            entry.value,
+            0,
+        ));
     }
     Ok(CacheFile {
         entries,
@@ -337,17 +360,19 @@ fn parse_ld_so_cache_new(data: &[u8], initial: usize) -> Result<CacheFile> {
         let entry: file_entry_new = read_at(data, first + i * FILE_ENTRY_NEW_LEN)
             .ok_or(Error::other("Invalid new cache entry"))?;
         // The strings are relative to the new format header.
-        entries.push(CacheEntry {
-            flags: entry.flags,
-            name: read_string(data, initial, entry.key)?,
-            path: read_string(data, initial, entry.value)?,
-            hwcap: entry.hwcap,
-        });
+        entries.extend(CacheEntry::new(
+            data,
+            initial,
+            entry.flags,
+            entry.key,
+            entry.value,
+            entry.hwcap,
+        ));
     }
 
     Ok(CacheFile {
         entries,
-        hwcaps: parse_ld_so_cache_glibc_hwcap(data, initial, hdr.extension_offset)?,
+        hwcaps: parse_ld_so_cache_glibc_hwcap(data, initial, hdr.extension_offset),
     })
 }
 
@@ -363,56 +388,60 @@ fn check_cache_hwcap_extension(hwcap: u64) -> bool {
     (hwcap >> 32) & !DL_CACHE_HWCAP_ISA_LEVEL_MASK == (DL_CACHE_HWCAP_EXTENSION >> 32)
 }
 
+// The glibc-hwcaps section of the extension directory at EXTENSION_OFFSET: the
+// whole directory must be within the file, and so must every section, and the
+// section must be a non empty and aligned array of 32-bit string offsets
+// (glibc cache_extension_load and cache_extension_verify).
+fn glibc_hwcaps_section(data: &[u8], initial: usize, extension_offset: u32) -> Option<&[u8]> {
+    // Either no extension, or a misaligned one.
+    if extension_offset == 0 || !extension_offset.is_multiple_of(4) {
+        return None;
+    }
+    let offset = initial.checked_add(extension_offset as usize)?;
+    let ext: cache_extension = read_at(data, offset)?;
+    if ext.magic != cache_extension_magic {
+        return None;
+    }
+
+    // A bogus section count stops at the end of the file.
+    let directory = offset + CACHE_EXTENSION_LEN;
+    let mut hwcaps = None;
+    for i in 0..ext.count as usize {
+        let section: cache_extension_section = i
+            .checked_mul(CACHE_EXTENSION_SECTION_LEN)
+            .and_then(|len| len.checked_add(directory))
+            .and_then(|offset| read_at(data, offset))?;
+        let start = initial.checked_add(section.offset as usize)?;
+        let contents = data.get(start..start.checked_add(section.size as usize)?)?;
+        // The last one wins, as for any other tag.
+        if section.tag == CACHE_EXTENSION_TAG_GLIBC_HWCAPS {
+            hwcaps = Some((start, contents));
+        }
+    }
+
+    let (start, contents) = hwcaps?;
+    (!contents.is_empty() && start.is_multiple_of(4) && contents.len().is_multiple_of(4))
+        .then_some(contents)
+}
+
 // Return the possible glibc-hwcap subfolders used in optimized library selection.  The
-// array is indexed by the 32-bit lower bit from file_entry_new hwcap field.  The whole
-// section directory is read first, and each section should be within the file (glibc
-// cache_extension_load).
+// array is indexed by the 32-bit lower bit from file_entry_new hwcap field.  A malformed
+// extension leaves no subdirectory, so no glibc-hwcaps entry is usable while the regular
+// ones still are (the loader glibc_hwcaps_priorities_init).
 fn parse_ld_so_cache_glibc_hwcap(
     data: &[u8],
     initial: usize,
     extension_offset: u32,
-) -> Result<Vec<String>> {
-    if extension_offset == 0 {
-        return Ok(Vec::<String>::new());
-    }
-    let invalid = || Error::other("Invalid cache extension");
-
-    let offset = initial
-        .checked_add(extension_offset as usize)
-        .ok_or_else(invalid)?;
-    let ext: cache_extension = read_at(data, offset).ok_or_else(invalid)?;
-    if ext.magic != cache_extension_magic {
-        return Err(Error::other("Invalid cache_extension magic"));
-    }
-
-    // Stop at the first section out of the file, so a bogus count does not
-    // allocate more than the file size.
-    let directory = offset + CACHE_EXTENSION_LEN;
-    let sections = (0..ext.count as usize)
-        .map(|i| {
-            i.checked_mul(CACHE_EXTENSION_SECTION_LEN)
-                .and_then(|len| len.checked_add(directory))
-                .and_then(|offset| read_at::<cache_extension_section>(data, offset))
-        })
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(invalid)?;
-
-    // Return an empty set if the cache does not have any glibc-hwcap extension.
-    let mut r = Vec::<String>::new();
-    for ext_sec in sections {
-        let section = initial
-            .checked_add(ext_sec.offset as usize)
-            .and_then(|start| Some(start..start.checked_add(ext_sec.size as usize)?))
-            .and_then(|range| data.get(range))
-            .ok_or_else(invalid)?;
-
-        if ext_sec.tag == CACHE_EXTENSION_TAG_GLIBC_HWCAPS {
-            for idx in section.as_chunks().0 {
-                r.push(read_string(data, initial, u32::from_ne_bytes(*idx))?);
-            }
-        }
-    }
-    Ok(r)
+) -> Vec<Option<Vec<u8>>> {
+    let Some(section) = glibc_hwcaps_section(data, initial, extension_offset) else {
+        return Vec::new();
+    };
+    section
+        .as_chunks()
+        .0
+        .iter()
+        .map(|idx| read_bytes(data, initial, u32::from_ne_bytes(*idx)).map(<[u8]>::to_vec))
+        .collect()
 }
 
 fn parse_cache(data: &[u8]) -> Result<CacheFile> {
@@ -428,7 +457,7 @@ fn parse_cache(data: &[u8]) -> Result<CacheFile> {
 // (lower is better), or zero for one it does not search.  Both lists are
 // merged sorted by name, as glibc glibc_hwcaps_priorities_init does (the
 // cache lists them sorted).
-fn hwcaps_priorities(hwcaps: &[String], supported: &[&str]) -> Vec<u32> {
+fn hwcaps_priorities(hwcaps: &[Option<Vec<u8>>], supported: &[&str]) -> Vec<u32> {
     let mut active: Vec<(&str, u32)> = supported.iter().copied().zip(1..).collect();
     active.sort_by(|a, b| a.0.cmp(b.0));
     let mut active = active.into_iter().peekable();
@@ -436,10 +465,11 @@ fn hwcaps_priorities(hwcaps: &[String], supported: &[&str]) -> Vec<u32> {
     hwcaps
         .iter()
         .map(|name| loop {
-            let Some((subdir, priority)) = active.peek() else {
+            // A name out of the file has no priority.
+            let (Some(name), Some((subdir, priority))) = (name, active.peek()) else {
                 break 0;
             };
-            match name.as_str().cmp(subdir) {
+            match name.as_slice().cmp(subdir.as_bytes()) {
                 std::cmp::Ordering::Equal => {
                     let priority = *priority;
                     active.next();
@@ -457,7 +487,7 @@ fn hwcaps_priorities(hwcaps: &[String], supported: &[&str]) -> Vec<u32> {
 // The search state of a name (glibc search_cache).
 #[derive(Default)]
 struct Search<'a> {
-    best: Option<&'a str>,
+    best: Option<&'a CacheEntry>,
     // The priority of the glibc-hwcaps entry selected, if any.
     priority: u32,
     done: bool,
@@ -507,13 +537,18 @@ fn select_entries(
             search.priority = priority;
         }
 
-        search.best = Some(&entry.path);
+        search.best = Some(entry);
         search.done = !named_hwcap;
     }
 
+    // A path that is not valid UTF-8 resolves nothing, as if the loader failed
+    // to open it.
     searches
         .into_iter()
-        .filter_map(|(name, search)| Some((name.to_string(), pathutils::get_path(&search.best?)?)))
+        .filter_map(|(name, search)| {
+            let path = search.best?.path.as_ref()?;
+            Some((name.to_string(), pathutils::get_path(path)?))
+        })
         .collect()
 }
 
@@ -525,8 +560,11 @@ pub fn parse_ld_so_cache<P: AsRef<Path>>(
 ) -> Result<LdCache> {
     // The file is small, and the loader maps it whole as well.
     let file = parse_cache(&fs::read(filename)?)?;
-    // And obtain the current machine supported glibc-hwcap subfolder.
-    let supported = hwcap::hwcap_supported()?;
+    // And obtain the current machine supported glibc-hwcap subfolder.  A
+    // machine whose capabilities can not be read (the auxiliary vector on a
+    // chroot without /proc) is taken as supporting none, which still leaves
+    // the regular entries.
+    let supported = hwcap::hwcap_supported().unwrap_or_default();
     Ok(select_entries(
         &file, ei_class, e_machine, e_flags, &supported,
     ))
@@ -606,6 +644,24 @@ mod tests {
         }
         cache
     }
+
+    // Replace the first FROM bytes of CACHE with TO.
+    fn patch(cache: &mut [u8], from: &[u8], to: &[u8]) {
+        let at = cache.windows(from.len()).position(|w| w == from).unwrap();
+        cache[at..at + to.len()].copy_from_slice(to);
+    }
+
+    // Set the u32 at OFFSET of CACHE.
+    fn set_u32(cache: &mut [u8], offset: usize, value: u32) {
+        cache[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+    }
+
+    // The offset of the value field of the INDEX entry of a new format cache,
+    // and of the extension_offset header field.
+    fn entry_value(index: usize) -> usize {
+        CACHE_FILE_NEW_LEN + index * FILE_ENTRY_NEW_LEN + 8
+    }
+    const EXTENSION_OFFSET: usize = 32;
 
     fn select(cache: &[u8], supported: &[&str]) -> LdCache {
         let file = parse_cache(cache).unwrap();
@@ -743,6 +799,72 @@ mod tests {
             (&[], "/opt"),
         ] {
             assert_eq!(select(&cache, supported)["liblzma.so.5"], dir);
+        }
+    }
+
+    #[test]
+    fn invalid_strings_affect_their_entry_only() {
+        let mut cache = build_cache(
+            &[
+                (X86_64, "libbar.so.1", "/opt/libbar.so.1", 0),
+                (X86_64, "libbar.so.1", "/usr/lib/libbar.so.1", 0),
+                (X86_64, "libbad.so.1", "/usr/lib/libbad.so.1", 0),
+                (X86_64, "libc.so.6", "/usr/lib/libc.so.6", 0),
+                (X86_64, "libfoo.so.1", "/usr/xib/libfoo.so.1", 0),
+                (X86_64, "libfoo.so.1", "/usr/lib/libfoo.so.1", 0),
+            ],
+            &[],
+        );
+        // A path out of the file makes the loader skip the entry.
+        set_u32(&mut cache, entry_value(0), u32::MAX);
+        // No dependency names an entry that is not valid UTF-8.
+        patch(&mut cache, b"libbad", b"lib\xffad");
+        // The loader would try a path that is not valid UTF-8, which rldd can
+        // not, so the name resolves nothing through the cache.
+        patch(&mut cache, b"/usr/xib", b"/usr/\xffib");
+
+        let cache = select(&cache, &[]);
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache["libbar.so.1"], "/usr/lib");
+        assert_eq!(cache["libc.so.6"], "/usr/lib");
+    }
+
+    #[test]
+    fn malformed_extension_keeps_the_regular_entries() {
+        let good = build_cache(
+            &[
+                (
+                    X86_64,
+                    "liblzma.so.5",
+                    "/opt/x86-64-v3/liblzma.so.5",
+                    named(0),
+                ),
+                (X86_64, "liblzma.so.5", "/usr/lib/liblzma.so.5", 0),
+            ],
+            &["x86-64-v3"],
+        );
+        let supported = ["x86-64-v3", "x86-64-v2"];
+        assert_eq!(select(&good, &supported)["liblzma.so.5"], "/opt/x86-64-v3");
+
+        let extension = u32::from_ne_bytes(good[EXTENSION_OFFSET..][..4].try_into().unwrap());
+        let (ext, section) = (extension as usize, extension as usize + CACHE_EXTENSION_LEN);
+        let corruptions: [(usize, u32); 7] = [
+            // The magic.
+            (ext, 0),
+            // The extension offset, past the file and misaligned.
+            (EXTENSION_OFFSET, good.len() as u32),
+            (EXTENSION_OFFSET, extension + 2),
+            // The section count, past the file.
+            (ext + 4, u32::MAX),
+            // The section size, past the file, empty, and not a multiple of 4.
+            (section + 12, u32::MAX),
+            (section + 12, 0),
+            (section + 12, 3),
+        ];
+        for (offset, value) in corruptions {
+            let mut cache = good.clone();
+            set_u32(&mut cache, offset, value);
+            assert_eq!(select(&cache, &supported)["liblzma.so.5"], "/usr/lib");
         }
     }
 }
