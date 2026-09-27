@@ -332,13 +332,15 @@ fn replace_token(input: &str, token: &str, value: &str) -> String {
         .replace(&format!("${{{token}}}"), value)
 }
 
-// The FreeBSD, OpenBSD and Android loaders canonicalize the object path first
-// (realpath), so a symlink or a '..' component on a search path does not leak
-// into the $ORIGIN expansion.
+// The FreeBSD, OpenBSD, illumos and Android loaders canonicalize the object
+// path first (realpath), so a symlink or a '..' component on a search path
+// does not leak into the $ORIGIN expansion.
 #[cfg(any(
     target_os = "android",
     target_os = "freebsd",
     target_os = "openbsd",
+    target_os = "illumos",
+    target_os = "solaris",
     all(test, target_os = "linux")
 ))]
 fn canonical_origin_directory<P: AsRef<Path>>(filename: &P) -> Option<String> {

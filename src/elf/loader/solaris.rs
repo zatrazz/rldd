@@ -24,8 +24,23 @@ impl Loader for Solaris {
         single_search_list(elc);
     }
 
+    // The illumos loader expands $ORIGIN to the directory of the object
+    // resolved path (fullpath, with resolvepath(2)).
+    fn origin_directory<P: AsRef<Path>>(filename: &P, _melc: Option<&ElfInfo>) -> Option<String> {
+        canonical_origin_directory(filename)
+    }
+
     fn check_elf_header(elc: &ElfInfo) -> bool {
         elc.ei_osabi == ELFOSABI_SYSV || elc.ei_osabi == ELFOSABI_SOLARIS
+    }
+
+    // DF_1_NODEFLIB only skips the default directories (the DEFAULT rule of
+    // get_dir_list), and the illumos rules have no cache.
+    fn nodeflib_rule(step: SearchStep, _elc: &ElfInfo) -> NodeflibRule {
+        match step {
+            SearchStep::SystemDirs => NodeflibRule::Skip,
+            _ => NodeflibRule::Search,
+        }
     }
 }
 
@@ -53,5 +68,29 @@ mod tests {
                 SearchStep::SystemDirs
             ]
         ));
+    }
+
+    #[test]
+    fn nodeflib_skips_the_default_directories() {
+        let elc = ElfInfo::for_test(EM_X86_64, FileFlags(0));
+        let rule = |step| Solaris::nodeflib_rule(step, &elc);
+        assert_eq!(rule(SearchStep::SystemDirs), NodeflibRule::Skip);
+        assert_eq!(rule(SearchStep::LibraryPath), NodeflibRule::Search);
+        assert_eq!(rule(SearchStep::Rpath), NodeflibRule::Search);
+    }
+
+    // $ORIGIN is the directory of the resolved path.
+    #[cfg(unix)]
+    #[test]
+    fn origin_of_the_resolved_path() -> std::io::Result<()> {
+        use crate::tempdir::TempDir;
+        let tmpdir = TempDir::new()?;
+        let lib = tmpdir.path().join("lib");
+        fs::create_dir(&lib)?;
+        fs::write(lib.join("libx.so.1"), [])?;
+        std::os::unix::fs::symlink(lib.join("libx.so.1"), tmpdir.path().join("libx.so.1"))?;
+        let origin = Solaris::origin_directory(&tmpdir.path().join("libx.so.1"), None);
+        assert_eq!(origin.map(PathBuf::from), Some(fs::canonicalize(&lib)?));
+        Ok(())
     }
 }
