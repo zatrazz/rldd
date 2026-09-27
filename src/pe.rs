@@ -336,7 +336,11 @@ fn print_object_information(
         if ctx.apiset.is_empty() {
             format!("not found (version {})", ctx.apiset.version())
         } else {
-            format!("{} sets", ctx.apiset.len())
+            format!(
+                "{} sets, {} extensions",
+                ctx.apiset.len(),
+                ctx.apiset.extensions()
+            )
         }
     ));
     lines.push(format!(
