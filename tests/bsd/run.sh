@@ -191,7 +191,9 @@ run_host() {
 
     if [ "$host" = local ]; then
         rldd=$REPO_ROOT/target/release/rldd
-        if [ ! -x "$rldd" ] && ! (cd "$REPO_ROOT" && cargo build --quiet -r); then
+        # Always built (a no-op when up to date), so the sweep does not run a
+        # binary older than the sources.
+        if ! (cd "$REPO_ROOT" && cargo build --quiet -r); then
             fail "cargo build failed"
             return 1
         fi
