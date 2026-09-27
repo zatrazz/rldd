@@ -269,8 +269,6 @@ fn main() {
         std::process::exit(1);
     };
 
-    let mut exitcode = 0;
-
     for arg in opts.args {
         match resolve_binary(&mut ctx, &arg) {
             Ok(deptree) => {
@@ -285,7 +283,7 @@ fn main() {
                         for path in relocs.unused {
                             outln!("\t{path}");
                         }
-                        exitcode = 1;
+                        output::set_exit_status(1);
                     }
                     continue;
                 }
@@ -323,16 +321,16 @@ fn main() {
                                 undef.object, undef.name
                             );
                         }
-                        exitcode = 127;
+                        output::set_exit_status(127);
                     }
                 }
             }
             Err(e) => {
                 eprintln!("error: {}", print_error(&arg, e));
-                exitcode = 1;
+                output::set_exit_status(1);
             }
         }
     }
 
-    std::process::exit(exitcode);
+    std::process::exit(output::exit_status());
 }
